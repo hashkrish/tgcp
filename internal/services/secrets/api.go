@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"time"
@@ -122,6 +123,35 @@ func (c *Client) ListVersions(secretName string) ([]SecretVersion, error) {
 	}
 
 	return versions, nil
+}
+
+// AccessVersion fetches the actual secret payload for a specific version.
+// This is only ever called in direct response to an explicit user action
+// (the "reveal" keybinding) — never automatically on navigation.
+func (c *Client) AccessVersion(versionName string) (string, error) {
+	if demo.Enabled {
+		return "demo-secret-value", nil
+	}
+	if c.service == nil {
+		return "", fmt.Errorf("client not initialized")
+	}
+	resp, err := c.service.Projects.Secrets.Versions.Access(versionName).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to access secret version: %w", err)
+	}
+	if resp.Payload == nil {
+		return "", nil
+	}
+	// The wire representation of the payload is base64 (proto `bytes` field
+	// serialized to JSON); the generated client leaves it as a raw string,
+	// so decode it here to get the actual secret value.
+	decoded, err := base64.StdEncoding.DecodeString(resp.Payload.Data)
+	if err != nil {
+		// Not valid base64 for some reason — fall back to the raw string
+		// rather than failing the reveal outright.
+		return resp.Payload.Data, nil
+	}
+	return string(decoded), nil
 }
 
 // extractSecretName extracts the secret name from the full resource name

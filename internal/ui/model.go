@@ -14,6 +14,7 @@ import (
 	"github.com/yogirk/tgcp/internal/services/cloudbuild"
 	"github.com/yogirk/tgcp/internal/services/cloudrun"
 	"github.com/yogirk/tgcp/internal/services/cloudsql"
+	"github.com/yogirk/tgcp/internal/services/cloudtasks"
 	"github.com/yogirk/tgcp/internal/services/dataflow"
 	"github.com/yogirk/tgcp/internal/services/dataproc"
 	"github.com/yogirk/tgcp/internal/services/disks"
@@ -25,8 +26,10 @@ import (
 	"github.com/yogirk/tgcp/internal/services/logging"
 	"github.com/yogirk/tgcp/internal/services/net"
 	"github.com/yogirk/tgcp/internal/services/overview"
+	"github.com/yogirk/tgcp/internal/services/parametermanager"
 	"github.com/yogirk/tgcp/internal/services/pubsub"
 	"github.com/yogirk/tgcp/internal/services/redis"
+	"github.com/yogirk/tgcp/internal/services/scheduler"
 	"github.com/yogirk/tgcp/internal/services/secrets"
 	"github.com/yogirk/tgcp/internal/services/spanner"
 	"github.com/yogirk/tgcp/internal/ui/components"
@@ -334,7 +337,8 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Execute Command
 				if route := m.Navigation.ExecuteSelection(); route != nil {
 					// Route Logic
-					if route.View == core.ViewHome {
+					switch route.View {
+					case core.ViewHome:
 						// Check for Project Switch
 						if len(route.ID) > 15 && route.ID[:15] == "SWITCH_PROJECT:" {
 							newProjectID := route.ID[15:]
@@ -353,7 +357,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.ViewMode = ViewHome
 							m.Sidebar.Active = false
 						}
-					} else if route.View == core.ViewServiceList {
+					case core.ViewServiceList:
 						// Logic to switch service
 						m.ViewMode = ViewService
 						m.ActiveService = route.Service
@@ -391,7 +395,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.setFocus(FocusMain)
 						m.Sidebar.Active = false
-					} else if route.View == core.ViewProjectSwitcher {
+					case core.ViewProjectSwitcher:
 						// Trigger fetch projects
 						cmds = append(cmds, func() tea.Msg {
 							projects, err := m.ProjectManager.ListProjects(context.Background())
@@ -522,12 +526,9 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 				case "h":
-					// Only allow 'h' to switch focus if we are in sidebar
-					// In FocusMain, 'h' is reserved for SSH
-					if m.Focus == FocusSidebar {
-						// Actually 'h' in sidebar usually collapses or does nothing contextually
-						// But for now let's just keep 'left' behavior or ignore it for consistency
-					}
+					// 'h' is intentionally a no-op while in the sidebar (there is
+					// nothing further left to collapse to); in FocusMain it is
+					// reserved for SSH, so it is not forwarded there either.
 				case "right", "l":
 					if m.Focus == FocusSidebar && m.Sidebar.Visible {
 						m.setFocus(FocusMain)
@@ -728,7 +729,6 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						adjustedMsg := tea.MouseMsg{
 							X:      msg.X - m.Sidebar.Width,
 							Y:      msg.Y,
-							Type:   msg.Type,
 							Button: msg.Button,
 							Action: msg.Action,
 						}
@@ -898,6 +898,12 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	registry.Register("pubsub", func(cache *core.Cache) services.Service {
 		return pubsub.NewService(cache)
 	})
+	registry.Register("scheduler", func(cache *core.Cache) services.Service {
+		return scheduler.NewService(cache)
+	})
+	registry.Register("cloudtasks", func(cache *core.Cache) services.Service {
+		return cloudtasks.NewService(cache)
+	})
 	registry.Register("redis", func(cache *core.Cache) services.Service {
 		return redis.NewService(cache)
 	})
@@ -939,6 +945,9 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	})
 	registry.Register("secrets", func(cache *core.Cache) services.Service {
 		return secrets.NewService(cache)
+	})
+	registry.Register("parametermanager", func(cache *core.Cache) services.Service {
+		return parametermanager.NewService(cache)
 	})
 	registry.Register("cloudbuild", func(cache *core.Cache) services.Service {
 		return cloudbuild.NewService(cache)

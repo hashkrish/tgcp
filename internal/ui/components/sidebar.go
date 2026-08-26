@@ -32,10 +32,10 @@ var groupBreaks = map[int]bool{
 	3:  true, // After Compute (GCE, GKE, Cloud Run)
 	5:  true, // After Storage (GCS, Disks)
 	10: true, // After Databases (Cloud SQL, Spanner, Bigtable, Memorystore, Firestore)
-	14: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub)
-	17: true, // After Security & Networking (IAM, Secrets, Networking)
-	18: true, // After Observability (Cloud Logging)
-	20: true, // After DevOps (Cloud Build, Artifact Registry)
+	16: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
+	20: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking)
+	21: true, // After Observability (Cloud Logging)
+	23: true, // After DevOps (Cloud Build, Artifact Registry)
 }
 
 // Icons here are deliberately plain ASCII rather than Unicode
@@ -66,9 +66,12 @@ func NewSidebar() SidebarModel {
 			{Name: "Dataflow", ShortName: "dataflow", Icon: "~"},
 			{Name: "Dataproc", ShortName: "dataproc", Icon: "%"},
 			{Name: "Pub/Sub", ShortName: "pubsub", Icon: "P"},
+			{Name: "Cloud Scheduler", ShortName: "scheduler", Icon: "Z"},
+			{Name: "Cloud Tasks", ShortName: "cloudtasks", Icon: "X"},
 			// Security & Networking
 			{Name: "IAM", ShortName: "iam", Icon: "&"},
 			{Name: "Secrets", ShortName: "secrets", Icon: "$"},
+			{Name: "Parameter Manager", ShortName: "parametermanager", Icon: "!"},
 			{Name: "Networking", ShortName: "net", Icon: "="},
 			// Observability
 			{Name: "Cloud Logging", ShortName: "logs", Icon: "L"},
@@ -189,7 +192,7 @@ func (m SidebarModel) View() string {
 		} else {
 			style := styles.UnselectedItemStyle
 			if item.IsComing {
-				style = style.Copy().Foreground(styles.ColorTextMuted)
+				style = style.Foreground(styles.ColorTextMuted)
 			}
 			renderedItem = style.Render(displayName)
 		}

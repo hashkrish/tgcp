@@ -1,4 +1,4 @@
-package secrets
+package parametermanager
 
 import (
 	"context"
@@ -13,24 +13,17 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
-const CacheTTL = 60 * time.Second // Secrets rarely change
+const CacheTTL = 60 * time.Second // Parameters rarely change
 
 // -----------------------------------------------------------------------------
 // Message Types
 // -----------------------------------------------------------------------------
 
 type tickMsg time.Time
-type secretsMsg []Secret
-type versionsMsg []SecretVersion
+type parametersMsg []Parameter
+type versionsMsg []ParameterVersion
+type valueMsg string
 type errMsg error
-type revealedMsg string
-
-// revealErrMsg is a distinct concrete type (not `type revealErrMsg error`)
-// so it doesn't collide with errMsg in the tea.Msg type switch below —
-// two named interface types with the same method set (both just wrapping
-// `error`) match identically in a type switch, silently making whichever
-// case is listed second unreachable (caught by staticcheck's SA4020).
-type revealErrMsg struct{ err error }
 
 // ViewState defines the current UI state
 type ViewState int
@@ -46,7 +39,7 @@ const (
 // Service Definition
 // -----------------------------------------------------------------------------
 
-// Service implements the services.Service interface for Secret Manager
+// Service implements the services.Service interface for Parameter Manager
 type Service struct {
 	client    *Client
 	projectID string
@@ -59,36 +52,30 @@ type Service struct {
 	table         *components.StandardTable
 	versionTable  *components.StandardTable
 	filter        components.FilterModel
-	filterSession components.FilterSession[Secret]
+	filterSession components.FilterSession[Parameter]
 	spinner       components.SpinnerModel
 
 	// Data State
-	secrets  []Secret
-	versions []SecretVersion
-	err      error
+	parameters []Parameter
+	versions   []ParameterVersion
+	err        error
 
 	// View State
-	viewState       ViewState
-	selectedSecret  *Secret
-	selectedVersion *SecretVersion
-
-	// Reveal state — session-only, never persisted or cached. Only the
-	// "is currently revealed" boolean and the fetched value live here, and
-	// both are cleared whenever the user navigates away from the version
-	// detail view (see clearReveal).
-	revealed      bool
-	revealedValue string
-	revealErr     error
+	viewState         ViewState
+	selectedParameter *Parameter
+	selectedVersion   *ParameterVersion
+	value             string
+	valueErr          error
 
 	// Cache
 	cache *core.Cache
 }
 
-// NewService creates a new Secret Manager service
+// NewService creates a new Parameter Manager service
 func NewService(cache *core.Cache) *Service {
 	columns := []table.Column{
 		{Title: "Name", Width: 35},
-		{Title: "Replication", Width: 15},
+		{Title: "Format", Width: 15},
 		{Title: "Labels", Width: 25},
 		{Title: "Created", Width: 20},
 	}
@@ -97,7 +84,7 @@ func NewService(cache *core.Cache) *Service {
 
 	versionColumns := []table.Column{
 		{Title: "Version", Width: 10},
-		{Title: "State", Width: 12},
+		{Title: "Disabled", Width: 12},
 		{Title: "Created", Width: 25},
 	}
 	vt := components.NewStandardTable(versionColumns)
@@ -105,21 +92,21 @@ func NewService(cache *core.Cache) *Service {
 	svc := &Service{
 		table:        t,
 		versionTable: vt,
-		filter:       components.NewFilterWithPlaceholder("Filter secrets..."),
+		filter:       components.NewFilterWithPlaceholder("Filter parameters..."),
 		spinner:      components.NewSpinner(),
 		viewState:    ViewList,
 		cache:        cache,
 	}
-	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredSecrets, svc.updateTable)
+	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredParameters, svc.updateTable)
 	return svc
 }
 
 func (s *Service) Name() string {
-	return "Secret Manager"
+	return "Parameter Manager"
 }
 
 func (s *Service) ShortName() string {
-	return "secrets"
+	return "parametermanager"
 }
 
 func (s *Service) HelpText() string {
@@ -131,10 +118,7 @@ func (s *Service) HelpText() string {
 	case ViewVersions:
 		return "Enter:View Version  Esc/q:Back to Detail"
 	case ViewVersionDetail:
-		if s.revealed {
-			return "v:Hide Value  Esc/q:Back"
-		}
-		return "v:Reveal Value  Esc/q:Back"
+		return "Esc/q:Back"
 	default:
 		return ""
 	}
@@ -160,7 +144,7 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 }
 
 func (s *Service) Init() tea.Cmd {
-	return tea.Batch(s.spinner.Start(""), s.fetchSecretsCmd(false), s.tick())
+	return tea.Batch(s.spinner.Start(""), s.fetchParametersCmd(false), s.tick())
 }
 
 func (s *Service) tick() tea.Cmd {
@@ -172,29 +156,21 @@ func (s *Service) tick() tea.Cmd {
 func (s *Service) Refresh() tea.Cmd {
 	return tea.Batch(
 		s.spinner.Start(""),
-		s.fetchSecretsCmd(true),
+		s.fetchParametersCmd(true),
 	)
 }
 
 func (s *Service) Reset() {
 	s.viewState = ViewList
-	s.selectedSecret = nil
+	s.selectedParameter = nil
+	s.selectedVersion = nil
 	s.versions = nil
+	s.value = ""
+	s.valueErr = nil
 	s.err = nil
 	s.table.SetCursor(0)
 	s.versionTable.SetCursor(0)
 	s.filter.ExitFilterMode()
-	s.clearReveal()
-}
-
-// clearReveal wipes any revealed secret value and the revealed flag. It is
-// called any time the user leaves the version detail view, so a revealed
-// value never survives navigation and is never cached anywhere.
-func (s *Service) clearReveal() {
-	s.selectedVersion = nil
-	s.revealed = false
-	s.revealedValue = ""
-	s.revealErr = nil
 }
 
 func (s *Service) IsRootView() bool {
@@ -222,12 +198,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
-		return s, tea.Batch(s.fetchSecretsCmd(false), s.tick())
+		return s, tea.Batch(s.fetchParametersCmd(false), s.tick())
 
-	case secretsMsg:
+	case parametersMsg:
 		s.spinner.Stop()
-		s.secrets = msg
-		s.filterSession.Apply(s.secrets)
+		s.parameters = msg
+		s.filterSession.Apply(s.parameters)
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case versionsMsg:
@@ -236,18 +212,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.updateVersionTable(msg)
 		return s, nil
 
-	case revealedMsg:
+	case valueMsg:
 		s.spinner.Stop()
-		s.revealed = true
-		s.revealedValue = string(msg)
-		s.revealErr = nil
-		return s, nil
-
-	case revealErrMsg:
-		s.spinner.Stop()
-		s.revealed = false
-		s.revealedValue = ""
-		s.revealErr = msg.err
+		s.value = string(msg)
+		s.valueErr = nil
 		return s, nil
 
 	case errMsg:
@@ -302,9 +270,9 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "r":
 			return s, s.Refresh()
 		case "enter":
-			secrets := s.getCurrentSecrets()
-			if idx := s.table.Cursor(); idx >= 0 && idx < len(secrets) {
-				s.selectedSecret = &secrets[idx]
+			params := s.getCurrentParameters()
+			if idx := s.table.Cursor(); idx >= 0 && idx < len(params) {
+				s.selectedParameter = &params[idx]
 				s.viewState = ViewDetail
 			}
 			return s, nil
@@ -319,16 +287,16 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q":
 			s.viewState = ViewList
-			s.selectedSecret = nil
+			s.selectedParameter = nil
 			s.versions = nil
 			return s, nil
 		case "v":
-			// Fetch versions for selected secret
-			if s.selectedSecret != nil {
+			// Fetch versions for selected parameter
+			if s.selectedParameter != nil {
 				s.viewState = ViewVersions
 				return s, tea.Batch(
 					s.spinner.Start(""),
-					s.fetchVersionsCmd(s.selectedSecret.FullName),
+					s.fetchVersionsCmd(s.selectedParameter.FullName),
 				)
 			}
 		}
@@ -340,9 +308,17 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return s, nil
 		case "enter":
 			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
-				s.clearReveal()
 				s.selectedVersion = &s.versions[idx]
+				s.value = ""
+				s.valueErr = nil
 				s.viewState = ViewVersionDetail
+				// Parameter Manager values are non-secret config, so unlike
+				// Secret Manager there is no reveal-gating: fetch and show
+				// the value as soon as the version is selected.
+				return s, tea.Batch(
+					s.spinner.Start(""),
+					s.fetchValueCmd(s.selectedVersion.FullName),
+				)
 			}
 			return s, nil
 		}
@@ -356,25 +332,10 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "esc", "q":
 			s.viewState = ViewVersions
-			s.clearReveal()
+			s.selectedVersion = nil
+			s.value = ""
+			s.valueErr = nil
 			return s, nil
-		case "v":
-			// Explicit, deliberate reveal/hide toggle. The value is never
-			// fetched automatically just from navigating here — only this
-			// keypress triggers the API call.
-			if s.selectedVersion == nil {
-				return s, nil
-			}
-			if s.revealed {
-				// Hide: drop the cached plaintext immediately.
-				s.revealed = false
-				s.revealedValue = ""
-				return s, nil
-			}
-			return s, tea.Batch(
-				s.spinner.Start(""),
-				s.fetchRevealCmd(s.selectedVersion.FullName),
-			)
 		}
 	}
 
@@ -387,7 +348,7 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (s *Service) View() string {
 	if s.err != nil {
-		return components.RenderError(s.err, s.Name(), "Secrets")
+		return components.RenderError(s.err, s.Name(), "Parameters")
 	}
 
 	if s.spinner.IsActive() {
@@ -420,64 +381,56 @@ func (s *Service) renderListView() string {
 }
 
 func (s *Service) renderDetailView() string {
-	if s.selectedSecret == nil {
-		return "No secret selected"
+	if s.selectedParameter == nil {
+		return "No parameter selected"
 	}
 
-	sec := s.selectedSecret
+	p := s.selectedParameter
 
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project: %s", s.projectID),
 		s.Name(),
-		sec.Name,
+		p.Name,
 	)
 
 	// Format labels
 	labelStr := "-"
-	if len(sec.Labels) > 0 {
+	if len(p.Labels) > 0 {
 		var labels []string
-		for k, v := range sec.Labels {
+		for k, v := range p.Labels {
 			labels = append(labels, fmt.Sprintf("%s=%s", k, v))
 		}
 		labelStr = fmt.Sprintf("%v", labels)
 	}
 
 	card := components.DetailCard(components.DetailCardOpts{
-		Title: "Secret Details",
+		Title: "Parameter Details",
 		Rows: []components.KeyValue{
-			{Key: "Name", Value: sec.Name},
-			{Key: "Replication", Value: sec.Replication},
+			{Key: "Name", Value: p.Name},
+			{Key: "Format", Value: p.Format},
 			{Key: "Labels", Value: labelStr},
-			{Key: "Created", Value: sec.CreateTime.Local().Format("2006-01-02 15:04:05")},
-			{Key: "Resource Name", Value: sec.FullName},
+			{Key: "Created", Value: p.CreateTime.Local().Format("2006-01-02 15:04:05")},
+			{Key: "Resource Name", Value: p.FullName},
 		},
 		FooterHint: "v Versions | q Back",
 	})
-
-	// Security note
-	note := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("241")).
-		Italic(true).
-		Render("Note: Secret values are not displayed for security reasons.")
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
 		"",
 		card,
-		"",
-		note,
 	)
 }
 
 func (s *Service) renderVersionsView() string {
-	if s.selectedSecret == nil {
-		return "No secret selected"
+	if s.selectedParameter == nil {
+		return "No parameter selected"
 	}
 
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project: %s", s.projectID),
 		s.Name(),
-		s.selectedSecret.Name,
+		s.selectedParameter.Name,
 		"Versions",
 	)
 
@@ -489,7 +442,7 @@ func (s *Service) renderVersionsView() string {
 }
 
 func (s *Service) renderVersionDetailView() string {
-	if s.selectedSecret == nil || s.selectedVersion == nil {
+	if s.selectedParameter == nil || s.selectedVersion == nil {
 		return "No version selected"
 	}
 
@@ -498,45 +451,38 @@ func (s *Service) renderVersionDetailView() string {
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project: %s", s.projectID),
 		s.Name(),
-		s.selectedSecret.Name,
+		s.selectedParameter.Name,
 		"Versions",
 		ver.Name,
 	)
 
 	rows := []components.KeyValue{
 		{Key: "Version", Value: ver.Name},
-		{Key: "State", Value: ver.State},
+		{Key: "Disabled", Value: fmt.Sprintf("%v", ver.Disabled)},
 		{Key: "Created", Value: ver.CreateTime.Local().Format("2006-01-02 15:04:05")},
 		{Key: "Resource Name", Value: ver.FullName},
 	}
 
+	card := components.DetailCard(components.DetailCardOpts{
+		Title:      "Parameter Version Details",
+		Rows:       rows,
+		FooterHint: "q Back",
+	})
+
 	var valueBlock string
-	switch {
-	case s.revealErr != nil:
+	if s.valueErr != nil {
 		valueBlock = lipgloss.NewStyle().
 			Foreground(styles.ColorError).
-			Render(fmt.Sprintf("Failed to reveal value: %v", s.revealErr))
-	case s.revealed:
-		warning := lipgloss.NewStyle().
-			Foreground(styles.ColorWarning).
-			Bold(true).
-			Render("[!] VISIBLE - press v to hide")
+			Render(fmt.Sprintf("Failed to load value: %v", s.valueErr))
+	} else {
+		label := lipgloss.NewStyle().
+			Foreground(styles.ColorTextMuted).
+			Render("Value:")
 		value := lipgloss.NewStyle().
 			Foreground(styles.ColorTextPrimary).
-			Render(s.revealedValue)
-		valueBlock = lipgloss.JoinVertical(lipgloss.Left, warning, "", value)
-	default:
-		valueBlock = lipgloss.NewStyle().
-			Foreground(styles.ColorTextMuted).
-			Italic(true).
-			Render("Value hidden. Press v to reveal (fetches from Secret Manager).")
+			Render(s.value)
+		valueBlock = lipgloss.JoinVertical(lipgloss.Left, label, "", value)
 	}
-
-	card := components.DetailCard(components.DetailCardOpts{
-		Title:      "Secret Version Details",
-		Rows:       rows,
-		FooterHint: "v Reveal/Hide | q Back",
-	})
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
@@ -551,14 +497,14 @@ func (s *Service) renderVersionDetailView() string {
 // Data Fetching
 // -----------------------------------------------------------------------------
 
-func (s *Service) fetchSecretsCmd(force bool) tea.Cmd {
+func (s *Service) fetchParametersCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		cacheKey := fmt.Sprintf("secrets:%s", s.projectID)
+		cacheKey := fmt.Sprintf("parametermanager:%s", s.projectID)
 
 		if !force && s.cache != nil {
 			if val, found := s.cache.Get(cacheKey); found {
-				if secrets, ok := val.([]Secret); ok {
-					return secretsMsg(secrets)
+				if params, ok := val.([]Parameter); ok {
+					return parametersMsg(params)
 				}
 			}
 		}
@@ -567,26 +513,26 @@ func (s *Service) fetchSecretsCmd(force bool) tea.Cmd {
 			return errMsg(fmt.Errorf("client not initialized"))
 		}
 
-		secrets, err := s.client.ListSecrets(s.projectID)
+		params, err := s.client.ListParameters(s.projectID)
 		if err != nil {
 			return errMsg(err)
 		}
 
 		if s.cache != nil {
-			s.cache.Set(cacheKey, secrets, CacheTTL)
+			s.cache.Set(cacheKey, params, CacheTTL)
 		}
 
-		return secretsMsg(secrets)
+		return parametersMsg(params)
 	}
 }
 
-func (s *Service) fetchVersionsCmd(secretName string) tea.Cmd {
+func (s *Service) fetchVersionsCmd(parameterName string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
 			return errMsg(fmt.Errorf("client not initialized"))
 		}
 
-		versions, err := s.client.ListVersions(secretName)
+		versions, err := s.client.ListVersions(parameterName)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -595,25 +541,18 @@ func (s *Service) fetchVersionsCmd(secretName string) tea.Cmd {
 	}
 }
 
-// fetchRevealCmd fetches the plaintext value for a specific secret version.
-// This is only ever invoked from the explicit "v" (reveal) keypress in
-// ViewVersionDetail — never from Init/Refresh/tick or as a side effect of
-// simply navigating to a version. The fetched value is never logged (see
-// utils.Log usage elsewhere in this package — there is none here) and is
-// only ever held in-memory in s.revealedValue, cleared on Hide or on
-// leaving the view.
-func (s *Service) fetchRevealCmd(versionFullName string) tea.Cmd {
+func (s *Service) fetchValueCmd(versionFullName string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return revealErrMsg{err: fmt.Errorf("client not initialized")}
+			return errMsg(fmt.Errorf("client not initialized"))
 		}
 
-		value, err := s.client.AccessVersion(versionFullName)
+		value, err := s.client.GetVersionPayload(versionFullName)
 		if err != nil {
-			return revealErrMsg{err: err}
+			return errMsg(err)
 		}
 
-		return revealedMsg(value)
+		return valueMsg(value)
 	}
 }
 
@@ -621,15 +560,15 @@ func (s *Service) fetchRevealCmd(versionFullName string) tea.Cmd {
 // Table Updates
 // -----------------------------------------------------------------------------
 
-func (s *Service) updateTable(secrets []Secret) {
-	rows := make([]table.Row, len(secrets))
-	for i, sec := range secrets {
+func (s *Service) updateTable(params []Parameter) {
+	rows := make([]table.Row, len(params))
+	for i, p := range params {
 		// Format labels for display
 		labelStr := "-"
-		if len(sec.Labels) > 0 {
-			count := len(sec.Labels)
+		if len(p.Labels) > 0 {
+			count := len(p.Labels)
 			if count == 1 {
-				for k, v := range sec.Labels {
+				for k, v := range p.Labels {
 					labelStr = fmt.Sprintf("%s=%s", k, v)
 				}
 			} else {
@@ -638,41 +577,41 @@ func (s *Service) updateTable(secrets []Secret) {
 		}
 
 		rows[i] = table.Row{
-			sec.Name,
-			sec.Replication,
+			p.Name,
+			p.Format,
 			labelStr,
-			sec.CreateTime.Local().Format("2006-01-02 15:04"),
+			p.CreateTime.Local().Format("2006-01-02 15:04"),
 		}
 	}
 	s.table.SetRows(rows)
 }
 
-func (s *Service) updateVersionTable(versions []SecretVersion) {
+func (s *Service) updateVersionTable(versions []ParameterVersion) {
 	rows := make([]table.Row, len(versions))
 	for i, v := range versions {
 		rows[i] = table.Row{
 			v.Name,
-			components.RenderStatus(v.State),
+			fmt.Sprintf("%v", v.Disabled),
 			v.CreateTime.Local().Format("2006-01-02 15:04:05"),
 		}
 	}
 	s.versionTable.SetRows(rows)
 }
 
-func (s *Service) getCurrentSecrets() []Secret {
-	return s.getFilteredSecrets(s.secrets, s.filter.Value())
+func (s *Service) getCurrentParameters() []Parameter {
+	return s.getFilteredParameters(s.parameters, s.filter.Value())
 }
 
-func (s *Service) getFilteredSecrets(secrets []Secret, query string) []Secret {
+func (s *Service) getFilteredParameters(params []Parameter, query string) []Parameter {
 	if query == "" {
-		return secrets
+		return params
 	}
-	return components.FilterSlice(secrets, query, func(sec Secret, q string) bool {
+	return components.FilterSlice(params, query, func(p Parameter, q string) bool {
 		// Build label string for search
 		var labelStr string
-		for k, v := range sec.Labels {
+		for k, v := range p.Labels {
 			labelStr += k + "=" + v + " "
 		}
-		return components.ContainsMatch(sec.Name, sec.Replication, labelStr)(q)
+		return components.ContainsMatch(p.Name, p.Format, labelStr)(q)
 	})
 }

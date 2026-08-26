@@ -45,8 +45,11 @@ var serviceIcons = map[string]string{
 	"dataflow":         "~",
 	"dataproc":         "%",
 	"pubsub":           "P",
+	"scheduler":        "Z",
+	"cloudtasks":       "X",
 	"iam":              "&",
 	"secrets":          "$",
+	"parametermanager": "!",
 	"net":              "=",
 	"logs":             "L",
 	"cloudbuild":       "^",
@@ -129,6 +132,8 @@ func NewHomeMenu() HomeMenuModel {
 					{Name: "Dataflow", ShortName: "dataflow"},
 					{Name: "Dataproc", ShortName: "dataproc"},
 					{Name: "Pub/Sub", ShortName: "pubsub"},
+					{Name: "Cloud Scheduler", ShortName: "scheduler"},
+					{Name: "Cloud Tasks", ShortName: "cloudtasks"},
 				},
 			},
 			{
@@ -137,6 +142,7 @@ func NewHomeMenu() HomeMenuModel {
 				Services: []ServiceItem{
 					{Name: "IAM & Admin", ShortName: "iam"},
 					{Name: "Secret Manager", ShortName: "secrets"},
+					{Name: "Parameter Manager", ShortName: "parametermanager"},
 					{Name: "VPC Network", ShortName: "net"},
 				},
 			},
@@ -576,7 +582,7 @@ func (m HomeMenuModel) View() string {
 			} else {
 				style := styles.UnselectedItemStyle
 				if entry.service.IsComing {
-					style = style.Copy().Foreground(styles.ColorTextMuted)
+					style = style.Foreground(styles.ColorTextMuted)
 				}
 				lines = append(lines, style.Render(display))
 			}
@@ -620,7 +626,7 @@ func (m HomeMenuModel) View() string {
 	// so add that padding back or the filter bar/service names wrap onto
 	// an extra line — which then desyncs the fixed-height budget above.
 	boxWidth := textWidth + 2*styles.SpaceM
-	menuBox := styles.PrimaryBoxStyle.Copy().
+	menuBox := styles.PrimaryBoxStyle.
 		Width(boxWidth).
 		Height(boxHeight).
 		Render(content)
