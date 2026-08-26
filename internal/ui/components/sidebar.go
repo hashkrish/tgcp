@@ -38,38 +38,43 @@ var groupBreaks = map[int]bool{
 	20: true, // After DevOps (Cloud Build, Artifact Registry)
 }
 
+// Icons here are deliberately plain ASCII rather than Unicode
+// symbols/dingbats — see the comment on serviceIcons in home_menu.go for
+// why: ambiguous-width glyphs can render as 2 columns in some terminals
+// (confirmed in tmux) while Bubble Tea/lipgloss measure them as 1, silently
+// misaligning every row below the offending icon as you scroll.
 func NewSidebar() SidebarModel {
 	return SidebarModel{
 		Items: []ServiceItem{
 			// Overview (top-level)
-			{Name: "Overview", ShortName: "overview", Icon: "◉", Active: true},
+			{Name: "Overview", ShortName: "overview", Icon: "@", Active: true},
 			// Compute
-			{Name: "Compute Engine", ShortName: "gce", Icon: "⚙"},
-			{Name: "Kubernetes", ShortName: "gke", Icon: "☸"},
-			{Name: "Cloud Run", ShortName: "run", Icon: "▷"},
+			{Name: "Compute Engine", ShortName: "gce", Icon: "#"},
+			{Name: "Kubernetes", ShortName: "gke", Icon: "K"},
+			{Name: "Cloud Run", ShortName: "run", Icon: ">"},
 			// Storage
-			{Name: "Cloud Storage", ShortName: "gcs", Icon: "▤"},
-			{Name: "Disks", ShortName: "disks", Icon: "◔"},
+			{Name: "Cloud Storage", ShortName: "gcs", Icon: "S"},
+			{Name: "Disks", ShortName: "disks", Icon: "D"},
 			// Databases
-			{Name: "Cloud SQL", ShortName: "sql", Icon: "⛁"},
-			{Name: "Spanner", ShortName: "spanner", Icon: "⬡"},
-			{Name: "Bigtable", ShortName: "bigtable", Icon: "▦"},
-			{Name: "Memorystore", ShortName: "redis", Icon: "◇"},
-			{Name: "Firestore", ShortName: "firestore", Icon: "◲"},
+			{Name: "Cloud SQL", ShortName: "sql", Icon: "Q"},
+			{Name: "Spanner", ShortName: "spanner", Icon: "N"},
+			{Name: "Bigtable", ShortName: "bigtable", Icon: "T"},
+			{Name: "Memorystore", ShortName: "redis", Icon: "M"},
+			{Name: "Firestore", ShortName: "firestore", Icon: "F"},
 			// Data & Analytics
-			{Name: "BigQuery", ShortName: "bq", Icon: "⊞"},
-			{Name: "Dataflow", ShortName: "dataflow", Icon: "⇢"},
-			{Name: "Dataproc", ShortName: "dataproc", Icon: "⎈"},
-			{Name: "Pub/Sub", ShortName: "pubsub", Icon: "⇌"},
+			{Name: "BigQuery", ShortName: "bq", Icon: "B"},
+			{Name: "Dataflow", ShortName: "dataflow", Icon: "~"},
+			{Name: "Dataproc", ShortName: "dataproc", Icon: "%"},
+			{Name: "Pub/Sub", ShortName: "pubsub", Icon: "P"},
 			// Security & Networking
-			{Name: "IAM", ShortName: "iam", Icon: "⚿"},
-			{Name: "Secrets", ShortName: "secrets", Icon: "✦"},
-			{Name: "Networking", ShortName: "net", Icon: "⇄"},
+			{Name: "IAM", ShortName: "iam", Icon: "&"},
+			{Name: "Secrets", ShortName: "secrets", Icon: "$"},
+			{Name: "Networking", ShortName: "net", Icon: "="},
 			// Observability
-			{Name: "Cloud Logging", ShortName: "logs", Icon: "☰"},
+			{Name: "Cloud Logging", ShortName: "logs", Icon: "L"},
 			// DevOps
-			{Name: "Cloud Build", ShortName: "cloudbuild", Icon: "◈"},
-			{Name: "Artifact Registry", ShortName: "artifactregistry", Icon: "▣"},
+			{Name: "Cloud Build", ShortName: "cloudbuild", Icon: "^"},
+			{Name: "Artifact Registry", ShortName: "artifactregistry", Icon: "A"},
 		},
 		Cursor:  0,
 		Active:  true, // Default focus on start

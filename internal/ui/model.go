@@ -181,7 +181,9 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.Toast.DismissCmd()
 
 	case components.ToastDismissMsg:
-		m.Toast = nil
+		if m.Toast != nil && m.Toast.CreatedAt.Equal(msg.CreatedAt) {
+			m.Toast = nil
+		}
 		return m, nil
 
 	// Version Update Check
@@ -258,6 +260,13 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "ctrl+c":
 				return m, tea.Quit
+			case "ctrl+l":
+				// Manual force-redraw: some terminal multiplexers can desync
+				// their own screen buffer from bubbletea's diffed output
+				// under bursts of rapid input, leaving stale content on
+				// screen. Ctrl+L is the standard terminal convention for
+				// "redraw" and forces a full repaint to recover.
+				return m, tea.ClearScreen
 			case ":":
 				if m.ViewMode == ViewHome && m.HomeMenu.FilterActive() {
 					break // let filter input receive ":"
@@ -281,6 +290,24 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if !m.Sidebar.Visible && m.Focus == FocusSidebar {
 						m.setFocus(FocusMain)
 						m.Sidebar.Active = false
+					}
+
+					// Re-sync the active service's width now that the
+					// sidebar visibility (and thus available width) changed.
+					if m.CurrentSvc != nil && m.Width > 0 && m.Height > 0 {
+						availWidth := m.Width
+						if m.Sidebar.Visible {
+							availWidth -= m.Sidebar.Width
+						}
+						newModel, svcCmd := m.CurrentSvc.Update(tea.WindowSizeMsg{
+							Width:  availWidth,
+							Height: m.Height,
+						})
+						if updatedSvc, ok := newModel.(services.Service); ok {
+							m.CurrentSvc = updatedSvc
+							m.ServiceMap[m.CurrentSvc.ShortName()] = updatedSvc
+						}
+						return m, svcCmd
 					}
 				}
 				return m, nil
@@ -790,8 +817,20 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Update Active Service (if it has background work)
 		if m.CurrentSvc != nil {
+			// A real terminal resize carries the full terminal width; adjust
+			// it for the sidebar before forwarding, same as every other path
+			// that syncs window size to a service.
+			forwardMsg := msg
+			if wsMsg, ok := msg.(tea.WindowSizeMsg); ok {
+				availWidth := wsMsg.Width
+				if m.Sidebar.Visible {
+					availWidth -= m.Sidebar.Width
+				}
+				forwardMsg = tea.WindowSizeMsg{Width: availWidth, Height: wsMsg.Height}
+			}
+
 			var newModel tea.Model
-			newModel, cmd = m.CurrentSvc.Update(msg)
+			newModel, cmd = m.CurrentSvc.Update(forwardMsg)
 			if updatedSvc, ok := newModel.(services.Service); ok {
 				m.CurrentSvc = updatedSvc
 				m.ServiceMap[m.CurrentSvc.ShortName()] = updatedSvc

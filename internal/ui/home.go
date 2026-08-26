@@ -77,9 +77,6 @@ func (m MainModel) View() string {
 // renderLandingPage renders the central home screen
 func renderLandingPage(m MainModel) string {
 
-	// Banner
-	banner := GetBanner()
-
 	// User Info Box
 	email := m.AuthState.UserEmail
 	if strings.Contains(email, "@") {
@@ -118,30 +115,71 @@ func renderLandingPage(m MainModel) string {
 		) + "\n" + styles.SubtleStyle.Render("Run: brew upgrade tgcp  or  visit github.com/yogirk/tgcp/releases")
 	}
 
-	// Layout: Center everything
-	// We use lipgloss.Place to center vertically and horizontally
+	// Available rows for the whole body (status bar takes the last row).
+	// If the full layout doesn't fit, bubbletea's renderer falls back to
+	// silently cropping lines off the TOP of every frame to make it fit —
+	// which is fragile (it depends on every frame computing an identical
+	// height, and misbehaves under terminal emulators/multiplexers that
+	// don't handle a redraw taller than the screen cleanly). So instead we
+	// degrade the layout ourselves, in a fixed, non-jittery order, until it
+	// actually fits within the terminal.
+	available := m.Height - 1
 
-	// Combine components vertically
+	menuHeight := lipgloss.Height(menu)
+	banner := GetBanner()
+	bannerHeight := lipgloss.Height(banner)
+	// userInfo(1) + gap(1) + menu + gap(1) + hints(1) + version(1)
+	chromeRows := 1 + 1 + menuHeight + 1 + 1 + 1
+
+	showVersion := true
+	showHints := true
+	if bannerHeight+1+chromeRows > available {
+		// Too tall even before adding the banner's own height — switch to
+		// a 1-line wordmark instead of the 6-line ASCII banner.
+		banner = GetCompactBanner()
+		bannerHeight = lipgloss.Height(banner)
+	}
+	if bannerHeight+1+chromeRows > available {
+		// Still too tall on a very short terminal: drop the version line,
+		// then the hint line, before ever falling back to cropping.
+		showVersion = false
+		chromeRows--
+	}
+	if bannerHeight+1+chromeRows > available {
+		showHints = false
+		chromeRows--
+	}
+
+	// Combine components vertically. NOTE: a gap must be "" here, not "\n" —
+	// lipgloss.JoinVertical splits each element on "\n" to get its lines, and
+	// splitting the single-character string "\n" yields TWO empty lines
+	// (["", ""]), silently doubling every gap. "" splits to a single [""].
 	bodyParts := []string{
 		banner,
-		"\n",
+		"",
 		userInfo,
-		"\n",
+		"",
 		menu,
-		"\n",
-		hints,
-		versionText,
+	}
+	if showHints || showVersion {
+		bodyParts = append(bodyParts, "")
+	}
+	if showHints {
+		bodyParts = append(bodyParts, hints)
+	}
+	if showVersion {
+		bodyParts = append(bodyParts, versionText)
 	}
 
 	// Add update notice if available
 	if updateNotice != "" {
-		bodyParts = append(bodyParts, "\n", updateNotice)
+		bodyParts = append(bodyParts, "", updateNotice)
 	}
 
 	body := lipgloss.JoinVertical(lipgloss.Center, bodyParts...)
 
 	return lipgloss.Place(
-		m.Width, m.Height-1, // -1 for status bar space if needed
+		m.Width, available,
 		lipgloss.Center, lipgloss.Center,
 		body,
 	)

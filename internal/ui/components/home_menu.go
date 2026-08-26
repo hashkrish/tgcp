@@ -17,29 +17,40 @@ type Category struct {
 	Services []ServiceItem
 }
 
-// serviceIcons maps service short names to icons (mirrors sidebar)
+// serviceIcons maps service short names to icons (mirrors sidebar).
+//
+// These are deliberately plain ASCII, not Unicode symbols/dingbats. The
+// Geometric Shapes / Dingbats glyphs used here previously (⚙ ☸ ▷ ▤ ◔ ⛁ ⬡ ▦
+// ◇ ◲ ⊞ ⇢ ⎈ ⇌ ⚿ ✦ ⇄ ☰ ◈ ▣ ◉) have ambiguous East-Asian width: Bubble
+// Tea/lipgloss's width library measures them all as 1 column, but some
+// terminals — confirmed here specifically inside tmux — render at least one
+// of them as 2 columns. That single-column disagreement compounds across
+// every row below it, permanently misaligning the list (was misdiagnosed
+// at first as a rendering race, since it only became visible/obvious after
+// scrolling). ASCII is unambiguously 1 column everywhere, so this class of
+// bug can't recur.
 var serviceIcons = map[string]string{
-	"overview":         "◉",
-	"gce":              "⚙",
-	"gke":              "☸",
-	"run":              "▷",
-	"gcs":              "▤",
-	"disks":            "◔",
-	"sql":              "⛁",
-	"spanner":          "⬡",
-	"bigtable":         "▦",
-	"redis":            "◇",
-	"firestore":        "◲",
-	"bq":               "⊞",
-	"dataflow":         "⇢",
-	"dataproc":         "⎈",
-	"pubsub":           "⇌",
-	"iam":              "⚿",
-	"secrets":          "✦",
-	"net":              "⇄",
-	"logs":             "☰",
-	"cloudbuild":       "◈",
-	"artifactregistry": "▣",
+	"overview":         "@",
+	"gce":              "#",
+	"gke":              "K",
+	"run":              ">",
+	"gcs":              "S",
+	"disks":            "D",
+	"sql":              "Q",
+	"spanner":          "N",
+	"bigtable":         "T",
+	"redis":            "M",
+	"firestore":        "F",
+	"bq":               "B",
+	"dataflow":         "~",
+	"dataproc":         "%",
+	"pubsub":           "P",
+	"iam":              "&",
+	"secrets":          "$",
+	"net":              "=",
+	"logs":             "L",
+	"cloudbuild":       "^",
+	"artifactregistry": "A",
 }
 
 // listEntry represents a single row in the flat list (either category header or service)
@@ -69,6 +80,13 @@ type HomeMenuModel struct {
 	scrollOffset int
 	viewportRows int
 	matchIndexes map[int][]int // allEntries index -> matched char positions
+
+	// contentWidth is a fixed box content width computed once from ALL
+	// entries (not just the currently-visible slice). Sizing the box to
+	// only the visible lines would make its width change every time the
+	// scroll position changes (short names vs. long names), shifting the
+	// whole centered landing-page layout left/right between frames.
+	contentWidth int
 }
 
 func NewHomeMenu() HomeMenuModel {
@@ -175,6 +193,49 @@ func (m *HomeMenuModel) rebuildEntries() {
 			})
 		}
 	}
+
+	m.contentWidth = m.computeContentWidth()
+}
+
+// computeContentWidth measures the widest possible rendered line across ALL
+// entries (every category header and service name, not just whichever are
+// currently scrolled into view) so the box width stays constant regardless
+// of scroll position. It renders through the exact same styles View() uses
+// (including their padding/border, which differs between selected and
+// unselected rows) rather than estimating from raw text length, so the
+// measurement can't drift out of sync with the actual render.
+func (m *HomeMenuModel) computeContentWidth() int {
+	widest := lipgloss.Width(styles.HeaderStyle.Render("Services"))
+	if w := lipgloss.Width("  ↑ more"); w > widest {
+		widest = w
+	}
+	catStyle := lipgloss.NewStyle().Bold(true).PaddingLeft(styles.SpaceS)
+	for _, e := range m.allEntries {
+		var w int
+		if e.isCategory {
+			w = lipgloss.Width(catStyle.Render(strings.ToUpper(e.categoryName)))
+		} else if e.service != nil {
+			iconGlyph := serviceIcons[e.service.ShortName]
+			if iconGlyph == "" {
+				iconGlyph = "·"
+			}
+			name := e.service.Name
+			if e.service.IsComing {
+				name += " [Coming Soon]"
+			}
+			display := iconGlyph + "  " + name
+			if sw := lipgloss.Width(styles.SelectedActive.Render(display)); sw > w {
+				w = sw
+			}
+			if sw := lipgloss.Width(styles.UnselectedItemStyle.Render(display)); sw > w {
+				w = sw
+			}
+		}
+		if w > widest {
+			widest = w
+		}
+	}
+	return widest
 }
 
 // applyFilter filters the flat list based on the current filter query
@@ -522,29 +583,45 @@ func (m HomeMenuModel) View() string {
 		}
 	}
 
-	// Scroll indicators
-	var scrollUp, scrollDown string
+	// Scroll indicators — always reserve both lines (blank when not needed)
+	// so the box renders the same total height at every scroll position.
+	// Otherwise the frame height flickers between renders as you scroll,
+	// and since lipgloss.Height() only pads (never truncates), a taller
+	// frame leaves stale content behind when the next frame shrinks.
+	scrollUp := ""
 	if m.scrollOffset > 0 {
 		scrollUp = styles.SubtleStyle.Render("  ↑ more")
 	}
+	scrollDown := ""
 	if m.scrollOffset+m.viewportRows < len(m.filtered) {
 		scrollDown = styles.SubtleStyle.Render("  ↓ more")
 	}
 
 	// Combine list with scroll indicators
-	listContent := lipgloss.JoinVertical(lipgloss.Left, lines...)
-	if scrollUp != "" {
-		listContent = lipgloss.JoinVertical(lipgloss.Left, scrollUp, listContent)
-	}
-	if scrollDown != "" {
-		listContent = lipgloss.JoinVertical(lipgloss.Left, listContent, scrollDown)
-	}
+	listContent := lipgloss.JoinVertical(lipgloss.Left, scrollUp, lipgloss.JoinVertical(lipgloss.Left, lines...), scrollDown)
 
 	content := lipgloss.JoinVertical(lipgloss.Left, title, "", filterBar, "", listContent)
 
-	// Fixed-height box so the menu doesn't grow beyond the viewport
-	boxHeight := m.viewportRows + 8 // items + title(1) + gaps(2) + filter(1) + padding(2) + borders(2)
+	// Fixed-height, fixed-width box so the menu doesn't move or resize as
+	// you scroll — contentWidth is computed from ALL entries (see
+	// computeContentWidth), not just the ones currently visible.
+	// NOTE: .Height() sets the content+padding height BEFORE the border is
+	// added — lipgloss appends the top/bottom border rows on top of this,
+	// so this value must NOT include the border's own 2 rows (that was a
+	// prior bug here: passing viewportRows+10 made the box 2 rows taller
+	// than the overhead budget in UpdateViewportRows assumed).
+	boxHeight := m.viewportRows + 8 // items + title(1) + gaps(2) + filter(1) + padding(2) + scroll indicators(2); border(2) added separately by lipgloss
+	textWidth := m.contentWidth
+	if fw := lipgloss.Width(filterBar); fw > textWidth {
+		textWidth = fw
+	}
+	// PrimaryBoxStyle.Width() sets the TOTAL width including its own
+	// horizontal padding (lipgloss wraps at width-leftPadding-rightPadding),
+	// so add that padding back or the filter bar/service names wrap onto
+	// an extra line — which then desyncs the fixed-height budget above.
+	boxWidth := textWidth + 2*styles.SpaceM
 	menuBox := styles.PrimaryBoxStyle.Copy().
+		Width(boxWidth).
 		Height(boxHeight).
 		Render(content)
 
@@ -590,8 +667,8 @@ func (m *HomeMenuModel) UpdateViewportRows() {
 	// External overhead (outside the menu box):
 	//   banner: 6, gap: 1, info box: 3, gap: 1, gap: 1, hints: 1, version: 1, status bar: 1 = 15
 	// Internal box overhead (borders, padding, title, filter):
-	//   border: 2, padding: 2, title+gap: 2, filter+gap: 2, scroll indicator: 1 = 9
-	const overhead = 24
+	//   border: 2, padding: 2, title+gap: 2, filter+gap: 2, scroll indicators: 2 = 10
+	const overhead = 25
 	rows := m.ScreenHeight - overhead
 	if rows < 5 {
 		rows = 5

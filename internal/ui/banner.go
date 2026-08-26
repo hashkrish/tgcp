@@ -70,3 +70,19 @@ func GetBanner() string {
 
 	return lipgloss.JoinHorizontal(lipgloss.Bottom, blockT, blockG, blockC, blockP)
 }
+
+// BannerHeight is the number of lines GetBanner() renders — used to decide
+// when a terminal is too short for the full ASCII art banner.
+const BannerHeight = 6
+
+// GetCompactBanner returns a single-line colored "tgcp" wordmark, used on
+// short terminals where the full 6-line ASCII banner won't fit alongside
+// the rest of the landing page.
+func GetCompactBanner() string {
+	return lipgloss.JoinHorizontal(lipgloss.Bottom,
+		styleT.Bold(true).Render("t"),
+		styleG.Bold(true).Render("g"),
+		styleC.Bold(true).Render("c"),
+		styleP.Bold(true).Render("p"),
+	)
+}
