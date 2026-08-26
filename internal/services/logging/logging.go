@@ -155,7 +155,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
-		// Background refresh always fetches page 1 (empty token) to see latest
+		// Only auto-refresh when on page 1 and not inspecting a single entry's
+		// detail, so a background tick never yanks the user's paging position
+		// or the list backing an open detail view out from under them.
+		if len(s.tokenStack) > 0 || s.currentToken != "" || s.viewingDetail {
+			return s, s.tick()
+		}
 		return s, tea.Batch(s.fetchEntriesCmd(""), s.tick())
 
 	case entriesMsg:

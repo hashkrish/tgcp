@@ -136,7 +136,7 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 }
 
 func (s *Service) Init() tea.Cmd {
-	return s.tick()
+	return tea.Batch(s.spinner.Start(""), s.fetchSecretsCmd(false), s.tick())
 }
 
 func (s *Service) tick() tea.Cmd {

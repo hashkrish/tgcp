@@ -30,8 +30,15 @@ const (
 )
 
 type dbsMsg []Database
-type namespacesMsg []Namespace
-type kindsMsg []Kind
+type namespacesMsg struct {
+	dbName     string
+	namespaces []Namespace
+}
+type kindsMsg struct {
+	dbName        string
+	namespaceName string
+	kinds         []Kind
+}
 type errMsg error
 
 // -----------------------------------------------------------------------------
@@ -140,7 +147,7 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 }
 
 func (s *Service) Init() tea.Cmd {
-	return s.tick()
+	return tea.Batch(s.spinner.Start(""), s.fetchDBsCmd(false), s.tick())
 }
 
 func (s *Service) tick() tea.Cmd {
@@ -200,18 +207,34 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.dbs = msg
 		s.filterSession.Apply(s.dbs)
+		if s.selectedDB != nil {
+			for i := range s.dbs {
+				if s.dbs[i].Name == s.selectedDB.Name {
+					s.selectedDB = &s.dbs[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case namespacesMsg:
 		s.spinner.Stop()
-		s.namespaces = msg
-		s.updateNsTable(msg)
+		// Discard results from a stale request (user navigated to a different database since)
+		if s.selectedDB == nil || s.selectedDB.Name != msg.dbName {
+			return s, nil
+		}
+		s.namespaces = msg.namespaces
+		s.updateNsTable(msg.namespaces)
 		return s, nil
 
 	case kindsMsg:
 		s.spinner.Stop()
-		s.kinds = msg
-		s.updateKindTable(msg)
+		// Discard results from a stale request (user navigated to a different namespace since)
+		if s.selectedDB == nil || s.selectedNamespace == nil || s.selectedDB.Name != msg.dbName || s.selectedNamespace.Name != msg.namespaceName {
+			return s, nil
+		}
+		s.kinds = msg.kinds
+		s.updateKindTable(msg.kinds)
 		return s, nil
 
 	case errMsg:
@@ -390,7 +413,7 @@ func (s *Service) fetchNamespacesCmd() tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
-		return namespacesMsg(items)
+		return namespacesMsg{dbName: s.selectedDB.Name, namespaces: items}
 	}
 }
 
@@ -404,7 +427,7 @@ func (s *Service) fetchKindsCmd() tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
-		return kindsMsg(items)
+		return kindsMsg{dbName: s.selectedDB.Name, namespaceName: s.selectedNamespace.Name, kinds: items}
 	}
 }
 

@@ -204,7 +204,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.viewState == ViewList {
 			return s, tea.Batch(s.fetchNetworksCmd(), s.Init())
 		}
-		return s, s.Init()
+		return s, tea.Batch(s.fetchSubnetsCmd(), s.fetchFirewallsCmd(), s.Init())
 
 	case networksMsg:
 		s.spinner.Stop()

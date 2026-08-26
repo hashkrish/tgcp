@@ -174,6 +174,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case topicsMsg:
 		s.topics = msg
+		if s.selectedTopic != nil {
+			for i := range s.topics {
+				if s.topics[i].Name == s.selectedTopic.Name {
+					s.selectedTopic = &s.topics[i]
+					break
+				}
+			}
+		}
 		if s.viewState == ViewListTopics {
 			s.spinner.Stop()
 			s.topicFilterSession.Apply(s.topics)
@@ -182,6 +190,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case subsMsg:
 		s.subs = msg
+		if s.selectedSub != nil {
+			for i := range s.subs {
+				if s.subs[i].Name == s.selectedSub.Name {
+					s.selectedSub = &s.subs[i]
+					break
+				}
+			}
+		}
 		if s.viewState == ViewListSubs {
 			s.spinner.Stop()
 			s.subFilterSession.Apply(s.subs)
@@ -234,6 +250,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "s": // Switch to Subs
 				if s.viewState == ViewListTopics {
 					s.viewState = ViewListSubs
+					s.filter.ExitFilterMode() // Clear topic filter so it doesn't leak into subs
+					s.table.SetCursor(0)
 					s.subFilterSession.Apply(s.subs) // Render existing if available
 					if len(s.subs) == 0 {
 						return s, tea.Batch(s.fetchSubsCmd(true), s.spinner.Start(""))
@@ -242,6 +260,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "t": // Switch to Topics
 				if s.viewState == ViewListSubs {
 					s.viewState = ViewListTopics
+					s.filter.ExitFilterMode() // Clear sub filter so it doesn't leak into topics
+					s.table.SetCursor(0)
 					s.topicFilterSession.Apply(s.topics)
 					if len(s.topics) == 0 {
 						return s, tea.Batch(s.fetchTopicsCmd(true), s.spinner.Start(""))

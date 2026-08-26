@@ -122,6 +122,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.accounts = msg
 		s.updateTable(msg)
+		if s.selectedAccount != nil {
+			for i := range s.accounts {
+				if s.accounts[i].UniqueID == s.selectedAccount.UniqueID {
+					s.selectedAccount = &s.accounts[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:

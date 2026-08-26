@@ -35,17 +35,11 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
-	ViewConfirmation
 )
 
 // Message types for async operations
 type dataMsg []RepositoryItem
 type errMsg error
-type actionResultMsg struct {
-	action string // "start", "stop", etc.
-	name   string // resource name for toast
-	err    error
-}
 
 // =============================================================================
 // Service Definition
@@ -74,10 +68,6 @@ type Service struct {
 	// View State
 	viewState    ViewState
 	selectedItem *RepositoryItem
-
-	// Confirmation State
-	pendingAction string
-	actionSource  ViewState
 
 	// Cache
 	cache *core.Cache
@@ -131,8 +121,6 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Enter:Detail"
 	case ViewDetail:
 		return "Esc/q:Back"
-	case ViewConfirmation:
-		return "y:Confirm  n:Cancel"
 	default:
 		return ""
 	}
@@ -162,7 +150,7 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 
 // Init returns startup commands (background tick)
 func (s *Service) Init() tea.Cmd {
-	return s.tick()
+	return tea.Batch(s.spinner.Start(""), s.fetchDataCmd(false), s.tick())
 }
 
 // tick creates a background ticker for cache invalidation/refresh
@@ -185,7 +173,6 @@ func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedItem = nil
 	s.err = nil // CRITICAL: Always clear errors on reset
-	s.pendingAction = ""
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
 }
@@ -231,26 +218,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.err = msg
 		return s, nil
-
-	case actionResultMsg:
-		s.spinner.Stop()
-		if msg.err != nil {
-			return s, func() tea.Msg {
-				return core.ToastMsg{
-					Message: fmt.Sprintf("Failed to %s %s: %v", msg.action, msg.name, msg.err),
-					Type:    core.ToastError,
-				}
-			}
-		}
-		return s, tea.Batch(
-			func() tea.Msg {
-				return core.ToastMsg{
-					Message: fmt.Sprintf("%s %s successfully", capitalize(msg.action), msg.name),
-					Type:    core.ToastSuccess,
-				}
-			},
-			s.Refresh(),
-		)
 
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
@@ -314,20 +281,6 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	if s.viewState == ViewConfirmation {
-		switch msg.String() {
-		case "y", "enter":
-			action := s.pendingAction
-			s.viewState = s.actionSource
-			s.pendingAction = ""
-			return s, s.performActionCmd(action)
-		case "n", "esc", "q":
-			s.viewState = s.actionSource
-			s.pendingAction = ""
-			return s, nil
-		}
-	}
-
 	return s, nil
 }
 
@@ -342,10 +295,6 @@ func (s *Service) View() string {
 
 	if s.spinner.IsActive() {
 		return s.spinner.View()
-	}
-
-	if s.viewState == ViewConfirmation && s.selectedItem != nil {
-		return components.RenderConfirmation(s.pendingAction, s.selectedItem.Name, "repository")
 	}
 
 	if s.viewState == ViewDetail {
@@ -461,38 +410,3 @@ func (s *Service) getFilteredItems(items []RepositoryItem, query string) []Repos
 	})
 }
 
-// =============================================================================
-// Actions
-// =============================================================================
-
-func (s *Service) performActionCmd(action string) tea.Cmd {
-	item := s.selectedItem
-	if item == nil {
-		return nil
-	}
-
-	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{action: action, name: item.Name, err: fmt.Errorf("client not initialized")}
-		}
-
-		var err error
-		switch action {
-		default:
-			err = fmt.Errorf("unknown action: %s", action)
-		}
-
-		return actionResultMsg{action: action, name: item.Name, err: err}
-	}
-}
-
-// =============================================================================
-// Helpers
-// =============================================================================
-
-func capitalize(s string) string {
-	if len(s) == 0 {
-		return s
-	}
-	return string(s[0]-32) + s[1:] 
-}

@@ -58,9 +58,11 @@ func highlightMatches(name, description string, matchedIndexes []int) (string, s
 		Foreground(styles.ColorTextPrimary).
 		Bold(true)
 
-	// Build highlighted name
+	// Build highlighted name (index by rune position, not byte offset, so
+	// multi-byte characters line up with matchedIndexes from the fuzzy matcher)
+	nameRunes := []rune(name)
 	var nameBuilder strings.Builder
-	for i, r := range name {
+	for i, r := range nameRunes {
 		char := string(r)
 		if matchSet[i] {
 			nameBuilder.WriteString(highlightStyle.Render(char))
@@ -72,9 +74,9 @@ func highlightMatches(name, description string, matchedIndexes []int) (string, s
 	// Description uses muted style, highlight matches there too
 	descStyle := styles.SubtleStyle
 	var descBuilder strings.Builder
-	nameLen := len(name) + 1 // +1 for the space between name and description
+	nameLen := len(nameRunes) + 1 // +1 for the space between name and description
 
-	for i, r := range description {
+	for i, r := range []rune(description) {
 		char := string(r)
 		if matchSet[nameLen+i] {
 			descBuilder.WriteString(highlightStyle.Render(char))

@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
@@ -46,9 +45,6 @@ type Service struct {
 	datasetTable *components.StandardTable
 	tableTable   *components.StandardTable
 	schemaTable  *components.StandardTable
-
-	// UI
-	filterInput textinput.Model
 
 	// State
 	datasets []Dataset
@@ -137,6 +133,10 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 }
 
 func (s *Service) Init() tea.Cmd {
+	return tea.Batch(s.spinner.Start(""), s.fetchDatasetsCmd(), s.tick())
+}
+
+func (s *Service) tick() tea.Cmd {
 	return tea.Tick(CacheTTL, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
@@ -194,9 +194,9 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		// Background refresh? Maybe only if at root.
 		if s.viewState == ViewDatasets {
-			return s, tea.Batch(s.fetchDatasetsCmd(), s.Init())
+			return s, tea.Batch(s.fetchDatasetsCmd(), s.tick())
 		}
-		return s, s.Init()
+		return s, s.tick()
 
 	case datasetsMsg:
 		s.spinner.Stop()

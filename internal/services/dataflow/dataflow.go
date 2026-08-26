@@ -164,6 +164,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.jobs = msg
 		s.filterSession.Apply(s.jobs)
+		if s.selectedJob != nil {
+			for i := range s.jobs {
+				if s.jobs[i].Name == s.selectedJob.Name {
+					s.selectedJob = &s.jobs[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:

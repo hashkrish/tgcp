@@ -240,12 +240,28 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.services = msg
 		s.serviceFilterSession.Apply(s.services)
+		if s.selectedService != nil {
+			for i := range s.services {
+				if s.services[i].Name == s.selectedService.Name {
+					s.selectedService = &s.services[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case functionsMsg:
 		s.spinner.Stop()
 		s.functions = msg
 		s.functionFilterSession.Apply(s.functions)
+		if s.selectedFunc != nil {
+			for i := range s.functions {
+				if s.functions[i].Name == s.selectedFunc.Name {
+					s.selectedFunc = &s.functions[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	// 3. Error Handling
@@ -301,8 +317,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "[", "]":
 				// Switch Tab (Cycle)
+				s.filter.ExitFilterMode()
 				if s.activeTab == TabServices {
 					s.activeTab = TabFunctions
+					s.functionFilterSession.Apply(s.functions)
 					return s, tea.Batch(s.fetchFunctionsCmd(true), s.spinner.Start(""))
 				} else {
 					s.activeTab = TabServices
@@ -340,6 +358,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						// Strict quoting for filter
 						filter := fmt.Sprintf(`resource.type="cloud_run_revision" AND resource.labels.service_name="%s"`, svc.Name)
 						heading := fmt.Sprintf("Service: %s", svc.Name)
+						return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "run", Heading: heading} }
+					}
+				} else {
+					funcs := s.getFilteredFunctions(s.functions, s.filter.Value())
+					if idx := s.funcTable.Cursor(); idx >= 0 && idx < len(funcs) {
+						fn := funcs[idx]
+						filter := fmt.Sprintf(`resource.type="cloud_function" AND resource.labels.function_name="%s"`, fn.Name)
+						heading := fmt.Sprintf("Function: %s", fn.Name)
 						return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "run", Heading: heading} }
 					}
 				}

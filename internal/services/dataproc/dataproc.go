@@ -164,6 +164,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.clusters = msg
 		s.filterSession.Apply(s.clusters)
+		if s.selectedCluster != nil {
+			for i := range s.clusters {
+				if s.clusters[i].Name == s.selectedCluster.Name {
+					s.selectedCluster = &s.clusters[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:

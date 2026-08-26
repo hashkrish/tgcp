@@ -27,7 +27,10 @@ const (
 )
 
 type instancesMsg []Instance
-type clustersMsg []Cluster
+type clustersMsg struct {
+	instanceID string
+	clusters   []Cluster
+}
 type errMsg error
 
 // -----------------------------------------------------------------------------
@@ -110,7 +113,7 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 }
 
 func (s *Service) Init() tea.Cmd {
-	return s.tick()
+	return tea.Batch(s.spinner.Start(""), s.fetchInstancesCmd(false), s.tick())
 }
 
 func (s *Service) tick() tea.Cmd {
@@ -166,10 +169,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.instances = msg
 		s.filterSession.Apply(s.instances)
+		if s.selectedInstance != nil {
+			for i := range s.instances {
+				if s.instances[i].Name == s.selectedInstance.Name {
+					s.selectedInstance = &s.instances[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case clustersMsg:
-		s.clusters = msg
+		// Discard results from a stale request (user navigated to a different instance since)
+		if s.selectedInstance == nil || s.selectedInstance.Name != msg.instanceID {
+			return s, nil
+		}
+		s.clusters = msg.clusters
 		// We don't change state here, just store data for view
 
 	case errMsg:
@@ -275,7 +290,7 @@ func (s *Service) fetchClustersCmd(instanceID string) tea.Cmd {
 		if err != nil {
 			return errMsg(err)
 		}
-		return clustersMsg(items)
+		return clustersMsg{instanceID: instanceID, clusters: items}
 	}
 }
 

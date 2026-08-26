@@ -38,6 +38,10 @@ type actionResultMsg struct {
 	err error
 	msg string
 }
+type k9sCredsMsg struct {
+	context string
+	err     error
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -209,6 +213,19 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return s, nil
+
+	case k9sCredsMsg:
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return actionResultMsg{err: fmt.Errorf("failed to get cluster credentials: %w", msg.err)}
+			}
+		}
+		return s, tea.ExecProcess(exec.Command("k9s", "--context", msg.context), func(err error) tea.Msg {
+			if err != nil {
+				return actionResultMsg{err: err}
+			}
+			return actionResultMsg{msg: "k9s session ended"}
+		})
 
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
@@ -410,16 +427,12 @@ func (s *Service) launchK9s(c Cluster) tea.Cmd {
 		if err != nil {
 			// Fallback: Try to get credentials first, then launch k9s.
 			// The user might not have context set up.
+			// A tea.ExecProcess callback must return a tea.Msg, so the retry is
+			// dispatched as k9sCredsMsg and handled by Update, which can return
+			// a real tea.Cmd (a second ExecProcess) — it cannot be nested here.
 			credCmd := exec.Command("gcloud", "container", "clusters", "get-credentials", c.Name, "--zone", c.Location, "--project", s.projectID)
-			if credErr := credCmd.Run(); credErr != nil {
-				return actionResultMsg{err: fmt.Errorf("failed to get cluster credentials: %w", credErr)}
-			}
-			return tea.ExecProcess(exec.Command("k9s"), func(err error) tea.Msg {
-				if err != nil {
-					return actionResultMsg{err: err}
-				}
-				return actionResultMsg{msg: "k9s session ended"}
-			})
+			credErr := credCmd.Run()
+			return k9sCredsMsg{context: contextName, err: credErr}
 		}
 		return actionResultMsg{msg: "k9s session ended"}
 	})

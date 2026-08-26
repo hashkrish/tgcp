@@ -20,6 +20,7 @@ type Service struct {
 	projectID string
 	data      DashboardData
 	cache     *core.Cache
+	width     int
 }
 
 func NewService(cache *core.Cache) *Service {
@@ -47,6 +48,7 @@ func (s *Service) HelpText() string {
 }
 
 func (s *Service) Refresh() tea.Cmd {
+	s.data.Error = nil
 	s.data.InfoLoading = true
 	s.data.RecsLoading = true
 	s.data.InventoryLoading = true
@@ -132,6 +134,9 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.data.InventoryLoading = false
 		s.data.BudgetsLoading = false
 
+	case tea.WindowSizeMsg:
+		s.width = msg.Width
+
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "r":
@@ -139,6 +144,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return s, nil
+}
+
+// cardWidth returns the width to render dashboard cards at, adapting to the
+// terminal size instead of a fixed 80 columns.
+func (s *Service) cardWidth() int {
+	if s.width <= 0 {
+		return 80
+	}
+	w := s.width
+	if w > 80 {
+		w = 80
+	}
+	if w < 40 {
+		w = 40
+	}
+	return w
 }
 
 // View implementation is in views.go

@@ -9,8 +9,12 @@ import (
 	"github.com/yogirk/tgcp/internal/styles"
 )
 
-// ToastDismissMsg is sent when a toast should be dismissed
-type ToastDismissMsg struct{}
+// ToastDismissMsg is sent when a toast should be dismissed.
+// CreatedAt identifies which toast this dismiss applies to, so a stale timer
+// from a replaced toast can't dismiss a newer one.
+type ToastDismissMsg struct {
+	CreatedAt time.Time
+}
 
 // ToastModel represents a temporary notification
 type ToastModel struct {
@@ -46,8 +50,9 @@ func (t *ToastModel) IsExpired() bool {
 
 // DismissCmd returns a command that will dismiss the toast after duration
 func (t *ToastModel) DismissCmd() tea.Cmd {
+	createdAt := t.CreatedAt
 	return tea.Tick(t.Duration, func(time.Time) tea.Msg {
-		return ToastDismissMsg{}
+		return ToastDismissMsg{CreatedAt: createdAt}
 	})
 }
 

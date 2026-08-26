@@ -220,6 +220,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case bucketsMsg:
 		s.spinner.Stop()
 		s.buckets = msg
+		if s.selectedBucket != nil {
+			for i := range s.buckets {
+				if s.buckets[i].Name == s.selectedBucket.Name {
+					s.selectedBucket = &s.buckets[i]
+					break
+				}
+			}
+		}
 		s.bucketFilterSession.Apply(s.buckets)
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
@@ -306,6 +314,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			case "enter":
 				// Go to Object Browser
+				s.filter.ExitFilterMode() // Clear bucket filter so it doesn't leak into the object list
 				s.viewState = ViewObjects
 				s.currentPrefix = ""
 				return s, tea.Batch(s.fetchObjectsCmd(), s.spinner.Start(""))
@@ -315,6 +324,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc", "q":
 				if s.currentPrefix == "" {
+					s.filter.ExitFilterMode() // Clear object filter so it doesn't leak into the bucket list
 					s.viewState = ViewDetail // Back to Details
 				} else {
 					s.currentPrefix = parentPrefix(s.currentPrefix)

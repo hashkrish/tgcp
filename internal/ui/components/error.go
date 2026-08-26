@@ -54,7 +54,7 @@ func (m ErrorModel) View() string {
 	// Wrap long error messages
 	if m.Width > 0 {
 		maxWidth := m.Width - 10
-		if len(errorMsg) > maxWidth {
+		if maxWidth > 3 && len(errorMsg) > maxWidth {
 			errorMsg = errorMsg[:maxWidth-3] + "..."
 		}
 	}

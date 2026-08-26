@@ -103,7 +103,33 @@ func (m StatusBarModel) View() string {
 		infoWidth = 0
 	}
 
-	info := styles.StatusBarStyle.Width(infoWidth).Render(m.Message)
+	message := m.Message
+	if lipgloss.Width(message) > infoWidth {
+		message = truncateToWidth(message, infoWidth)
+	}
+	info := styles.StatusBarStyle.Width(infoWidth).Render(message)
 
 	return lipgloss.JoinHorizontal(lipgloss.Top, mode, " ", info, rightSide)
+}
+
+// truncateToWidth shortens s to fit within width columns, appending an
+// ellipsis when truncated. Rune-safe so multi-byte characters aren't split.
+func truncateToWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if width <= 3 {
+		if width > len(runes) {
+			width = len(runes)
+		}
+		return string(runes[:width])
+	}
+	for i := len(runes); i > 0; i-- {
+		candidate := string(runes[:i]) + "..."
+		if lipgloss.Width(candidate) <= width {
+			return candidate
+		}
+	}
+	return "..."
 }

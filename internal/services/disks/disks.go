@@ -25,12 +25,10 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
-	ViewConfirmation
 )
 
 type disksMsg []Disk
 type errMsg error
-type actionResultMsg struct{ err error }
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -50,9 +48,6 @@ type Service struct {
 
 	viewState    ViewState
 	selectedDisk *Disk
-
-	pendingAction string
-	actionSource  ViewState
 
 	cache *core.Cache
 }
@@ -93,10 +88,7 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  s:Snapshot"
-	}
-	if s.viewState == ViewConfirmation {
-		return "y:Confirm  n:Cancel"
+		return "Esc/q:Back"
 	}
 	return ""
 }
@@ -184,12 +176,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
-	case actionResultMsg:
-		if msg.err != nil {
-			s.err = msg.err
-		}
-		return s, nil
-
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -241,27 +227,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedDisk = nil
 				return s, nil
-			case "s":
-				// Placeholder for Snapshot
-				s.pendingAction = "snapshot"
-				s.actionSource = ViewDetail
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-		}
-
-		if s.viewState == ViewConfirmation {
-			switch msg.String() {
-			case "y", "enter":
-				// No-op for MVP (Read-onlyish)
-				// or implement snapshot call
-				s.viewState = s.actionSource
-				s.pendingAction = ""
-				return s, nil
-			case "n", "esc", "q":
-				s.viewState = s.actionSource
-				s.pendingAction = ""
-				return s, nil
 			}
 		}
 	}
@@ -285,12 +250,6 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
-	}
-	if s.viewState == ViewConfirmation {
-		if s.selectedDisk == nil {
-			return "Error: No disk selected"
-		}
-		return components.RenderConfirmation("snapshot", s.selectedDisk.Name, "disk")
 	}
 
 	return s.renderListView()

@@ -150,6 +150,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.instances = msg
 		s.filterSession.Apply(s.instances)
+		if s.selectedInstance != nil {
+			for i := range s.instances {
+				if s.instances[i].Name == s.selectedInstance.Name {
+					s.selectedInstance = &s.instances[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:
