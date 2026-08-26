@@ -36,10 +36,12 @@ func HelpView(width, height int) string {
 			"Actions",
 			[][]string{
 				{"r", "Refresh Data"},
-				{"s", "Start Resource"},
+				{"s", "Start / Snapshot"},
 				{"x", "Stop Resource"},
 				{"h", "SSH Connect"},
 				{"l", "Log Tailing"},
+				{"K", "k9s Shell (GKE)"},
+				{"[ ]", "Switch Tab"},
 			},
 		},
 	}
@@ -66,7 +68,7 @@ func HelpView(width, height int) string {
 		var col strings.Builder
 
 		// Section header
-		header := styles.TitleStyle.Copy().
+		header := styles.TitleStyle.
 			Foreground(styles.ColorBrandAccent).
 			Bold(true).
 			Underline(true).
@@ -104,7 +106,7 @@ func HelpView(width, height int) string {
 	}
 
 	// Build final dialog
-	title := styles.TitleStyle.Copy().
+	title := styles.TitleStyle.
 		Foreground(styles.ColorBrandPrimary).
 		Render("TGCP Help & Keybindings")
 
@@ -113,7 +115,7 @@ func HelpView(width, height int) string {
 
 	footer := styles.SubtleStyle.Render("Press ? or Esc to close")
 
-	dialog := styles.PrimaryBoxStyle.Copy().
+	dialog := styles.PrimaryBoxStyle.
 		Width(dialogWidth).
 		BorderForeground(styles.ColorBrandPrimary).
 		Render(lipgloss.JoinVertical(lipgloss.Center,

@@ -9,6 +9,15 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
+// renderConfirmation renders a confirmation dialog for pending disk actions
+func (s *Service) renderConfirmation() string {
+	if s.selectedDisk == nil {
+		return "Error: No disk selected"
+	}
+
+	return components.RenderConfirmation(s.pendingAction, s.selectedDisk.Name, "disk")
+}
+
 func (s *Service) renderDetailView() string {
 	if s.selectedDisk == nil {
 		return "No disk selected"

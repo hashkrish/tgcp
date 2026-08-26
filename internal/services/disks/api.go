@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/yogirk/tgcp/internal/demo"
 	"google.golang.org/api/compute/v1"
@@ -60,4 +61,29 @@ func (c *Client) ListDisks(projectID string) ([]Disk, error) {
 	}
 
 	return disks, nil
+}
+
+// CreateSnapshot creates a snapshot of the given disk in the given zone.
+// The snapshot name is derived from the disk name plus a timestamp to avoid collisions.
+func (c *Client) CreateSnapshot(projectID, zone, diskName string) (string, error) {
+	snapshotName := fmt.Sprintf("%s-snap-%s", diskName, time.Now().Format("20060102-150405"))
+
+	if demo.Enabled {
+		return snapshotName, nil
+	}
+
+	if c.service == nil {
+		return "", fmt.Errorf("compute client not initialized")
+	}
+
+	req := &compute.Snapshot{
+		Name: snapshotName,
+	}
+
+	_, err := c.service.Disks.CreateSnapshot(projectID, zone, diskName, req).Do()
+	if err != nil {
+		return "", err
+	}
+
+	return snapshotName, nil
 }

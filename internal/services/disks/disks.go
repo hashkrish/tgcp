@@ -25,10 +25,17 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewConfirmation
 )
 
 type disksMsg []Disk
 type errMsg error
+
+// actionResultMsg carries the result of an async disk action (e.g. snapshot creation)
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -48,6 +55,10 @@ type Service struct {
 
 	viewState    ViewState
 	selectedDisk *Disk
+
+	// Confirmation State
+	pendingAction string    // "snapshot"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -88,7 +99,10 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back"
+		return "Esc/q:Back  s:Snapshot"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
 	}
 	return ""
 }
@@ -176,6 +190,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -227,6 +257,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedDisk = nil
 				return s, nil
+			case "s": // Snapshot (Confirm)
+				if s.selectedDisk != nil {
+					s.pendingAction = "snapshot"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter": // Confirm
+				var actionCmd tea.Cmd
+				if s.pendingAction == "snapshot" && s.selectedDisk != nil {
+					actionCmd = s.CreateSnapshotCmd(*s.selectedDisk)
+				}
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, actionCmd
+			case "n", "esc", "q": // Cancel
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
 			}
 		}
 	}
@@ -252,6 +306,10 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
 	return s.renderListView()
 }
 
@@ -273,6 +331,20 @@ func (s *Service) renderListView() string {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+// CreateSnapshotCmd triggers snapshot creation for the given disk
+func (s *Service) CreateSnapshotCmd(disk Disk) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		snapshotName, err := s.client.CreateSnapshot(s.projectID, disk.Zone, disk.Name)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s for disk %s...", snapshotName, disk.Name)}
+	}
+}
 
 func (s *Service) fetchDisksCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
