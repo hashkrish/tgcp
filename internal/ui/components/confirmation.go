@@ -10,12 +10,12 @@ import (
 
 // ConfirmationModel represents a confirmation dialog component
 type ConfirmationModel struct {
-	Action        string // e.g., "start", "stop", "delete"
-	ResourceName  string // e.g., "prod-web-1"
-	ResourceType  string // e.g., "instance", "disk", "service"
-	Message       string // Optional custom message (overrides default)
-	Width         int
-	Height        int
+	Action       string // e.g., "start", "stop", "delete"
+	ResourceName string // e.g., "prod-web-1"
+	ResourceType string // e.g., "instance", "disk", "service"
+	Message      string // Optional custom message (overrides default)
+	Width        int
+	Height       int
 }
 
 // NewConfirmationModel creates a new confirmation dialog
@@ -141,7 +141,7 @@ func (m ConfirmationModel) View() string {
 	content := lipgloss.JoinVertical(lipgloss.Center, parts...)
 
 	// Wrap in styled box with action-specific border color
-	dialog := styles.OverlayBoxStyle.Copy().
+	dialog := styles.OverlayBoxStyle.
 		BorderForeground(style.borderColor).
 		Padding(styles.SpaceS, styles.SpaceL).
 		Width(70).
@@ -159,7 +159,7 @@ func (m ConfirmationModel) View() string {
 func (m ConfirmationModel) buildActionText() string {
 	actionUpper := capitalize(m.Action)
 	resourceNameStyled := styles.TitleStyle.Render(m.ResourceName)
-	
+
 	// Build action verb based on action type
 	var verb string
 	switch m.Action {

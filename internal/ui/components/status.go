@@ -36,8 +36,8 @@ type statusConfig struct {
 var statusConfigs = map[StatusCategory]statusConfig{
 	StatusRunning: {
 		icon:       IconRunning,
-		foreground: lipgloss.Color("0"),   // Black text for contrast
-		background: lipgloss.Color("42"),  // Green background
+		foreground: lipgloss.Color("0"),  // Black text for contrast
+		background: lipgloss.Color("42"), // Green background
 	},
 	StatusStopped: {
 		icon:       IconStopped,

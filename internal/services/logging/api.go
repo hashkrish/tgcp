@@ -30,56 +30,56 @@ var (
 
 // Client wraps the Cloud Logging API (v2 REST)
 type Client struct {
-    service *logging.Service
-    projectID string
+	service   *logging.Service
+	projectID string
 }
 
 // NewClient initializes a new Logging client using the v2 REST API
 func NewClient(ctx context.Context, projectID string) (*Client, error) {
-    if demo.Enabled {
-        return &Client{projectID: projectID}, nil
-    }
-    // Use ADC with Logging Read scope
-    svc, err := logging.NewService(ctx, option.WithScopes(logging.LoggingReadScope))
-    if err != nil {
-        return nil, fmt.Errorf("failed to create logging service: %w", err)
-    }
+	if demo.Enabled {
+		return &Client{projectID: projectID}, nil
+	}
+	// Use ADC with Logging Read scope
+	svc, err := logging.NewService(ctx, option.WithScopes(logging.LoggingReadScope))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create logging service: %w", err)
+	}
 
-    return &Client{
-        service:   svc,
-        projectID: projectID,
-    }, nil
+	return &Client{
+		service:   svc,
+		projectID: projectID,
+	}, nil
 }
 
 // Close is a no-op for the REST service wrapper
 func (c *Client) Close() error {
-    return nil
+	return nil
 }
 
 // ListEntries fetches log entries with pagination
 func (c *Client) ListEntries(
-    ctx context.Context,
-    filter string,
-    pageSize int,
-    pageToken string,
+	ctx context.Context,
+	filter string,
+	pageSize int,
+	pageToken string,
 ) ([]LogEntry, string, error) {
 
-    if demo.Enabled {
-        return []LogEntry{}, "", nil
-    }
+	if demo.Enabled {
+		return []LogEntry{}, "", nil
+	}
 
 	// If no filter is provided, we default to NO filter, relying on OrderBy to get latest.
 	// Previously we forced timestamp >= 30m ago, which hid older "latest" logs.
 	finalFilter := filter
 
-    // Prepare request
-    req := c.service.Entries.List(&logging.ListLogEntriesRequest{
-        ResourceNames: []string{"projects/" + c.projectID},
-        Filter:        finalFilter,
-        PageSize:      int64(pageSize),
-        PageToken:     pageToken,
-        OrderBy:       "timestamp desc", // Equivalent to NewestFirst
-    })
+	// Prepare request
+	req := c.service.Entries.List(&logging.ListLogEntriesRequest{
+		ResourceNames: []string{"projects/" + c.projectID},
+		Filter:        finalFilter,
+		PageSize:      int64(pageSize),
+		PageToken:     pageToken,
+		OrderBy:       "timestamp desc", // Equivalent to NewestFirst
+	})
 
 	resp, err := req.Context(ctx).Do()
 	if err != nil {
@@ -87,21 +87,21 @@ func (c *Client) ListEntries(
 	}
 
 	var entries []LogEntry
-    for _, entry := range resp.Entries {
-        // Parse Timestamp
-        ts, _ := time.Parse(time.RFC3339Nano, entry.Timestamp)
-        // Try fallback if Nano fails
-        if ts.IsZero() {
-            ts, _ = time.Parse(time.RFC3339, entry.Timestamp)
-        }
+	for _, entry := range resp.Entries {
+		// Parse Timestamp
+		ts, _ := time.Parse(time.RFC3339Nano, entry.Timestamp)
+		// Try fallback if Nano fails
+		if ts.IsZero() {
+			ts, _ = time.Parse(time.RFC3339, entry.Timestamp)
+		}
 
-        // Determine Payload and Severity
-        payload := ""
-        severity := strings.ToUpper(entry.Severity)
+		// Determine Payload and Severity
+		payload := ""
+		severity := strings.ToUpper(entry.Severity)
 
-        if entry.TextPayload != "" {
-            payload = cleanPayload(entry.TextPayload, ts)
-        } else if len(entry.JsonPayload) > 0 {
+		if entry.TextPayload != "" {
+			payload = cleanPayload(entry.TextPayload, ts)
+		} else if len(entry.JsonPayload) > 0 {
 			var data map[string]interface{}
 			if err := json.Unmarshal(entry.JsonPayload, &data); err == nil {
 				// Extract Severity from JSON if missing
@@ -126,69 +126,67 @@ func (c *Client) ListEntries(
 				// Fallback to string
 				payload = string(entry.JsonPayload)
 			}
-        } else if len(entry.ProtoPayload) > 0 {
-            b, _ := json.Marshal(entry.ProtoPayload)
-            payload = string(b)
-        }
+		} else if len(entry.ProtoPayload) > 0 {
+			b, _ := json.Marshal(entry.ProtoPayload)
+			payload = string(b)
+		}
 
-        // Extract Resource Info
-        var (
-            resourceType string
-            resourceName string
-            location     string
-            projID       string
-        )
+		// Extract Resource Info
+		var (
+			resourceType string
+			resourceName string
+			location     string
+			projID       string
+		)
 
-        if entry.Resource != nil {
-            resourceType = entry.Resource.Type
-            if entry.Resource.Labels != nil {
-                projID = entry.Resource.Labels["project_id"]
-                location = entry.Resource.Labels["zone"]
-                if location == "" {
-                    location = entry.Resource.Labels["location"]
-                }
+		if entry.Resource != nil {
+			resourceType = entry.Resource.Type
+			if entry.Resource.Labels != nil {
+				projID = entry.Resource.Labels["project_id"]
+				location = entry.Resource.Labels["zone"]
+				if location == "" {
+					location = entry.Resource.Labels["location"]
+				}
 
-                switch resourceType {
-                case "gce_instance":
-                    resourceName = entry.Resource.Labels["instance_id"]
-                case "cloud_run_revision":
-                    resourceName = entry.Resource.Labels["service_name"]
-                case "k8s_container":
-                    resourceName = fmt.Sprintf("%s/%s", entry.Resource.Labels["namespace_name"], entry.Resource.Labels["container_name"])
-                default:
-                    for _, v := range entry.Resource.Labels {
-                        resourceName = v
-                        break
-                    }
-                }
-            }
-        }
+				switch resourceType {
+				case "gce_instance":
+					resourceName = entry.Resource.Labels["instance_id"]
+				case "cloud_run_revision":
+					resourceName = entry.Resource.Labels["service_name"]
+				case "k8s_container":
+					resourceName = fmt.Sprintf("%s/%s", entry.Resource.Labels["namespace_name"], entry.Resource.Labels["container_name"])
+				default:
+					for _, v := range entry.Resource.Labels {
+						resourceName = v
+						break
+					}
+				}
+			}
+		}
 
 		if !isValidSeverity(severity) {
 			severity = "DEFAULT"
 		}
 
-        entries = append(entries, LogEntry{
-            Timestamp:    ts,
-            Severity:     severity,
-            Payload:      payload,
+		entries = append(entries, LogEntry{
+			Timestamp: ts,
+			Severity:  severity,
+			Payload:   payload,
 
-            ResourceType: resourceType,
-            ResourceName: resourceName,
-            Location:     location,
-            ProjectID:    projID,
+			ResourceType: resourceType,
+			ResourceName: resourceName,
+			Location:     location,
+			ProjectID:    projID,
 
-            LogName:      entry.LogName,
-            Labels:       entry.Labels,
-            InsertID:     entry.InsertId,
-            FullPayload:  payload, // Simplified for now
-        })
-    }
+			LogName:     entry.LogName,
+			Labels:      entry.Labels,
+			InsertID:    entry.InsertId,
+			FullPayload: payload, // Simplified for now
+		})
+	}
 
-    return entries, resp.NextPageToken, nil
+	return entries, resp.NextPageToken, nil
 }
-
-
 
 // cleanPayload removes redundant timestamps and prefixes using regex
 func cleanPayload(raw string, ts time.Time) string {
@@ -204,7 +202,7 @@ func cleanPayload(raw string, ts time.Time) string {
 	if loc := reSyslogHeader.FindStringIndex(raw); loc != nil {
 		raw = raw[loc[1]:]
 	}
-	
+
 	// 3. Remove K8s Header
 	// e.g. "I0108 ... ] "
 	if loc := reK8sHeader.FindStringIndex(raw); loc != nil {

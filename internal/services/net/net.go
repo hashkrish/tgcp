@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
-	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
@@ -55,8 +54,7 @@ type Service struct {
 	firewallsTable *components.StandardTable
 
 	// UI
-	filterInput textinput.Model
-	activeTab   Tab
+	activeTab Tab
 
 	// State
 	networks  []Network
@@ -151,9 +149,10 @@ func (s *Service) Init() tea.Cmd {
 
 func (s *Service) Refresh() tea.Cmd {
 	var fetchCmd tea.Cmd
-	if s.viewState == ViewList {
+	switch s.viewState {
+	case ViewList:
 		fetchCmd = s.fetchNetworksCmd()
-	} else if s.viewState == ViewDetail {
+	case ViewDetail:
 		fetchCmd = tea.Batch(s.fetchSubnetsCmd(), s.fetchFirewallsCmd())
 	}
 	if fetchCmd == nil {
@@ -250,7 +249,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, s.Refresh()
 		}
 
-		if s.viewState == ViewList {
+		switch s.viewState {
+		case ViewList:
 			if msg.String() == "enter" {
 				if s.networksTable.Cursor() >= 0 && s.networksTable.Cursor() < len(s.networks) {
 					s.selectedNetwork = &s.networks[s.networksTable.Cursor()]
@@ -264,7 +264,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.networksTable = updatedTable
 			return s, cmd
 
-		} else if s.viewState == ViewDetail {
+		case ViewDetail:
 			switch msg.String() {
 			case "esc", "q":
 				s.viewState = ViewList
@@ -307,14 +307,15 @@ func (s *Service) View() string {
 		return s.spinner.View()
 	}
 
-	if s.viewState == ViewList {
+	switch s.viewState {
+	case ViewList:
 		breadcrumb := components.Breadcrumb(
 			fmt.Sprintf("Project %s", s.projectID),
 			s.Name(),
 			"Networks",
 		)
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, s.networksTable.View())
-	} else if s.viewState == ViewDetail {
+	case ViewDetail:
 		return s.renderDetailView()
 	}
 	return ""
@@ -420,13 +421,7 @@ func (s *Service) updateFirewallsTable() {
 	rows := make([]table.Row, len(s.firewalls))
 	for i, f := range s.firewalls {
 		prio := fmt.Sprintf("%d", f.Priority)
-		action := f.Action
-		if action == "ALLOW" {
-			action = "ALLOW"
-		} else if action == "DENY" {
-			action = "DENY"
-		}
-		rows[i] = table.Row{f.Name, f.Direction, action, prio, f.Source, f.Target}
+		rows[i] = table.Row{f.Name, f.Direction, f.Action, prio, f.Source, f.Target}
 	}
 	s.firewallsTable.SetRows(rows)
 }

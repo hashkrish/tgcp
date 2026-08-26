@@ -31,7 +31,7 @@ func renderAuthError(m MainModel) string {
  Press 'q' to quit.
 `
 
-	box := styles.OverlayBoxStyle.Copy().
+	box := styles.OverlayBoxStyle.
 		Border(lipgloss.DoubleBorder()).
 		BorderForeground(styles.ColorError).
 		Padding(styles.SpaceS, styles.SpaceM).

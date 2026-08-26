@@ -12,12 +12,12 @@ type ServiceFactory func(*Cache) services.Service
 
 // ServiceRegistry manages service registration and lazy initialization
 type ServiceRegistry struct {
-	factories      map[string]ServiceFactory
-	cache          *Cache
-	services       map[string]services.Service // Lazily initialized services
-	initialized    map[string]string            // Maps service name to projectID it was initialized with
-	mu             sync.RWMutex                 // Protects services map and initialized map
-	projectID      string                       // Current project ID for lazy initialization
+	factories   map[string]ServiceFactory
+	cache       *Cache
+	services    map[string]services.Service // Lazily initialized services
+	initialized map[string]string           // Maps service name to projectID it was initialized with
+	mu          sync.RWMutex                // Protects services map and initialized map
+	projectID   string                      // Current project ID for lazy initialization
 }
 
 // NewServiceRegistry creates a new service registry
@@ -40,17 +40,17 @@ func (r *ServiceRegistry) Register(name string, factory ServiceFactory) {
 func (r *ServiceRegistry) InitializeAll(ctx context.Context, projectID string) map[string]services.Service {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	
+
 	r.projectID = projectID
 	svcMap := make(map[string]services.Service)
-	
+
 	// Create service instances but don't initialize them yet
 	for name, factory := range r.factories {
 		svc := factory(r.cache)
 		svcMap[name] = svc
 		r.services[name] = svc
 	}
-	
+
 	return svcMap
 }
 
@@ -62,24 +62,24 @@ func (r *ServiceRegistry) GetOrInitializeService(ctx context.Context, name strin
 	projectID := r.projectID
 	initProjectID, isInitialized := r.initialized[name]
 	r.mu.RUnlock()
-	
+
 	if !exists {
 		// Service not found - check if it's registered
 		r.mu.RLock()
 		factory, registered := r.factories[name]
 		r.mu.RUnlock()
-		
+
 		if !registered {
 			return nil, nil // Service not registered
 		}
-		
+
 		// Create the service
 		r.mu.Lock()
 		svc = factory(r.cache)
 		r.services[name] = svc
 		r.mu.Unlock()
 	}
-	
+
 	// Check if service needs initialization or reinitialization
 	if projectID != "" {
 		// If service was initialized with a different project ID, we need to reinit
@@ -104,7 +104,7 @@ func (r *ServiceRegistry) GetOrInitializeService(ctx context.Context, name strin
 		}
 		// If already initialized with same projectID, no action needed
 	}
-	
+
 	return svc, nil
 }
 
@@ -115,14 +115,14 @@ func (r *ServiceRegistry) ReinitializeAll(ctx context.Context, projectID string,
 	// Clear initialization tracking - services will be reinitialized on next access
 	// or we can reinit them now if they're already in the map
 	r.mu.Unlock()
-	
+
 	// Reinitialize all services that have been created (lazy or not)
 	for name, svc := range svcMap {
 		// Check if this service was initialized
 		r.mu.RLock()
 		_, wasInitialized := r.initialized[name]
 		r.mu.RUnlock()
-		
+
 		if wasInitialized {
 			// Use the new Reinit() method for cleaner project switching
 			if err := svc.Reinit(ctx, projectID); err != nil {

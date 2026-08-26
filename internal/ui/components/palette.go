@@ -151,12 +151,12 @@ func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight
 
 			if i == nav.Selection {
 				// Highlighted
-				content = styles.SelectedActive.Copy().
+				content = styles.SelectedActive.
 					Width(boxWidth - 2). // Match box width approx (padding)
 					Render(content)
 			} else {
 				// Normal
-				content = styles.UnselectedItemStyle.Copy().
+				content = styles.UnselectedItemStyle.
 					PaddingLeft(styles.SpaceS).
 					Render(content)
 			}
@@ -165,14 +165,14 @@ func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight
 		suggestionsView = lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 		// Style the dropdown - no top border, same accent color as input
-		suggestionsView = styles.OverlayBoxStyle.Copy().
+		suggestionsView = styles.OverlayBoxStyle.
 			Width(boxWidth).
 			Border(lipgloss.RoundedBorder(), false, true, true, true). // No top border
 			BorderForeground(styles.ColorBrandAccent).                 // Match input border color
 			Render(suggestionsView)
 	} else if m.TextInput.Value() != "" {
 		// No matches - still connected to input
-		suggestionsView = styles.OverlayBoxStyle.Copy().
+		suggestionsView = styles.OverlayBoxStyle.
 			Width(boxWidth).
 			Border(lipgloss.RoundedBorder(), false, true, true, true).
 			BorderForeground(styles.ColorBrandAccent). // Match input border color

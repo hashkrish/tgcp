@@ -89,7 +89,7 @@ func (m ErrorModel) View() string {
 	)
 
 	// Wrap in styled box
-	box := styles.OverlayBoxStyle.Copy().
+	box := styles.OverlayBoxStyle.
 		BorderForeground(styles.ColorError).
 		Padding(styles.SpaceS, styles.SpaceM).
 		Width(80).

@@ -63,7 +63,7 @@ func TestInstanceToRow(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			row := InstanceToRow(tt.instance)
-			
+
 			if len(row) != len(tt.expected) {
 				t.Fatalf("Expected row length %d, got %d", len(tt.expected), len(row))
 			}
@@ -79,11 +79,11 @@ func TestInstanceToRow(t *testing.T) {
 
 func TestGetGCEColumns(t *testing.T) {
 	cols := GetGCEColumns()
-	
+
 	if len(cols) != 5 {
 		t.Errorf("Expected 5 columns, got %d", len(cols))
 	}
-	
+
 	if cols[0].Title != "VM Name" {
 		t.Errorf("Expected first column to be 'VM Name', got %q", cols[0].Title)
 	}

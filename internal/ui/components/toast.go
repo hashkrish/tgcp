@@ -97,4 +97,3 @@ func (t *ToastModel) View() string {
 
 	return toastStyle.Render(content)
 }
-

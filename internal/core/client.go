@@ -1,14 +1,14 @@
 // Package core provides core infrastructure for TGCP including authentication,
 // HTTP client configuration, caching, service registry, and project management.
 //
-// HTTP Client Configuration
+// # HTTP Client Configuration
 //
 // The HTTP client is configured with three layers of middleware:
 //  1. Google Authentication (Application Default Credentials)
 //  2. Rate Limiting (Token Bucket Algorithm)
 //  3. Retry Logic (Exponential Backoff)
 //
-// Rate Limiting
+// # Rate Limiting
 //
 // The rate limiter uses a token bucket algorithm to prevent API quota exhaustion.
 // Configuration: 10 requests per second with a burst capacity of 20 requests.
@@ -21,13 +21,14 @@
 //   - Burst capacity allows handling traffic spikes up to 20 requests
 //
 // Example:
-//   client, err := core.NewHTTPClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
-//   if err != nil {
-//       return err
-//   }
-//   // All requests through this client are automatically rate-limited
 //
-// Retry Logic
+//	client, err := core.NewHTTPClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
+//	if err != nil {
+//	    return err
+//	}
+//	// All requests through this client are automatically rate-limited
+//
+// # Retry Logic
 //
 // The retry transport implements exponential backoff for transient failures.
 // Configuration: Maximum 3 retries with exponential backoff (100ms, 200ms, 400ms).
@@ -48,10 +49,10 @@
 //   - Attempt 3: 400ms delay
 //
 // Example:
-//   // A request that fails with 500 will be retried up to 3 times
-//   // with increasing delays between attempts
-//   resp, err := client.Get("https://compute.googleapis.com/...")
 //
+//	// A request that fails with 500 will be retried up to 3 times
+//	// with increasing delays between attempts
+//	resp, err := client.Get("https://compute.googleapis.com/...")
 package core
 
 import (
@@ -74,12 +75,13 @@ import (
 // All requests through this client are automatically rate-limited and retried on transient failures.
 //
 // Example:
-//   ctx := context.Background()
-//   client, err := core.NewHTTPClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
-//   if err != nil {
-//       return fmt.Errorf("failed to create HTTP client: %w", err)
-//   }
-//   // Use client for GCP API calls - rate limiting and retries are automatic
+//
+//	ctx := context.Background()
+//	client, err := core.NewHTTPClient(ctx, "https://www.googleapis.com/auth/cloud-platform")
+//	if err != nil {
+//	    return fmt.Errorf("failed to create HTTP client: %w", err)
+//	}
+//	// Use client for GCP API calls - rate limiting and retries are automatic
 func NewHTTPClient(ctx context.Context, scopes ...string) (*http.Client, error) {
 	// 1. Create the base authenticated client
 	client, err := google.DefaultClient(ctx, scopes...)
@@ -140,7 +142,8 @@ type TokenBucket struct {
 //   - burst: Maximum tokens (e.g., 20.0 = can handle 20 requests in quick succession)
 //
 // Example:
-//   limiter := NewTokenBucket(10.0, 20.0) // 10 req/s, burst of 20
+//
+//	limiter := NewTokenBucket(10.0, 20.0) // 10 req/s, burst of 20
 func NewTokenBucket(rate, burst float64) *TokenBucket {
 	return &TokenBucket{
 		rate:       rate,
@@ -158,10 +161,11 @@ func NewTokenBucket(rate, burst float64) *TokenBucket {
 //   - context.Err() if the context was cancelled
 //
 // Example:
-//   if err := limiter.Wait(ctx); err != nil {
-//       return err // Context cancelled
-//   }
-//   // Token acquired, proceed with request
+//
+//	if err := limiter.Wait(ctx); err != nil {
+//	    return err // Context cancelled
+//	}
+//	// Token acquired, proceed with request
 func (tb *TokenBucket) Wait(ctx context.Context) error {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()

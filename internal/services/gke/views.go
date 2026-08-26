@@ -75,16 +75,3 @@ func (s *Service) renderDetailView() string {
 		cmdHint,
 	)
 }
-
-func (s *Service) renderConfirmation() string {
-	if s.selectedCluster == nil {
-		return "Error: No cluster selected"
-	}
-
-	// GKE doesn't have start/stop actions, but confirmation is ready for future use
-	// For now, use a generic confirmation
-	if s.pendingAction == "" {
-		s.pendingAction = "perform action"
-	}
-	return components.RenderConfirmation(s.pendingAction, s.selectedCluster.Name, "cluster")
-}

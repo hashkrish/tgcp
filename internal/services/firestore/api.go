@@ -11,8 +11,8 @@ import (
 )
 
 type Client struct {
-	firestoreSvc  *firestore.Service
-	datastoreSvc  *datastore.Service
+	firestoreSvc *firestore.Service
+	datastoreSvc *datastore.Service
 }
 
 func NewClient(ctx context.Context) (*Client, error) {

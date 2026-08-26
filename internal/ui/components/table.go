@@ -1,8 +1,8 @@
 package components
 
 import (
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/table"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/styles"
 )
@@ -19,7 +19,7 @@ const (
 // StandardTable is a standardized table component with built-in Focus/Blur and window size handling
 type StandardTable struct {
 	table.Model
-	focused     bool
+	focused      bool
 	heightOffset int
 }
 
@@ -62,8 +62,8 @@ func NewStandardTable(columns []table.Column, opts ...TableOption) *StandardTabl
 	)
 
 	st := &StandardTable{
-		Model:       t,
-		focused:     true,
+		Model:        t,
+		focused:      true,
 		heightOffset: 6, // Default offset
 	}
 
@@ -103,7 +103,7 @@ func (st *StandardTable) applyStyles() {
 			Bold(false)
 	}
 
-	st.Model.SetStyles(s)
+	st.SetStyles(s)
 }
 
 // Focus sets focus and applies focused styling
@@ -140,7 +140,7 @@ func (st *StandardTable) SetRows(rows []table.Row) {
 	if len(rows) == 0 {
 		return
 	}
-	cursor := st.Model.Cursor()
+	cursor := st.Cursor()
 	if cursor < 0 || cursor >= len(rows) {
 		st.Model.SetCursor(0)
 	}

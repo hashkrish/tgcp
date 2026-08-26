@@ -21,13 +21,6 @@ var (
 			Foreground(styles.ColorBrandAccent).
 			Bold(true).
 			MarginBottom(1)
-
-	labelStyle = lipgloss.NewStyle().
-			Foreground(styles.ColorTextMuted).
-			Width(15)
-
-	valueStyle = lipgloss.NewStyle().
-			Foreground(styles.ColorTextPrimary)
 )
 
 func (s *Service) View() string {
@@ -68,7 +61,7 @@ func (s *Service) View() string {
 	)
 
 	// Top Header
-	header := cardStyle.Copy().Width(s.cardWidth()).Render(
+	header := cardStyle.Width(s.cardWidth()).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true).Render("📡 Project Overview"),
 			"",
@@ -189,7 +182,7 @@ func (s *Service) View() string {
 		}
 	}
 
-	savingsSection := cardStyle.Copy().Width(s.cardWidth()).Render(
+	savingsSection := cardStyle.Width(s.cardWidth()).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			titleStyle.Render("⚡ Actionable Insights"),
 			insightsContent,
@@ -220,7 +213,7 @@ func (s *Service) View() string {
 		inventoryContent = lipgloss.JoinVertical(lipgloss.Left, r1, "", r2)
 	}
 
-	inventorySection := cardStyle.Copy().Width(s.cardWidth()).Render(
+	inventorySection := cardStyle.Width(s.cardWidth()).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			titleStyle.Render("📦 Global Resource Inventory"),
 			inventoryContent,
@@ -238,7 +231,7 @@ func (s *Service) View() string {
 			budgetContent += fmt.Sprintf("• %s: %s %s\n", b.Name, b.BudgetAmount, b.CurrencyCode)
 		}
 	}
-	budgetSection := cardStyle.Copy().Width(s.cardWidth()).Render(
+	budgetSection := cardStyle.Width(s.cardWidth()).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			titleStyle.Render("💰 Budget Radar"),
 			budgetContent,

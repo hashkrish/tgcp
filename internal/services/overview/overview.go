@@ -74,11 +74,6 @@ func (s *Service) Refresh() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// isLoading returns true if any data is still loading
-func (s *Service) isLoading() bool {
-	return s.data.InfoLoading || s.data.RecsLoading || s.data.InventoryLoading || s.data.BudgetsLoading
-}
-
 // -----------------------------------------------------------------------------
 // Lifecycle
 // -----------------------------------------------------------------------------

@@ -343,7 +343,7 @@ func (c *Client) GetGlobalInventory(projectID string) (ResourceInventory, error)
 			ch <- result{typ: "datasets", err: err}
 			return
 		}
-		defer bq.Close()
+		defer func() { _ = bq.Close() }()
 
 		it := bq.Datasets(context.Background())
 		var count int

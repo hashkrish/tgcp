@@ -13,8 +13,8 @@ type LastUpdatedMsg time.Time
 
 // SwitchToLogsMsg requests a context switch to the logging service
 type SwitchToLogsMsg struct {
-	Filter string
-	Source string // The short name of the service initiating the switch
+	Filter  string
+	Source  string // The short name of the service initiating the switch
 	Heading string // Optional heading to display (e.g. resource name)
 }
 

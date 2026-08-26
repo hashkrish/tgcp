@@ -27,7 +27,7 @@ func InitLogger() error {
 		return err
 	}
 	logFile = f
-	
+
 	// Write header
 	fmt.Fprintf(logFile, "\n--- Log session started at %s ---\n", time.Now().Format(time.RFC3339))
 	return nil

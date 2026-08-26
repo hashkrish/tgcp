@@ -36,13 +36,13 @@ func DetailCard(opts DetailCardOpts) string {
 	}
 
 	// Header bar style (matches table headers)
-	title := styles.HeaderStyle.Copy().
+	title := styles.HeaderStyle.
 		Width(width).
 		Render(opts.Title)
 
 	body := renderKeyValues(opts.Rows, styles.LabelStyle, styles.ValueStyle)
 
-	box := styles.PrimaryBoxStyle.Copy().
+	box := styles.PrimaryBoxStyle.
 		BorderForeground(borderColor).
 		Width(width).
 		Render(body)
@@ -61,7 +61,7 @@ func DetailSection(title, body string, borderColor lipgloss.Color) string {
 		borderColor = styles.ColorBorderSubtle
 	}
 	content := lipgloss.JoinVertical(lipgloss.Left, styles.HeaderStyle.Render(title), body)
-	return styles.SecondaryBoxStyle.Copy().
+	return styles.SecondaryBoxStyle.
 		BorderForeground(borderColor).
 		Width(80).
 		Render(content)

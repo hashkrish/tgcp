@@ -10,7 +10,7 @@ func TestCache_SetAndGet(t *testing.T) {
 
 	// Test Set and Get
 	cache.Set("key1", "value1", 1*time.Minute)
-	
+
 	val, found := cache.Get("key1")
 	if !found {
 		t.Errorf("Expected to find key1")
@@ -31,7 +31,7 @@ func TestCache_Expiration(t *testing.T) {
 
 	// Set with short TTL
 	cache.Set("key1", "value1", 10*time.Millisecond)
-	
+
 	// Should be found immediately
 	_, found := cache.Get("key1")
 	if !found {
@@ -65,12 +65,12 @@ func TestCache_Flush(t *testing.T) {
 
 	cache.Set("key1", "value1", 1*time.Minute)
 	cache.Set("key2", "value2", 1*time.Minute)
-	
+
 	cache.Flush()
 
 	_, found1 := cache.Get("key1")
 	_, found2 := cache.Get("key2")
-	
+
 	if found1 || found2 {
 		t.Errorf("Expected all keys to be flushed")
 	}
