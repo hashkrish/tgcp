@@ -25,8 +25,8 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
-	ViewNamespaces  // Datastore mode: list namespaces
-	ViewKinds       // Datastore mode: list kinds in a namespace
+	ViewNamespaces // Datastore mode: list namespaces
+	ViewKinds      // Datastore mode: list kinds in a namespace
 )
 
 type dbsMsg []Database

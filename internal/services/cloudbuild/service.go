@@ -3,6 +3,7 @@ package cloudbuild
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -18,12 +19,18 @@ const CacheTTL = 30 * time.Second
 // Models
 // =============================================================================
 
-// BuildItem represents a resource managed by this service
+// BuildItem represents a Cloud Build build
 type BuildItem struct {
-	Name   string
-	Status string
-	ID     string
-	Region string
+	ID           string
+	Status       string
+	StatusDetail string
+	TriggerID    string
+	CreateTime   time.Time
+	StartTime    time.Time
+	FinishTime   time.Time
+	Duration     time.Duration
+	LogURL       string
+	Images       []string
 }
 
 // Tick message for background refresh
@@ -61,9 +68,9 @@ type Service struct {
 	spinner       components.SpinnerModel
 
 	// Data State
-	items   []BuildItem
-	err     error
-	loaded  bool // Track if initial data has been loaded
+	items  []BuildItem
+	err    error
+	loaded bool // Track if initial data has been loaded
 
 	// View State
 	viewState    ViewState
@@ -73,21 +80,14 @@ type Service struct {
 	cache *core.Cache
 }
 
-// Placeholder Client type - replace with actual GCP client
-type Client struct{}
-
-func NewClient(ctx context.Context) (*Client, error) {
-	// Initialize your GCP client here
-	return &Client{}, nil
-}
-
 // NewService creates a new instance of the service
 func NewService(cache *core.Cache) *Service {
 	columns := []table.Column{
-		{Title: "Name", Width: 30},
-		{Title: "Status", Width: 15},
-		{Title: "Region", Width: 15},
-		{Title: "ID", Width: 20},
+		{Title: "ID", Width: 14},
+		{Title: "Status", Width: 12},
+		{Title: "Trigger", Width: 14},
+		{Title: "Created", Width: 19},
+		{Title: "Duration", Width: 10},
 	}
 
 	t := components.NewStandardTable(columns)
@@ -325,17 +325,41 @@ func (s *Service) renderDetailView() string {
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project: %s", s.projectID),
 		s.Name(),
-		s.selectedItem.Name,
+		s.selectedItem.ID,
 	)
+
+	rows := []components.KeyValue{
+		{Key: "ID", Value: s.selectedItem.ID},
+		{Key: "Status", Value: s.selectedItem.Status},
+	}
+	if s.selectedItem.StatusDetail != "" {
+		rows = append(rows, components.KeyValue{Key: "Status Detail", Value: s.selectedItem.StatusDetail})
+	}
+	if s.selectedItem.TriggerID != "" {
+		rows = append(rows, components.KeyValue{Key: "Trigger ID", Value: s.selectedItem.TriggerID})
+	}
+	if !s.selectedItem.CreateTime.IsZero() {
+		rows = append(rows, components.KeyValue{Key: "Created", Value: s.selectedItem.CreateTime.Format("2006-01-02 15:04:05")})
+	}
+	if !s.selectedItem.StartTime.IsZero() {
+		rows = append(rows, components.KeyValue{Key: "Started", Value: s.selectedItem.StartTime.Format("2006-01-02 15:04:05")})
+	}
+	if !s.selectedItem.FinishTime.IsZero() {
+		rows = append(rows, components.KeyValue{Key: "Finished", Value: s.selectedItem.FinishTime.Format("2006-01-02 15:04:05")})
+	}
+	if s.selectedItem.Duration > 0 {
+		rows = append(rows, components.KeyValue{Key: "Duration", Value: s.selectedItem.Duration.Round(time.Second).String()})
+	}
+	if len(s.selectedItem.Images) > 0 {
+		rows = append(rows, components.KeyValue{Key: "Images", Value: strings.Join(s.selectedItem.Images, ", ")})
+	}
+	if s.selectedItem.LogURL != "" {
+		rows = append(rows, components.KeyValue{Key: "Log URL", Value: s.selectedItem.LogURL})
+	}
 
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Build Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: s.selectedItem.Name},
-			{Key: "Status", Value: s.selectedItem.Status},
-			{Key: "Region", Value: s.selectedItem.Region},
-			{Key: "ID", Value: s.selectedItem.ID},
-		},
+		Rows:  rows,
 	})
 
 	actions := components.RenderFooterHint("q Back")
@@ -369,8 +393,10 @@ func (s *Service) fetchDataCmd(force bool) tea.Cmd {
 			return errMsg(fmt.Errorf("client not initialized"))
 		}
 
-		// Placeholder for now
-		items := []BuildItem{}
+		items, err := s.client.ListBuilds(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
 
 		if s.cache != nil {
 			s.cache.Set(cacheKey, items, CacheTTL)
@@ -387,14 +413,33 @@ func (s *Service) fetchDataCmd(force bool) tea.Cmd {
 func (s *Service) updateTable(items []BuildItem) {
 	rows := make([]table.Row, len(items))
 	for i, item := range items {
+		created := ""
+		if !item.CreateTime.IsZero() {
+			created = item.CreateTime.Format("2006-01-02 15:04:05")
+		}
+		duration := ""
+		if item.Duration > 0 {
+			duration = item.Duration.Round(time.Second).String()
+		}
 		rows[i] = table.Row{
-			item.Name,
-			components.RenderStatus(item.Status), 
-			item.Region,
-			item.ID,
+			shortID(item.ID),
+			components.RenderStatus(item.Status),
+			shortID(item.TriggerID),
+			created,
+			duration,
 		}
 	}
 	s.table.SetRows(rows)
+}
+
+// shortID trims a UUID-style identifier down to a readable prefix for
+// table display; the full value is still shown in the detail view.
+func shortID(id string) string {
+	const n = 12
+	if len(id) <= n {
+		return id
+	}
+	return id[:n]
 }
 
 func (s *Service) getCurrentItems() []BuildItem {
@@ -406,7 +451,6 @@ func (s *Service) getFilteredItems(items []BuildItem, query string) []BuildItem 
 		return items
 	}
 	return components.FilterSlice(items, query, func(item BuildItem, q string) bool {
-		return components.ContainsMatch(item.Name, item.Status, item.Region, item.ID)(q)
+		return components.ContainsMatch(item.ID, item.Status, item.TriggerID, item.StatusDetail)(q)
 	})
 }
-

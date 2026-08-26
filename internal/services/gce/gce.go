@@ -388,7 +388,7 @@ func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 // Cmd to refresh (public)
 func (s *Service) Refresh() tea.Cmd {
 	return tea.Batch(
-		s.spinner.Start(""), // Start animated spinner (empty = use playful messages)
+		s.spinner.Start(""),        // Start animated spinner (empty = use playful messages)
 		s.fetchInstancesCmd(false), // Smart refresh
 	)
 }

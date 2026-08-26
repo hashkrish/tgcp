@@ -18,12 +18,15 @@ const CacheTTL = 30 * time.Second
 // Models
 // =============================================================================
 
-// RepositoryItem represents a resource managed by this service
+// RepositoryItem represents an Artifact Registry repository
 type RepositoryItem struct {
-	Name   string
-	Status string
-	ID     string
-	Region string
+	Name        string // repository ID (last path segment)
+	Format      string // DOCKER, MAVEN, NPM, PYTHON, APT, YUM, GO, KFP, GENERIC, ...
+	Mode        string // STANDARD_REPOSITORY, VIRTUAL_REPOSITORY, REMOTE_REPOSITORY
+	Region      string // location, e.g. us-central1
+	SizeBytes   int64
+	Description string
+	CreateTime  time.Time
 }
 
 // Tick message for background refresh
@@ -61,9 +64,9 @@ type Service struct {
 	spinner       components.SpinnerModel
 
 	// Data State
-	items   []RepositoryItem
-	err     error
-	loaded  bool // Track if initial data has been loaded
+	items  []RepositoryItem
+	err    error
+	loaded bool // Track if initial data has been loaded
 
 	// View State
 	viewState    ViewState
@@ -73,21 +76,13 @@ type Service struct {
 	cache *core.Cache
 }
 
-// Placeholder Client type - replace with actual GCP client
-type Client struct{}
-
-func NewClient(ctx context.Context) (*Client, error) {
-	// Initialize your GCP client here
-	return &Client{}, nil
-}
-
 // NewService creates a new instance of the service
 func NewService(cache *core.Cache) *Service {
 	columns := []table.Column{
 		{Title: "Name", Width: 30},
-		{Title: "Status", Width: 15},
+		{Title: "Format", Width: 12},
+		{Title: "Mode", Width: 20},
 		{Title: "Region", Width: 15},
-		{Title: "ID", Width: 20},
 	}
 
 	t := components.NewStandardTable(columns)
@@ -328,14 +323,25 @@ func (s *Service) renderDetailView() string {
 		s.selectedItem.Name,
 	)
 
+	sizeStr := formatBytes(s.selectedItem.SizeBytes)
+
+	rows := []components.KeyValue{
+		{Key: "Name", Value: s.selectedItem.Name},
+		{Key: "Format", Value: s.selectedItem.Format},
+		{Key: "Mode", Value: s.selectedItem.Mode},
+		{Key: "Region", Value: s.selectedItem.Region},
+		{Key: "Size", Value: sizeStr},
+	}
+	if s.selectedItem.Description != "" {
+		rows = append(rows, components.KeyValue{Key: "Description", Value: s.selectedItem.Description})
+	}
+	if !s.selectedItem.CreateTime.IsZero() {
+		rows = append(rows, components.KeyValue{Key: "Created", Value: s.selectedItem.CreateTime.Format("2006-01-02 15:04:05")})
+	}
+
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Repository Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: s.selectedItem.Name},
-			{Key: "Status", Value: s.selectedItem.Status},
-			{Key: "Region", Value: s.selectedItem.Region},
-			{Key: "ID", Value: s.selectedItem.ID},
-		},
+		Rows:  rows,
 	})
 
 	actions := components.RenderFooterHint("q Back")
@@ -369,8 +375,10 @@ func (s *Service) fetchDataCmd(force bool) tea.Cmd {
 			return errMsg(fmt.Errorf("client not initialized"))
 		}
 
-		// Placeholder for now
-		items := []RepositoryItem{}
+		items, err := s.client.ListRepositories(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
 
 		if s.cache != nil {
 			s.cache.Set(cacheKey, items, CacheTTL)
@@ -389,9 +397,9 @@ func (s *Service) updateTable(items []RepositoryItem) {
 	for i, item := range items {
 		rows[i] = table.Row{
 			item.Name,
-			components.RenderStatus(item.Status), 
+			item.Format,
+			item.Mode,
 			item.Region,
-			item.ID,
 		}
 	}
 	s.table.SetRows(rows)
@@ -406,7 +414,21 @@ func (s *Service) getFilteredItems(items []RepositoryItem, query string) []Repos
 		return items
 	}
 	return components.FilterSlice(items, query, func(item RepositoryItem, q string) bool {
-		return components.ContainsMatch(item.Name, item.Status, item.Region, item.ID)(q)
+		return components.ContainsMatch(item.Name, item.Format, item.Mode, item.Region)(q)
 	})
 }
 
+// formatBytes renders a byte count as a human-readable string (e.g. "1.2 MB").
+func formatBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	units := "KMGTPE"
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), units[exp])
+}

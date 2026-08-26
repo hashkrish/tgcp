@@ -325,7 +325,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q":
 				if s.currentPrefix == "" {
 					s.filter.ExitFilterMode() // Clear object filter so it doesn't leak into the bucket list
-					s.viewState = ViewDetail // Back to Details
+					s.viewState = ViewDetail  // Back to Details
 				} else {
 					s.currentPrefix = parentPrefix(s.currentPrefix)
 					return s, tea.Batch(s.fetchObjectsCmd(), s.spinner.Start(""))
