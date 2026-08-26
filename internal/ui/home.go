@@ -147,7 +147,6 @@ func renderLandingPage(m MainModel) string {
 	}
 	if bannerHeight+1+chromeRows > available {
 		showHints = false
-		chromeRows--
 	}
 
 	// Combine components vertically. NOTE: a gap must be "" here, not "\n" —
