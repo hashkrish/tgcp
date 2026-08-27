@@ -1,6 +1,8 @@
 package gce
 
 import (
+	"fmt"
+
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
@@ -21,4 +23,28 @@ func (s *Service) getFilteredInstances(instances []Instance, query string) []Ins
 	return components.FilterSlice(instances, query, func(inst Instance, q string) bool {
 		return components.ContainsMatch(inst.Name, inst.Zone, inst.InternalIP, inst.ExternalIP)(q)
 	})
+}
+
+func (s *Service) updateGroupTable(groups []InstanceGroup) {
+	rows := make([]table.Row, len(groups))
+	for i, g := range groups {
+		groupType := "Zonal"
+		if g.Regional {
+			groupType = "Regional"
+		}
+		autoscaling := "Off"
+		if g.AutoscalingOn {
+			autoscaling = "On"
+		}
+		rows[i] = table.Row{
+			g.Name,
+			g.Location,
+			groupType,
+			fmt.Sprintf("%d", g.TargetSize),
+			g.InstanceTemplate,
+			autoscaling,
+			g.Status,
+		}
+	}
+	s.groupTable.SetRows(rows)
 }

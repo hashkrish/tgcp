@@ -60,7 +60,7 @@ func (s *Service) SSHCmd(instance Instance) tea.Cmd {
 			cmd := exec.Command("tmux", tmuxArgs...)
 
 			if err := cmd.Run(); err != nil {
-				return actionResultMsg{err: fmt.Errorf("Tmux split failed: %w", err)}
+				return actionResultMsg{err: fmt.Errorf("tmux split failed: %w", err)}
 			}
 			return actionResultMsg{msg: "Opened SSH in new pane"}
 		}

@@ -12,18 +12,24 @@ import (
 	"github.com/yogirk/tgcp/internal/services/bigquery"
 	"github.com/yogirk/tgcp/internal/services/bigtable"
 	"github.com/yogirk/tgcp/internal/services/cloudbuild"
+	"github.com/yogirk/tgcp/internal/services/cloudfunctions"
 	"github.com/yogirk/tgcp/internal/services/cloudrun"
 	"github.com/yogirk/tgcp/internal/services/cloudsql"
 	"github.com/yogirk/tgcp/internal/services/cloudtasks"
 	"github.com/yogirk/tgcp/internal/services/dataflow"
 	"github.com/yogirk/tgcp/internal/services/dataproc"
 	"github.com/yogirk/tgcp/internal/services/disks"
+	"github.com/yogirk/tgcp/internal/services/dns"
+	"github.com/yogirk/tgcp/internal/services/filestore"
 	"github.com/yogirk/tgcp/internal/services/firestore"
 	"github.com/yogirk/tgcp/internal/services/gce"
 	"github.com/yogirk/tgcp/internal/services/gcs"
 	"github.com/yogirk/tgcp/internal/services/gke"
 	"github.com/yogirk/tgcp/internal/services/iam"
+	"github.com/yogirk/tgcp/internal/services/kms"
+	"github.com/yogirk/tgcp/internal/services/loadbalancing"
 	"github.com/yogirk/tgcp/internal/services/logging"
+	"github.com/yogirk/tgcp/internal/services/monitoring"
 	"github.com/yogirk/tgcp/internal/services/net"
 	"github.com/yogirk/tgcp/internal/services/overview"
 	"github.com/yogirk/tgcp/internal/services/parametermanager"
@@ -895,6 +901,9 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	registry.Register("disks", func(cache *core.Cache) services.Service {
 		return disks.NewService(cache)
 	})
+	registry.Register("filestore", func(cache *core.Cache) services.Service {
+		return filestore.NewService(cache)
+	})
 	registry.Register("pubsub", func(cache *core.Cache) services.Service {
 		return pubsub.NewService(cache)
 	})
@@ -940,8 +949,23 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	registry.Register("net", func(cache *core.Cache) services.Service {
 		return net.NewService(cache)
 	})
+	registry.Register("loadbalancing", func(cache *core.Cache) services.Service {
+		return loadbalancing.NewService(cache)
+	})
+	registry.Register("dns", func(cache *core.Cache) services.Service {
+		return dns.NewService(cache)
+	})
+	registry.Register("kms", func(cache *core.Cache) services.Service {
+		return kms.NewService(cache)
+	})
+	registry.Register("functions", func(cache *core.Cache) services.Service {
+		return cloudfunctions.NewService(cache)
+	})
 	registry.Register("logs", func(cache *core.Cache) services.Service {
 		return logging.NewService(cache)
+	})
+	registry.Register("monitoring", func(cache *core.Cache) services.Service {
+		return monitoring.NewService(cache)
 	})
 	registry.Register("secrets", func(cache *core.Cache) services.Service {
 		return secrets.NewService(cache)

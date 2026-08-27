@@ -38,3 +38,19 @@ type Instance struct {
 	Disks        []Disk
 	OSImage      string
 }
+
+// InstanceGroup represents a Managed Instance Group (MIG). Fields are
+// limited to what the ListInstanceGroups AggregatedList call itself
+// returns — no per-group follow-up API calls are made, so there's no
+// separate "current size" (that requires a per-group instanceGroups.get
+// call); Status reports whether the group is Stable or still converging
+// toward TargetSize instead.
+type InstanceGroup struct {
+	Name             string
+	Location         string // zone or region name
+	Regional         bool
+	TargetSize       int64
+	InstanceTemplate string
+	AutoscalingOn    bool
+	Status           string // "Stable" or "Updating" (derived from Status.IsStable)
+}

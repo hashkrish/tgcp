@@ -261,7 +261,11 @@ func (s *Service) renderListView() string {
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
-	content.WriteString(s.table.View())
+	if len(s.jobs) == 0 {
+		content.WriteString(components.EmptyState("jobs"))
+	} else {
+		content.WriteString(s.table.View())
+	}
 	return content.String()
 }
 

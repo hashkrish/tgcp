@@ -80,8 +80,17 @@ func (s *Service) renderConfirmation() string {
 	return components.RenderConfirmation(s.pendingAction, s.selectedInstance.Name, "instance")
 }
 
-// renderListView renders the main instance table
+// renderListView renders the main list view, dispatching to whichever tab
+// (Instances or Instance Groups) is currently active.
 func (s *Service) renderListView() string {
+	if s.activeTab == TabInstanceGroups {
+		return s.renderGroupsView()
+	}
+	return s.renderInstancesView()
+}
+
+// renderInstancesView renders the instance table (existing behavior).
+func (s *Service) renderInstancesView() string {
 	doc := strings.Builder{}
 
 	// Breadcrumb + Filter Bar
@@ -108,5 +117,25 @@ func (s *Service) renderListView() string {
 	doc.WriteString("\n\n")
 
 	doc.WriteString(styles.BaseStyle.Render(s.table.View()))
+	return doc.String()
+}
+
+// renderGroupsView renders the Instance Groups (MIGs) table.
+func (s *Service) renderGroupsView() string {
+	doc := strings.Builder{}
+
+	doc.WriteString(components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Instance Groups",
+	))
+	doc.WriteString("\n\n")
+
+	if len(s.groups) == 0 {
+		doc.WriteString(components.EmptyState("instance groups"))
+		return doc.String()
+	}
+
+	doc.WriteString(styles.BaseStyle.Render(s.groupTable.View()))
 	return doc.String()
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/ui/components"
@@ -24,11 +25,27 @@ const (
 	ViewConfirmation
 )
 
+// Tab distinguishes the Instances list from the Instance Groups (MIGs) list.
+// Only ViewList is tab-aware — ViewDetail/ViewConfirmation remain exclusively
+// about a selected Instance, so this is purely additive: when activeTab is
+// its zero value (TabInstances), every existing instances code path behaves
+// exactly as before.
+type Tab int
+
+const (
+	TabInstances Tab = iota
+	TabInstanceGroups
+)
+
 // Service implements the services.Service interface for GCE
 type Service struct {
-	client    *Client
-	projectID string
-	table     *components.StandardTable
+	client     *Client
+	projectID  string
+	table      *components.StandardTable
+	groupTable *components.StandardTable
+
+	// Tab (ViewList only — see Tab doc comment)
+	activeTab Tab
 
 	// UI Components
 	filter        components.FilterModel
@@ -37,6 +54,7 @@ type Service struct {
 
 	// State
 	instances []Instance
+	groups    []InstanceGroup
 	err       error
 
 	// View State
@@ -54,15 +72,27 @@ type Service struct {
 func NewService(cache *core.Cache) *Service {
 	// Table Setup
 	columns := GetGCEColumns()
-
 	t := components.NewStandardTable(columns)
 
+	groupColumns := []table.Column{
+		{Title: "Name", Width: 28},
+		{Title: "Location", Width: 15},
+		{Title: "Type", Width: 10},
+		{Title: "Target Size", Width: 12},
+		{Title: "Template", Width: 25},
+		{Title: "Autoscaling", Width: 12},
+		{Title: "Status", Width: 10},
+	}
+	gt := components.NewStandardTable(groupColumns)
+
 	svc := &Service{
-		table:     t,
-		filter:    components.NewFilterWithPlaceholder("Filter instances..."),
-		spinner:   components.NewSpinner(),
-		viewState: ViewList,
-		cache:     cache,
+		table:      t,
+		groupTable: gt,
+		filter:     components.NewFilterWithPlaceholder("Filter instances..."),
+		spinner:    components.NewSpinner(),
+		viewState:  ViewList,
+		activeTab:  TabInstances,
+		cache:      cache,
 	}
 	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredInstances, svc.updateTable)
 	return svc
@@ -78,7 +108,10 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  s:Start  x:Stop  h:SSH  l:Logs  Ent:Detail"
+		if s.activeTab == TabInstanceGroups {
+			return "[]:Tabs  r:Refresh  /:Filter"
+		}
+		return "[]:Tabs  r:Refresh  /:Filter  s:Start  x:Stop  h:SSH  l:Logs  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
 		return "Esc/q:Back  s:Start  x:Stop  h:SSH"
@@ -92,15 +125,18 @@ func (s *Service) HelpText() string {
 // Focus handles input focus
 func (s *Service) Focus() {
 	s.table.Focus()
+	s.groupTable.Focus()
 }
 
 // Blur handles loss of input focus
 func (s *Service) Blur() {
 	s.table.Blur()
+	s.groupTable.Blur()
 }
 
 // Msg types
 type instancesMsg []Instance
+type groupsMsg []InstanceGroup
 type errMsg error
 
 // InitService initializes the service logic (API clients)
@@ -142,7 +178,13 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
-		// Background refresh
+		// Background refresh. Instances always refresh (existing behavior,
+		// unchanged); groups only refresh in the background while their tab
+		// is actually visible, matching the pattern used elsewhere in this
+		// codebase (e.g. cloudrun) for a second, less-frequently-viewed tab.
+		if s.activeTab == TabInstanceGroups {
+			return s, tea.Batch(s.fetchInstancesCmd(false), s.fetchGroupsCmd(false), s.tick())
+		}
 		return s, tea.Batch(s.fetchInstancesCmd(false), s.tick())
 
 	// Handle Data Fetching
@@ -158,6 +200,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
+	case groupsMsg:
+		s.spinner.Stop()
+		s.groups = msg
+		s.updateGroupTable(msg)
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:
@@ -186,22 +234,44 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
+		s.groupTable.HandleWindowSizeDefault(msg)
 
 		// Optional: We could also resize columns here based on width
 		// but let's stick to height for now to fix the "truncation" visual
 
 	case tea.MouseMsg:
-		// Forward mouse events to table for click selection
+		// Forward mouse events to the active tab's table for click selection
 		if s.viewState == ViewList {
 			var updatedTable *components.StandardTable
-			updatedTable, cmd = s.table.Update(msg)
-			s.table = updatedTable
+			if s.activeTab == TabInstanceGroups {
+				updatedTable, cmd = s.groupTable.Update(msg)
+				s.groupTable = updatedTable
+			} else {
+				updatedTable, cmd = s.table.Update(msg)
+				s.table = updatedTable
+			}
 			return s, cmd
 		}
 
 	case tea.KeyMsg:
-		// Handle filter mode (only in list view)
+		// Tab switching (list view only, either tab)
 		if s.viewState == ViewList {
+			switch msg.String() {
+			case "[", "]":
+				if s.activeTab == TabInstances {
+					s.activeTab = TabInstanceGroups
+					if s.groups == nil {
+						return s, tea.Batch(s.spinner.Start(""), s.fetchGroupsCmd(false))
+					}
+				} else {
+					s.activeTab = TabInstances
+				}
+				return s, nil
+			}
+		}
+
+		// Handle filter mode (only in list view, instances tab — groups has no filter)
+		if s.viewState == ViewList && s.activeTab == TabInstances {
 			result := s.filterSession.HandleKey(msg)
 
 			if result.Handled {
@@ -215,7 +285,19 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// LIST VIEW KEYBINDINGS
+		// LIST VIEW KEYBINDINGS — Instance Groups tab (read-only)
+		if s.viewState == ViewList && s.activeTab == TabInstanceGroups {
+			switch msg.String() {
+			case "r":
+				return s, s.fetchGroupsCmd(true)
+			}
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.groupTable.Update(msg)
+			s.groupTable = updatedTable
+			return s, cmd
+		}
+
+		// LIST VIEW KEYBINDINGS — Instances tab (existing behavior, unchanged)
 		if s.viewState == ViewList {
 			switch msg.String() {
 			case "r":
@@ -297,9 +379,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "enter": // Confirm
 				var actionCmd tea.Cmd
-				if s.pendingAction == "start" {
+				switch s.pendingAction {
+				case "start":
 					actionCmd = s.StartInstanceCmd(*s.selectedInstance)
-				} else if s.pendingAction == "stop" {
+				case "stop":
 					actionCmd = s.StopInstanceCmd(*s.selectedInstance)
 				}
 
@@ -322,7 +405,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle Table Events (only in List View)
 	default:
 		if s.viewState == ViewList {
-			s.table, cmd = s.table.Update(msg)
+			if s.activeTab == TabInstanceGroups {
+				s.groupTable, cmd = s.groupTable.Update(msg)
+			} else {
+				s.table, cmd = s.table.Update(msg)
+			}
 		}
 	}
 
@@ -385,8 +472,43 @@ func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 	}
 }
 
+// Cmd to fetch instance groups (MIGs)
+func (s *Service) fetchGroupsCmd(force bool) tea.Cmd {
+	return func() tea.Msg {
+		key := "gce_instance_groups"
+
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if groups, ok := val.([]InstanceGroup); ok {
+					return groupsMsg(groups)
+				}
+			}
+		}
+
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not initialized"))
+		}
+		groups, err := s.client.ListInstanceGroups(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
+
+		if s.cache != nil {
+			s.cache.Set(key, groups, CacheTTL)
+		}
+
+		return groupsMsg(groups)
+	}
+}
+
 // Cmd to refresh (public)
 func (s *Service) Refresh() tea.Cmd {
+	if s.activeTab == TabInstanceGroups {
+		return tea.Batch(
+			s.spinner.Start(""),
+			s.fetchGroupsCmd(true),
+		)
+	}
 	return tea.Batch(
 		s.spinner.Start(""),        // Start animated spinner (empty = use playful messages)
 		s.fetchInstancesCmd(false), // Smart refresh
@@ -394,12 +516,13 @@ func (s *Service) Refresh() tea.Cmd {
 }
 
 // Reset resets the service state
-// Reset resets the service state
 func (s *Service) Reset() {
 	s.viewState = ViewList
+	s.activeTab = TabInstances
 	s.selectedInstance = nil
 	s.err = nil          // Fix: Clear previous errors on reset
 	s.table.SetCursor(0) // Optional: reset cursor to top
+	s.groupTable.SetCursor(0)
 	s.filter.ExitFilterMode()
 }
 

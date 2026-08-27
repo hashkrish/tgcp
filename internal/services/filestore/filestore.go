@@ -1,4 +1,4 @@
-package cloudtasks
+package filestore
 
 import (
 	"context"
@@ -27,7 +27,7 @@ const (
 	ViewDetail
 )
 
-type queuesMsg []Queue
+type instancesMsg []Instance
 type errMsg error
 
 // -----------------------------------------------------------------------------
@@ -40,46 +40,47 @@ type Service struct {
 	table     *components.StandardTable
 
 	filter        components.FilterModel
-	filterSession components.FilterSession[Queue]
+	filterSession components.FilterSession[Instance]
 
-	queues  []Queue
-	spinner components.SpinnerModel
-	err     error
+	instances []Instance
+	spinner   components.SpinnerModel
+	err       error
 
-	viewState     ViewState
-	selectedQueue *Queue
+	viewState        ViewState
+	selectedInstance *Instance
 
 	cache *core.Cache
 }
 
 func NewService(cache *core.Cache) *Service {
 	columns := []table.Column{
-		{Title: "Name", Width: 30},
-		{Title: "Region", Width: 15},
+		{Title: "Name", Width: 22},
+		{Title: "Zone/Region", Width: 15},
+		{Title: "Tier", Width: 14},
+		{Title: "Capacity", Width: 10},
 		{Title: "State", Width: 12},
-		{Title: "Max Rate/s", Width: 12},
-		{Title: "Max Concurrent", Width: 16},
+		{Title: "Network", Width: 16},
 	}
 
 	t := components.NewStandardTable(columns)
 
 	svc := &Service{
 		table:     t,
-		filter:    components.NewFilterWithPlaceholder("Filter queues..."),
+		filter:    components.NewFilterWithPlaceholder("Filter instances..."),
 		spinner:   components.NewSpinner(),
 		viewState: ViewList,
 		cache:     cache,
 	}
-	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredQueues, svc.updateTable)
+	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredInstances, svc.updateTable)
 	return svc
 }
 
 func (s *Service) Name() string {
-	return "Cloud Tasks"
+	return "Filestore"
 }
 
 func (s *Service) ShortName() string {
-	return "cloudtasks"
+	return "filestore"
 }
 
 func (s *Service) HelpText() string {
@@ -113,7 +114,11 @@ func (s *Service) Reinit(ctx context.Context, projectID string) error {
 }
 
 func (s *Service) Init() tea.Cmd {
-	return s.tick()
+	return tea.Batch(
+		s.spinner.Start(""),
+		s.fetchInstancesCmd(false),
+		s.tick(),
+	)
 }
 
 func (s *Service) tick() tea.Cmd {
@@ -125,13 +130,13 @@ func (s *Service) tick() tea.Cmd {
 func (s *Service) Refresh() tea.Cmd {
 	return tea.Batch(
 		s.spinner.Start(""),
-		s.fetchQueuesCmd(true),
+		s.fetchInstancesCmd(true),
 	)
 }
 
 func (s *Service) Reset() {
 	s.viewState = ViewList
-	s.selectedQueue = nil
+	s.selectedInstance = nil
 	s.err = nil
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
@@ -162,12 +167,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
-		return s, tea.Batch(s.fetchQueuesCmd(false), s.tick())
+		return s, tea.Batch(s.fetchInstancesCmd(false), s.tick())
 
-	case queuesMsg:
+	case instancesMsg:
 		s.spinner.Stop()
-		s.queues = msg
-		s.filterSession.Apply(s.queues)
+		s.instances = msg
+		s.filterSession.Apply(s.instances)
+		if s.selectedInstance != nil {
+			for i := range s.instances {
+				if s.instances[i].Name == s.selectedInstance.Name {
+					s.selectedInstance = &s.instances[i]
+					break
+				}
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:
@@ -205,9 +218,9 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				return s, s.Refresh()
 			case "enter":
-				queues := s.getFilteredQueues(s.queues, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(queues) {
-					s.selectedQueue = &queues[idx]
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
 					s.viewState = ViewDetail
 				}
 			}
@@ -221,7 +234,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc", "q":
 				s.viewState = ViewList
-				s.selectedQueue = nil
+				s.selectedInstance = nil
 				return s, nil
 			}
 		}
@@ -236,7 +249,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (s *Service) View() string {
 	if s.err != nil {
-		return components.RenderError(s.err, s.Name(), "Queues")
+		return components.RenderError(s.err, s.Name(), "Instances")
 	}
 
 	if s.spinner.IsActive() {
@@ -255,16 +268,18 @@ func (s *Service) renderListView() string {
 	content.WriteString(components.Breadcrumb(
 		fmt.Sprintf("Project %s", s.projectID),
 		s.Name(),
-		"Queues",
+		"Instances",
 	))
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
-	if len(s.queues) == 0 {
-		content.WriteString(components.EmptyState("queues"))
-	} else {
-		content.WriteString(s.table.View())
+
+	if len(s.instances) == 0 {
+		content.WriteString(components.EmptyState("filestore instances"))
+		return content.String()
 	}
+
+	content.WriteString(s.table.View())
 	return content.String()
 }
 
@@ -272,14 +287,14 @@ func (s *Service) renderListView() string {
 // Helpers
 // -----------------------------------------------------------------------------
 
-func (s *Service) fetchQueuesCmd(force bool) tea.Cmd {
+func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := fmt.Sprintf("cloudtasks_queues:%s", s.projectID)
+		key := fmt.Sprintf("filestore_instances:%s", s.projectID)
 
 		if !force && s.cache != nil {
 			if val, found := s.cache.Get(key); found {
-				if items, ok := val.([]Queue); ok {
-					return queuesMsg(items)
+				if items, ok := val.([]Instance); ok {
+					return instancesMsg(items)
 				}
 			}
 		}
@@ -288,7 +303,7 @@ func (s *Service) fetchQueuesCmd(force bool) tea.Cmd {
 			return errMsg(fmt.Errorf("client not init"))
 		}
 
-		items, err := s.client.ListQueues(s.projectID)
+		items, err := s.client.ListInstances(s.projectID)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -297,30 +312,31 @@ func (s *Service) fetchQueuesCmd(force bool) tea.Cmd {
 			s.cache.Set(key, items, CacheTTL)
 		}
 
-		return queuesMsg(items)
+		return instancesMsg(items)
 	}
 }
 
-func (s *Service) updateTable(items []Queue) {
+func (s *Service) updateTable(items []Instance) {
 	rows := make([]table.Row, len(items))
 	for i, item := range items {
 		rows[i] = table.Row{
 			item.Name,
 			item.Location,
+			item.Tier,
+			fmt.Sprintf("%d GB", item.CapacityGB),
 			item.State,
-			fmt.Sprintf("%.1f", item.MaxDispatchRate),
-			fmt.Sprintf("%d", item.MaxConcurrent),
+			item.Network,
 		}
 	}
 	s.table.SetRows(rows)
 }
 
-// getFilteredQueues returns filtered queues based on the query string
-func (s *Service) getFilteredQueues(queues []Queue, query string) []Queue {
+// getFilteredInstances returns filtered instances based on the query string
+func (s *Service) getFilteredInstances(instances []Instance, query string) []Instance {
 	if query == "" {
-		return queues
+		return instances
 	}
-	return components.FilterSlice(queues, query, func(queue Queue, q string) bool {
-		return components.ContainsMatch(queue.Name, queue.Location, queue.State)(q)
+	return components.FilterSlice(instances, query, func(inst Instance, q string) bool {
+		return components.ContainsMatch(inst.Name, inst.Location, inst.Tier, inst.State, inst.Network)(q)
 	})
 }

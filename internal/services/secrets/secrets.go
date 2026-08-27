@@ -263,12 +263,13 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		// Forward mouse events to active table for click selection
-		if s.viewState == ViewList {
+		switch s.viewState {
+		case ViewList:
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.table.Update(msg)
 			s.table = updatedTable
 			return s, cmd
-		} else if s.viewState == ViewVersions {
+		case ViewVersions:
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.versionTable.Update(msg)
 			s.versionTable = updatedTable
@@ -411,6 +412,14 @@ func (s *Service) renderListView() string {
 		fmt.Sprintf("Project: %s", s.projectID),
 		s.Name(),
 	)
+
+	if len(s.secrets) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left,
+			breadcrumb,
+			s.filter.View(),
+			components.EmptyState("secrets"),
+		)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,

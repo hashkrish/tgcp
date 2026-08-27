@@ -29,13 +29,13 @@ type SidebarModel struct {
 // This creates subtle spacing between service categories
 var groupBreaks = map[int]bool{
 	0:  true, // After Overview
-	3:  true, // After Compute (GCE, GKE, Cloud Run)
-	5:  true, // After Storage (GCS, Disks)
-	10: true, // After Databases (Cloud SQL, Spanner, Bigtable, Memorystore, Firestore)
-	16: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
-	20: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking)
-	21: true, // After Observability (Cloud Logging)
-	23: true, // After DevOps (Cloud Build, Artifact Registry)
+	4:  true, // After Compute (GCE, GKE, Cloud Run, Cloud Functions)
+	7:  true, // After Storage (GCS, Disks, Filestore)
+	12: true, // After Databases (Cloud SQL, Spanner, Bigtable, Memorystore, Firestore)
+	18: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
+	25: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking, Load Balancing, DNS, KMS)
+	27: true, // After Observability (Cloud Logging, Cloud Monitoring)
+	29: true, // After DevOps (Cloud Build, Artifact Registry)
 }
 
 // Icons here are deliberately plain ASCII rather than Unicode
@@ -52,9 +52,11 @@ func NewSidebar() SidebarModel {
 			{Name: "Compute Engine", ShortName: "gce", Icon: "#"},
 			{Name: "Kubernetes", ShortName: "gke", Icon: "K"},
 			{Name: "Cloud Run", ShortName: "run", Icon: ">"},
+			{Name: "Cloud Functions", ShortName: "functions", Icon: "f"},
 			// Storage
 			{Name: "Cloud Storage", ShortName: "gcs", Icon: "S"},
 			{Name: "Disks", ShortName: "disks", Icon: "D"},
+			{Name: "Filestore", ShortName: "filestore", Icon: "V"},
 			// Databases
 			{Name: "Cloud SQL", ShortName: "sql", Icon: "Q"},
 			{Name: "Spanner", ShortName: "spanner", Icon: "N"},
@@ -73,8 +75,12 @@ func NewSidebar() SidebarModel {
 			{Name: "Secrets", ShortName: "secrets", Icon: "$"},
 			{Name: "Parameter Manager", ShortName: "parametermanager", Icon: "!"},
 			{Name: "Networking", ShortName: "net", Icon: "="},
+			{Name: "Load Balancing", ShortName: "loadbalancing", Icon: "+"},
+			{Name: "Cloud DNS", ShortName: "dns", Icon: ":"},
+			{Name: "Cloud KMS", ShortName: "kms", Icon: "*"},
 			// Observability
 			{Name: "Cloud Logging", ShortName: "logs", Icon: "L"},
+			{Name: "Cloud Monitoring", ShortName: "monitoring", Icon: "O"},
 			// DevOps
 			{Name: "Cloud Build", ShortName: "cloudbuild", Icon: "^"},
 			{Name: "Artifact Registry", ShortName: "artifactregistry", Icon: "A"},

@@ -34,8 +34,10 @@ var serviceIcons = map[string]string{
 	"gce":              "#",
 	"gke":              "K",
 	"run":              ">",
+	"functions":        "f",
 	"gcs":              "S",
 	"disks":            "D",
+	"filestore":        "V",
 	"sql":              "Q",
 	"spanner":          "N",
 	"bigtable":         "T",
@@ -51,7 +53,11 @@ var serviceIcons = map[string]string{
 	"secrets":          "$",
 	"parametermanager": "!",
 	"net":              "=",
+	"loadbalancing":    "+",
+	"dns":              ":",
+	"kms":              "*",
 	"logs":             "L",
+	"monitoring":       "O",
 	"cloudbuild":       "^",
 	"artifactregistry": "A",
 }
@@ -103,6 +109,7 @@ func NewHomeMenu() HomeMenuModel {
 					{Name: "Compute Engine (GCE)", ShortName: "gce"},
 					{Name: "Kubernetes Engine (GKE)", ShortName: "gke"},
 					{Name: "Cloud Run", ShortName: "run"},
+					{Name: "Cloud Functions", ShortName: "functions"},
 				},
 			},
 			{
@@ -111,6 +118,7 @@ func NewHomeMenu() HomeMenuModel {
 				Services: []ServiceItem{
 					{Name: "Cloud Storage (GCS)", ShortName: "gcs"},
 					{Name: "Disks (Block Storage)", ShortName: "disks"},
+					{Name: "Filestore (NFS)", ShortName: "filestore"},
 				},
 			},
 			{
@@ -144,6 +152,9 @@ func NewHomeMenu() HomeMenuModel {
 					{Name: "Secret Manager", ShortName: "secrets"},
 					{Name: "Parameter Manager", ShortName: "parametermanager"},
 					{Name: "VPC Network", ShortName: "net"},
+					{Name: "Load Balancing", ShortName: "loadbalancing"},
+					{Name: "Cloud DNS", ShortName: "dns"},
+					{Name: "Cloud KMS", ShortName: "kms"},
 				},
 			},
 			{
@@ -151,6 +162,7 @@ func NewHomeMenu() HomeMenuModel {
 				Expanded: true,
 				Services: []ServiceItem{
 					{Name: "Cloud Logging", ShortName: "logs"},
+					{Name: "Cloud Monitoring", ShortName: "monitoring"},
 				},
 			},
 			{

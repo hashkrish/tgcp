@@ -132,6 +132,56 @@ func (c *Client) ListInstances(projectID string) ([]Instance, error) {
 	return instances, nil
 }
 
+// ListInstanceGroups fetches all Managed Instance Groups across all zones
+// (AggregatedList also returns regional MIGs under "regions/..." keys).
+func (c *Client) ListInstanceGroups(projectID string) ([]InstanceGroup, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	req := c.service.InstanceGroupManagers.AggregatedList(projectID)
+	var groups []InstanceGroup
+
+	if err := req.Pages(context.Background(), func(page *compute.InstanceGroupManagerAggregatedList) error {
+		for scopeKey, items := range page.Items {
+			if len(items.InstanceGroupManagers) == 0 {
+				continue
+			}
+
+			regional := strings.HasPrefix(scopeKey, "regions/")
+			location := strings.TrimPrefix(strings.TrimPrefix(scopeKey, "zones/"), "regions/")
+
+			for _, mig := range items.InstanceGroupManagers {
+				templateParts := strings.Split(mig.InstanceTemplate, "/")
+				template := templateParts[len(templateParts)-1]
+
+				status := "Stable"
+				autoscaling := false
+				if mig.Status != nil {
+					if !mig.Status.IsStable {
+						status = "Updating"
+					}
+					autoscaling = mig.Status.Autoscaler != ""
+				}
+
+				groups = append(groups, InstanceGroup{
+					Name:             mig.Name,
+					Location:         location,
+					Regional:         regional,
+					TargetSize:       mig.TargetSize,
+					InstanceTemplate: template,
+					AutoscalingOn:    autoscaling,
+					Status:           status,
+				})
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return groups, nil
+}
+
 // StartInstance starts a stopped instance
 func (c *Client) StartInstance(projectID, zone, instanceName string) error {
 	if demo.Enabled {
