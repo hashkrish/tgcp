@@ -5,11 +5,26 @@ import (
 	"testing"
 )
 
+// fixtureCommands returns a small, representative command set for testing
+// FilterCommands' ranking algorithm in isolation from whatever the real
+// production command list (built from the live service registry, see
+// serviceCommands in internal/ui/model.go) happens to contain.
+func fixtureCommands() []Command {
+	noop := func() Route { return Route{} }
+	return []Command{
+		{Name: "GCE: List Instances", Description: "List Google Compute Engine VM instances", Action: noop},
+		{Name: "GKE: List Clusters", Description: "List Kubernetes Engine Clusters", Action: noop},
+		{Name: "GCS: List Buckets", Description: "List Cloud Storage Buckets", Action: noop},
+		{Name: "Dataproc: List Clusters", Description: "List Dataproc Clusters", Action: noop},
+	}
+}
+
 // TestFilterCommands_PrefixBeatsFuzzy is the regression test for the
 // "gce" → GKE-ranked-first bug. The ranker must prefer literal prefix
 // matches on Name over a fuzzy hit spread across Name + Description.
 func TestFilterCommands_PrefixBeatsFuzzy(t *testing.T) {
 	m := NewNavigation()
+	m.SetCommands(fixtureCommands())
 	m.FilterCommands("gce")
 
 	if len(m.Suggestions) == 0 {
@@ -26,6 +41,7 @@ func TestFilterCommands_SubstringBeatsFuzzy(t *testing.T) {
 	// of "GKE: List Clusters" and "Dataproc: List Clusters". Those should
 	// outrank any fuzzy match that only shares individual characters.
 	m := NewNavigation()
+	m.SetCommands(fixtureCommands())
 	m.FilterCommands("cluster")
 
 	if len(m.Suggestions) < 2 {
@@ -40,6 +56,7 @@ func TestFilterCommands_SubstringBeatsFuzzy(t *testing.T) {
 
 func TestFilterCommands_EmptyQueryClearsSuggestions(t *testing.T) {
 	m := NewNavigation()
+	m.SetCommands(fixtureCommands())
 	m.FilterCommands("gce")
 	if len(m.Suggestions) == 0 {
 		t.Fatal("setup: expected matches for 'gce'")
@@ -52,6 +69,7 @@ func TestFilterCommands_EmptyQueryClearsSuggestions(t *testing.T) {
 
 func TestFilterCommands_NoMatch(t *testing.T) {
 	m := NewNavigation()
+	m.SetCommands(fixtureCommands())
 	m.FilterCommands("zzzz-definitely-no-match-zzzz")
 	if len(m.Suggestions) != 0 {
 		t.Errorf("expected 0 suggestions for impossible query, got %d", len(m.Suggestions))
@@ -63,6 +81,7 @@ func TestFilterCommands_MatchedIndexesCoverQuery(t *testing.T) {
 	// query span so the palette highlights the whole match, not just the
 	// first char.
 	m := NewNavigation()
+	m.SetCommands(fixtureCommands())
 	m.FilterCommands("gcs")
 	if len(m.Suggestions) == 0 {
 		t.Fatal("expected matches for 'gcs'")

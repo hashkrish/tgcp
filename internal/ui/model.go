@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -114,9 +116,12 @@ func InitialModel(authState core.AuthState, cfg *config.Config, version core.Ver
 	statusBar := components.NewStatusBar()
 	statusBar.SetFocusPane("HOME")
 
+	nav := core.NewNavigation()
+	nav.SetBaseCommands(append(nav.Commands, serviceCommands(svcMap)...))
+
 	return MainModel{
 		AuthState:       authState,
-		Navigation:      core.NewNavigation(),
+		Navigation:      nav,
 		Sidebar:         sb,
 		HomeMenu:        components.NewHomeMenu(),
 		StatusBar:       statusBar,
@@ -979,6 +984,28 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	registry.Register("artifactregistry", func(cache *core.Cache) services.Service {
 		return artifactregistry.NewService(cache)
 	})
+}
+
+// serviceCommands builds one command-palette entry per registered service,
+// derived directly from the service registry rather than a hand-maintained
+// list — a hardcoded list previously drifted out of sync as new services
+// were added, silently leaving them unreachable from the ":" palette. Sorted
+// alphabetically by display name for a stable, predictable order.
+func serviceCommands(svcMap map[string]services.Service) []core.Command {
+	cmds := make([]core.Command, 0, len(svcMap))
+	for shortName, svc := range svcMap {
+		name := svc.Name()
+		short := shortName
+		cmds = append(cmds, core.Command{
+			Name:        name,
+			Description: fmt.Sprintf("Open %s (%s)", name, short),
+			Action: func() core.Route {
+				return core.Route{View: core.ViewServiceList, Service: short}
+			},
+		})
+	}
+	sort.Slice(cmds, func(i, j int) bool { return cmds[i].Name < cmds[j].Name })
+	return cmds
 }
 
 func (m *MainModel) setFocus(area FocusArea) {

@@ -63,35 +63,17 @@ func NewNavigation() NavigationModel {
 	}
 }
 
+// defaultCommands returns the small set of non-service commands that always
+// exist, used as a placeholder until SetBaseCommands installs the real,
+// dynamically-built list (see InitialModel in internal/ui/model.go) — the
+// per-service entries used to be hardcoded here too, which silently drifted
+// out of sync as new services were registered over time (several were
+// missing from the palette entirely). Services are now derived from the
+// actual service registry instead, so this can never happen again.
 func defaultCommands() []Command {
 	return []Command{
 		{Name: "GCP: Switch Project", Description: "Switch active Google Cloud Project", Action: func() Route { return Route{View: ViewProjectSwitcher} }},
 		{Name: "Home", Description: "Go to Home Screen", Action: func() Route { return Route{View: ViewHome} }},
-
-		// Compute
-		{Name: "GCE: List Instances", Description: "List Google Compute Engine VM instances", Action: func() Route { return Route{View: ViewServiceList, Service: "gce"} }},
-		{Name: "GKE: List Clusters", Description: "List Kubernetes Engine Clusters", Action: func() Route { return Route{View: ViewServiceList, Service: "gke"} }},
-		{Name: "Disks: List Disks", Description: "List Persistent Disks (Block Storage)", Action: func() Route { return Route{View: ViewServiceList, Service: "disks"} }},
-		{Name: "Run: List Services", Description: "List Cloud Run Services", Action: func() Route { return Route{View: ViewServiceList, Service: "run"} }},
-
-		// Data & Storage
-		{Name: "SQL: List Instances", Description: "List Cloud SQL instances", Action: func() Route { return Route{View: ViewServiceList, Service: "sql"} }},
-		{Name: "GCS: List Buckets", Description: "List Cloud Storage Buckets", Action: func() Route { return Route{View: ViewServiceList, Service: "gcs"} }},
-		{Name: "BigQuery: List Datasets", Description: "List BigQuery Datasets", Action: func() Route { return Route{View: ViewServiceList, Service: "bq"} }},
-		{Name: "Redis: List Instances", Description: "List Memorystore (Redis) Instances", Action: func() Route { return Route{View: ViewServiceList, Service: "redis"} }},
-		{Name: "Spanner: List Instances", Description: "List Spanner Instances", Action: func() Route { return Route{View: ViewServiceList, Service: "spanner"} }},
-		{Name: "Bigtable: List Instances", Description: "List Bigtable Instances", Action: func() Route { return Route{View: ViewServiceList, Service: "bigtable"} }},
-		{Name: "Firestore: List Databases", Description: "List Firestore Databases", Action: func() Route { return Route{View: ViewServiceList, Service: "firestore"} }},
-
-		// Messaging & Processing
-		{Name: "Pub/Sub: List Topics", Description: "List Pub/Sub Topics", Action: func() Route { return Route{View: ViewServiceList, Service: "pubsub"} }},
-		{Name: "Dataflow: List Jobs", Description: "List Dataflow Jobs", Action: func() Route { return Route{View: ViewServiceList, Service: "dataflow"} }},
-		{Name: "Dataproc: List Clusters", Description: "List Dataproc Clusters", Action: func() Route { return Route{View: ViewServiceList, Service: "dataproc"} }},
-
-		// Management
-		{Name: "IAM: List Service Accounts", Description: "List IAM Service Accounts", Action: func() Route { return Route{View: ViewServiceList, Service: "iam"} }},
-		{Name: "VPC: List Networks", Description: "List VPC Networks", Action: func() Route { return Route{View: ViewServiceList, Service: "net"} }},
-
 		{Name: "Help", Description: "Show Help Screen", Action: func() Route { return Route{View: ViewHelp} }},
 	}
 }
@@ -101,6 +83,17 @@ func (m *NavigationModel) SetCommands(cmds []Command) {
 	m.Commands = cmds
 	m.Selection = 0
 	m.FilterCommands("") // Reset filter
+}
+
+// SetBaseCommands replaces the permanent default command set — used once at
+// startup, after the actual registered services are known, so the palette
+// can never drift out of sync with what's really available (unlike the old
+// hardcoded defaultCommands() list, which silently stopped covering new
+// services as they were added over time). Also applies the new set as the
+// active one immediately.
+func (m *NavigationModel) SetBaseCommands(cmds []Command) {
+	m.BaseCommands = cmds
+	m.SetCommands(cmds)
 }
 
 // RestoreBaseCommands resets to default commands
