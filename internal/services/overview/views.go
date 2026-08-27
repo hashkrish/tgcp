@@ -192,7 +192,7 @@ func (s *Service) View() string {
 	// 3. Resource Inventory (Expanded)
 	var inventoryContent string
 	if s.data.InventoryLoading {
-		inventoryContent = "⏳ Scanning resources..."
+		inventoryContent = components.InlineLoader("Scanning resources...")
 	} else {
 		inv := s.data.Inventory
 

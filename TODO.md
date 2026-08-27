@@ -121,3 +121,35 @@ Read-only only (no pause/resume/delete/run-now) — deliberately scoped out.
 
 **Still open**: the ~19 remaining lint issues in service files not covered by this pass (`bigquery.go`, `cloudrun/{api,run}.go`, `cloudsql.go`, `firestore/api.go`, `gce/{actions,gce}.go`, `gcs.go`, `secrets.go`, `core/{client,version}.go`, `utils/logger.go`); one full list+detail+filter *service* (as opposed to shared UI component) still has no test coverage to use as a template for others.
 
+---
+
+# Enhancement Plan — Round 2
+
+Implemented via parallel agents (2026-08-27), scoped to 3 of the 4 areas per explicit choice — mutating actions/destructive-op safety stayed deliberately excluded (delete-image, retry/cancel, extending start/stop/restart to more services). This round's agents hit a mid-session usage-limit reset partway through; several were resumed/finished manually afterward. All verified with `go build`/`go vet`/`go test`/`golangci-lint` at the end — 0 lint issues, all tests pass.
+
+## A. Remaining new GCP service coverage
+
+- [x] **Cloud DNS** (`internal/services/dns/`) — managed zones list, detail view shows record sets.
+- [x] **Cloud KMS** (`internal/services/kms/`) — key rings → keys, read-only. No crypto material ever fetched (list/get metadata calls only).
+- [x] **Filestore** (`internal/services/filestore/`) — NFS instances: capacity, tier, network, state.
+- [x] **Instance Groups / MIGs** — added as a new tab within the existing `gce` package (`[`/`]` to switch, mirroring the cloudrun/net tab pattern) rather than a separate service, using the same `compute/v1` client already in use there. Shows target size, instance template, autoscaling on/off, and a Stable/Updating status derived from `Status.IsStable` — no per-group "current size" field, since that needs an extra `instanceGroups.get` call per group (N+1 pattern deliberately avoided, matching scheduler/cloudtasks precedent). Verified via direct Go-level render tests (not full tmux, see note below): both tabs render correctly with real data shapes, tab-switching works, and the pre-existing Instances tab behavior/tests are unchanged.
+- [x] **Cloud Functions (Gen1+Gen2)** (`internal/services/cloudfunctions/`) — distinct from the Cloud Run Functions tab.
+- [x] **Load Balancing** (`internal/services/loadbalancing/`) — MVP scope: Backend Services + Health Checks tabs. URL maps, forwarding rules, and SSL certs deliberately left out of this pass.
+- [x] **Cloud Monitoring** (`internal/services/monitoring/`) — Uptime Checks + Alert Policies. Notification channel contact details are never rendered, only a count.
+
+All read-only, no mutating actions. Two services (`dns`, `kms`) and Cloud Functions/Load Balancing were built by agents that got cut off mid-session by a usage-limit reset — their packages were already complete and building cleanly on resume, but the registration wiring (registry, sidebar, home menu, category color mapping) hadn't been done yet for `dns`/`kms`/`functions`/`loadbalancing`; that wiring was finished manually afterward. All 30 services now registered with zero name/icon collisions (verified by script, not just by eye).
+
+**Note on verification**: a live tmux run showed a blank content pane when navigating into *any* service view (reproduced identically on `disks`, an untouched service, ruling out a regression from this round's changes). Direct Go-level tests of `MainModel`/service `View()` output confirm the actual rendering logic is correct; the blank pane is most likely an artifact specific to that headless tmux capture session. Flagged here rather than silently assumed fixed — worth a real terminal check.
+
+## B. Detail-view & UX consistency pass
+
+- [x] Added missing-but-already-fetched fields to detail views across the services that had gaps: `cloudsql` (`api.go`/`models.go`/`views.go` — new fields plus their fetch), `dataflow`, `dataproc`, `gke`, `iam`, `logging`, `pubsub`, `disks` (`views.go`, small additions).
+- [x] Empty/loading-state consistency spot-check — folded into the same pass.
+
+## C. Finish engineering health
+
+- [x] All 19 previously-remaining lint issues fixed (`core/client.go`, `core/version.go`, `utils/logger.go`, `cloudrun/{api,run}.go`, `cloudsql.go`, `firestore/api.go`, `gce/{actions,gce}.go`, `gcs.go`) — `golangci-lint run ./...` now reports **0 issues** repo-wide.
+- [x] **Test coverage for `disks` as a template service** — `internal/services/disks/disks_test.go`: filter logic, cursor-bounds safety (empty list, out-of-range cursor — including one test whose original premise was wrong, since `bubbles/table`'s `SetCursor` already self-clamps; fixed to assert the actual correct clamping behavior instead of a scenario the library doesn't allow), confirmation-flow view-state transitions driven through real `Update()` calls, and `Reset()` clearing state.
+
+**Still open**: nothing from this round's explicit scope. Round 1's still-open items (delete-image/retry-cancel actions, extending mutating actions beyond GCE/disks) remain untouched by choice.
+

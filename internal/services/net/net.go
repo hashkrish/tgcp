@@ -314,6 +314,9 @@ func (s *Service) View() string {
 			s.Name(),
 			"Networks",
 		)
+		if len(s.networks) == 0 {
+			return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, components.EmptyState("networks"))
+		}
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, s.networksTable.View())
 	case ViewDetail:
 		return s.renderDetailView()
@@ -346,9 +349,17 @@ func (s *Service) renderDetailView() string {
 
 	var content string
 	if s.activeTab == TabSubnets {
-		content = s.subnetsTable.View()
+		if len(s.subnets) == 0 {
+			content = components.EmptyState("subnets")
+		} else {
+			content = s.subnetsTable.View()
+		}
 	} else {
-		content = s.firewallsTable.View()
+		if len(s.firewalls) == 0 {
+			content = components.EmptyState("firewalls")
+		} else {
+			content = s.firewallsTable.View()
+		}
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabs, content)

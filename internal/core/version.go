@@ -86,7 +86,7 @@ func CheckForUpdates(currentVersion string) tea.Cmd {
 			info.Error = err
 			return UpdateCheckedMsg{UpdateInfo: info}
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 
 		if resp.StatusCode != http.StatusOK {
 			info.Error = fmt.Errorf("GitHub API returned status %d", resp.StatusCode)
@@ -153,7 +153,8 @@ func parseVersion(v string) [3]int {
 
 	segments := strings.Split(v, ".")
 	for i := 0; i < 3 && i < len(segments); i++ {
-		fmt.Sscanf(segments[i], "%d", &parts[i])
+		// Non-numeric segments are ignored; parts[i] simply stays 0.
+		_, _ = fmt.Sscanf(segments[i], "%d", &parts[i])
 	}
 	return parts
 }

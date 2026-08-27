@@ -252,12 +252,13 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// 4.5 Mouse Input
 	case tea.MouseMsg:
 		// Forward mouse events to active table for click selection
-		if s.viewState == ViewList {
+		switch s.viewState {
+		case ViewList:
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.table.Update(msg)
 			s.table = updatedTable
 			return s, cmd
-		} else if s.viewState == ViewObjects {
+		case ViewObjects:
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.objectTable.Update(msg)
 			s.objectTable = updatedTable
@@ -286,7 +287,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if s.viewState == ViewList {
+		switch s.viewState {
+		case ViewList:
 			switch msg.String() {
 			case "r":
 				return s, s.Refresh()
@@ -305,7 +307,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			s.table = updatedTable
 			return s, cmd
 
-		} else if s.viewState == ViewDetail {
+		case ViewDetail:
 			switch msg.String() {
 			case "q", "esc":
 				s.viewState = ViewList
@@ -320,7 +322,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, tea.Batch(s.fetchObjectsCmd(), s.spinner.Start(""))
 			}
 
-		} else if s.viewState == ViewObjects {
+		case ViewObjects:
 			switch msg.String() {
 			case "esc", "q":
 				if s.currentPrefix == "" {
@@ -391,6 +393,12 @@ func (s *Service) renderListView() string {
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
+
+	if len(s.buckets) == 0 {
+		content.WriteString(components.EmptyState("buckets"))
+		return content.String()
+	}
+
 	content.WriteString(s.table.View())
 	return content.String()
 }
@@ -407,6 +415,10 @@ func (s *Service) renderObjectListView() string {
 		s.selectedBucket.Name,
 		prefix,
 	)
+	if len(s.objects) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, header, s.filter.View(), components.EmptyState("objects"))
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, header, s.filter.View(), s.objectTable.View())
 }
 

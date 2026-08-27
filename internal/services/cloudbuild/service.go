@@ -310,10 +310,15 @@ func (s *Service) renderListView() string {
 		s.Name(),
 	)
 
+	content := s.table.View()
+	if len(s.items) == 0 {
+		content = components.EmptyState("builds")
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
 		s.filter.View(),
-		s.table.View(),
+		content,
 	)
 }
 
@@ -330,7 +335,7 @@ func (s *Service) renderDetailView() string {
 
 	rows := []components.KeyValue{
 		{Key: "ID", Value: s.selectedItem.ID},
-		{Key: "Status", Value: s.selectedItem.Status},
+		{Key: "Status", Value: components.RenderStatus(s.selectedItem.Status)},
 	}
 	if s.selectedItem.StatusDetail != "" {
 		rows = append(rows, components.KeyValue{Key: "Status Detail", Value: s.selectedItem.StatusDetail})

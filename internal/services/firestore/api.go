@@ -94,7 +94,7 @@ func (c *Client) ListNamespaces(projectID, databaseID string) ([]Namespace, erro
 	for _, result := range resp.Batch.EntityResults {
 		if result.Entity != nil && result.Entity.Key != nil {
 			name := ""
-			if result.Entity.Key.Path != nil && len(result.Entity.Key.Path) > 0 {
+			if len(result.Entity.Key.Path) > 0 {
 				// The namespace name is in the key's name or id
 				pathElem := result.Entity.Key.Path[0]
 				if pathElem.Name != "" {
@@ -157,7 +157,7 @@ func (c *Client) ListKinds(projectID, databaseID, namespace string) ([]Kind, err
 
 	for _, result := range resp.Batch.EntityResults {
 		if result.Entity != nil && result.Entity.Key != nil {
-			if result.Entity.Key.Path != nil && len(result.Entity.Key.Path) > 0 {
+			if len(result.Entity.Key.Path) > 0 {
 				kindName := result.Entity.Key.Path[0].Name
 				// Skip internal kinds that start with __
 				if !strings.HasPrefix(kindName, "__") {

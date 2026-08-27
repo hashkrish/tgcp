@@ -305,10 +305,15 @@ func (s *Service) renderListView() string {
 		s.Name(),
 	)
 
+	content := s.table.View()
+	if len(s.items) == 0 {
+		content = components.EmptyState("repositories")
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
 		s.filter.View(),
-		s.table.View(),
+		content,
 	)
 }
 

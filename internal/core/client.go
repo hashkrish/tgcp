@@ -263,7 +263,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			shouldRetry = true
 		} else if resp.StatusCode == 429 || resp.StatusCode >= 500 {
 			shouldRetry = true
-			resp.Body.Close() // Close body before retrying
+			_ = resp.Body.Close() // Close body before retrying; already retrying, error here is not actionable
 		}
 
 		if !shouldRetry || i == maxRetries {

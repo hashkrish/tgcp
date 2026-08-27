@@ -309,14 +309,15 @@ func (s *Service) View() string {
 		return s.spinner.View()
 	}
 
-	if s.viewState == ViewDatasets {
+	switch s.viewState {
+	case ViewDatasets:
 		breadcrumb := components.Breadcrumb(
 			fmt.Sprintf("Project %s", s.projectID),
 			s.Name(),
 			"Datasets",
 		)
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, s.datasetTable.View())
-	} else if s.viewState == ViewTables {
+	case ViewTables:
 		header := components.Breadcrumb(
 			fmt.Sprintf("Project %s", s.projectID),
 			s.Name(),
@@ -325,7 +326,7 @@ func (s *Service) View() string {
 			"Tables",
 		)
 		return lipgloss.JoinVertical(lipgloss.Left, header, s.tableTable.View())
-	} else if s.viewState == ViewSchema {
+	case ViewSchema:
 		header := components.Breadcrumb(
 			fmt.Sprintf("Project %s", s.projectID),
 			s.Name(),

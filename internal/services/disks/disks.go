@@ -324,6 +324,12 @@ func (s *Service) renderListView() string {
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
+
+	if len(s.disks) == 0 {
+		content.WriteString(components.EmptyState("disks"))
+		return content.String()
+	}
+
 	content.WriteString(s.table.View())
 	return content.String()
 }
@@ -378,7 +384,7 @@ func (s *Service) fetchDisksCmd(force bool) tea.Cmd {
 func (s *Service) updateTable(items []Disk) {
 	rows := make([]table.Row, len(items))
 	for i, item := range items {
-		attachedTo := "None"
+		var attachedTo string
 		if len(item.Users) > 0 {
 			// users link is like .../instances/instance-name
 			parts := strings.Split(item.Users[0], "/")

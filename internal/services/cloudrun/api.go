@@ -68,9 +68,10 @@ func (c *Client) ListServices(projectID string) ([]RunService, error) {
 			url = item.Status.Url
 			for _, cond := range item.Status.Conditions {
 				if cond.Type == "Ready" {
-					if cond.Status == "True" {
+					switch cond.Status {
+					case "True":
 						status = StatusReady
-					} else if cond.Status == "False" {
+					case "False":
 						status = StatusFailed
 					}
 					break

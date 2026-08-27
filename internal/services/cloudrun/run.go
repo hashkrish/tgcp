@@ -313,7 +313,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		if s.viewState == ViewList {
+		switch s.viewState {
+		case ViewList:
 			switch msg.String() {
 			case "[", "]":
 				// Switch Tab (Cycle)
@@ -379,7 +380,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.funcTable = updatedTable
 			}
 			return s, cmd
-		} else if s.viewState == ViewDetail {
+		case ViewDetail:
 			switch msg.String() {
 			case "q", "esc":
 				s.viewState = ViewList
@@ -422,8 +423,7 @@ func (s *Service) renderWithTabs() string {
 	listLabel := "Services"
 
 	// Filter Bar
-	var filterBar string
-	filterBar = s.filter.View() + "\n"
+	filterBar := s.filter.View() + "\n"
 
 	if s.activeTab == TabServices {
 		tabs = lipgloss.JoinHorizontal(lipgloss.Top,
@@ -459,7 +459,7 @@ func (s *Service) renderWithTabs() string {
 		summary = components.StatusSummary(states) + "\n"
 	} else {
 		if len(s.functions) == 0 {
-			return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, tabs, filterBar, components.EmptyState("services"))
+			return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, tabs, filterBar, components.EmptyState("functions"))
 		}
 		states := make([]string, 0, len(s.functions))
 		for _, f := range s.functions {
@@ -528,7 +528,9 @@ func (s *Service) renderFuncDetailView() string {
 			{Key: "Name", Value: f.Name},
 			{Key: "Region", Value: f.Region},
 			{Key: "State", Value: components.RenderStatus(f.State)},
+			{Key: "Environment", Value: f.Environment},
 			{Key: "URL", Value: f.URL},
+			{Key: "Last Updated", Value: f.LastUpdated.Format("2006-01-02 15:04")},
 		},
 		FooterHint: "Press 'q' or 'esc' to return",
 	})
@@ -582,8 +584,6 @@ func (s *Service) updateTable(items []RunService) {
 		status := string(item.Status)
 		if item.Status == StatusReady {
 			status = "Ready"
-		} else {
-			status = string(item.Status)
 		}
 		rows[i] = table.Row{
 			item.Name,
