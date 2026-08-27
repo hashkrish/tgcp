@@ -32,6 +32,10 @@ func (s *Service) View() string {
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
+	if len(s.jobs) == 0 {
+		content.WriteString(components.EmptyState("jobs"))
+		return content.String()
+	}
 	content.WriteString(s.table.View())
 	return content.String()
 }

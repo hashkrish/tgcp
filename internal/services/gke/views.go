@@ -26,6 +26,8 @@ func (s *Service) renderDetailView() string {
 		Rows: []components.KeyValue{
 			{Key: "Name", Value: c.Name},
 			{Key: "Status", Value: c.Status},
+			{Key: "Location", Value: c.Location},
+			{Key: "Node Count", Value: fmt.Sprintf("%d", c.NodeCount)},
 			{Key: "Master", Value: c.MasterVersion},
 			{Key: "Endpoint", Value: c.Endpoint},
 			{Key: "Mode", Value: c.Mode},

@@ -14,6 +14,13 @@ func (s *Service) renderServiceAccountsList() string {
 		s.Name(),
 		"Service Accounts",
 	)
+	if len(s.accounts) == 0 {
+		return lipgloss.JoinVertical(
+			lipgloss.Left,
+			breadcrumb,
+			components.EmptyState("services"),
+		)
+	}
 	return lipgloss.JoinVertical(
 		lipgloss.Left,
 		breadcrumb,
@@ -45,6 +52,7 @@ func (s *Service) renderDetailView() string {
 				{Key: "Unique ID", Value: s.selectedAccount.UniqueID},
 				{Key: "Status", Value: activeStatus(s.selectedAccount.Disabled)},
 				{Key: "Description", Value: s.selectedAccount.Description},
+				{Key: "Resource Name", Value: s.selectedAccount.Name},
 			},
 		}),
 	)

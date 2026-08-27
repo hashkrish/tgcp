@@ -3,6 +3,7 @@ package disks
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/styles"
@@ -16,6 +17,18 @@ func (s *Service) renderConfirmation() string {
 	}
 
 	return components.RenderConfirmation(s.pendingAction, s.selectedDisk.Name, "disk")
+}
+
+// formatLastAttach formats the disk's LastAttachTimestamp (RFC3339) for display.
+func formatLastAttach(ts string) string {
+	if ts == "" {
+		return "Never"
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ts
+	}
+	return t.Format("2006-01-02 15:04")
 }
 
 func (s *Service) renderDetailView() string {
@@ -37,10 +50,10 @@ func (s *Service) renderDetailView() string {
 			{Key: "Name", Value: d.Name},
 			{Key: "Status", Value: components.RenderStatus(d.Status)},
 			{Key: "Zone", Value: d.Zone},
-			{Key: "Created", Value: "N/A"},
 			{Key: "Type", Value: d.ShortType()},
 			{Key: "Size", Value: fmt.Sprintf("%d GB", d.SizeGb)},
 			{Key: "Source Image", Value: d.SourceImage},
+			{Key: "Last Attached", Value: formatLastAttach(d.LastAttachTimestamp)},
 		},
 	})
 

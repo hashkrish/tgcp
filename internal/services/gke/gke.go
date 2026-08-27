@@ -354,6 +354,12 @@ func (s *Service) renderListView() string {
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
+
+	if len(s.clusters) == 0 {
+		content.WriteString(components.EmptyState("clusters"))
+		return content.String()
+	}
+
 	content.WriteString(s.table.View())
 	return content.String()
 }

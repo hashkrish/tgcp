@@ -40,6 +40,15 @@ func (s *Service) View() string {
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")
+	if s.viewState == ViewListSubs {
+		if len(s.subs) == 0 {
+			content.WriteString(components.EmptyState("subscriptions"))
+			return content.String()
+		}
+	} else if len(s.topics) == 0 {
+		content.WriteString(components.EmptyState("topics"))
+		return content.String()
+	}
 	content.WriteString(s.table.View())
 	return content.String()
 }
@@ -63,6 +72,7 @@ func (s *Service) renderDetailTopic() string {
 			{Key: "Name", Value: t.Name},
 			{Key: "Project", Value: t.ProjectID},
 			{Key: "KMS Key", Value: t.KmsKeyName},
+			{Key: "Labels", Value: formatLabels(t.Labels)},
 		},
 		Width: 60,
 	})
@@ -97,11 +107,26 @@ func (s *Service) renderDetailSub() string {
 		Rows: []components.KeyValue{
 			{Key: "Name", Value: sub.Name},
 			{Key: "Topic", Value: sub.Topic},
+			{Key: "State", Value: components.RenderStatus(sub.State)},
 			{Key: "Type", Value: subType},
 			{Key: "Ack Deadline", Value: fmt.Sprintf("%d sec", sub.AckDeadline)},
 			{Key: "Retain Acked", Value: fmt.Sprintf("%v", sub.RetainAcked)},
+			{Key: "Message Retention", Value: sub.RetentionDuration},
 			{Key: "Dead Letter Topic", Value: dlqMsg},
 		},
 	})
 	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", card)
+}
+
+// formatLabels renders a label map as a compact, single-line key=value list
+// for display in a detail card row.
+func formatLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(labels))
+	for k, v := range labels {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	return strings.Join(parts, ", ")
 }

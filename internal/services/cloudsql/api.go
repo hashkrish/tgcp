@@ -55,24 +55,36 @@ func (c *Client) ListInstances(projectID string) ([]Instance, error) {
 		}
 
 		inst := Instance{
-			Name:            item.Name,
-			ProjectID:       item.Project,
-			Region:          item.Region,
-			DatabaseVersion: item.DatabaseVersion,
-			State:           InstanceState(item.State),
-			PrimaryIP:       primaryIP,
-			ConnectionName:  item.ConnectionName,
+			Name:               item.Name,
+			ProjectID:          item.Project,
+			Region:             item.Region,
+			DatabaseVersion:    item.DatabaseVersion,
+			State:              InstanceState(item.State),
+			PrimaryIP:          primaryIP,
+			ConnectionName:     item.ConnectionName,
+			Zone:               item.GceZone,
+			MasterInstanceName: item.MasterInstanceName,
+			ReplicaNames:       item.ReplicaNames,
 		}
 
 		// Detailed mapping
 		if item.Settings != nil {
 			inst.Tier = item.Settings.Tier
 			inst.Activation = item.Settings.ActivationPolicy
+			inst.DiskType = item.Settings.DataDiskType
+			inst.AvailabilityType = item.Settings.AvailabilityType
 			if item.Settings.DataDiskSizeGb > 0 {
 				inst.StorageGB = item.Settings.DataDiskSizeGb
 			}
 			if item.Settings.BackupConfiguration != nil {
 				inst.AutoBackup = item.Settings.BackupConfiguration.Enabled
+			}
+			if item.Settings.IpConfiguration != nil {
+				inst.PublicIPEnabled = item.Settings.IpConfiguration.Ipv4Enabled
+			}
+			if item.Settings.MaintenanceWindow != nil {
+				inst.MaintenanceDay = item.Settings.MaintenanceWindow.Day
+				inst.MaintenanceHour = item.Settings.MaintenanceWindow.Hour
 			}
 		}
 

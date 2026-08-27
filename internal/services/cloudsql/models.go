@@ -27,4 +27,14 @@ type Instance struct {
 	StorageGB  int64
 	AutoBackup bool
 	Activation string // ALWAYS or NEVER
+
+	// Additional details (already returned by Instances.List, just not surfaced before)
+	Zone               string // GCE zone the instance runs in
+	DiskType           string // PD_SSD or PD_HDD
+	AvailabilityType   string // ZONAL or REGIONAL (High Availability)
+	PublicIPEnabled    bool
+	MaintenanceDay     int64 // 1 (Monday) - 7 (Sunday)
+	MaintenanceHour    int64 // 0-23 UTC
+	MasterInstanceName string
+	ReplicaNames       []string
 }

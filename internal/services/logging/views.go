@@ -60,10 +60,15 @@ func (s *Service) renderListView() string {
 		countStyle.Render(countInfo),
 	)
 
+	content := s.table.View()
+	if len(s.entries) == 0 {
+		content = components.EmptyState("logs")
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		"",
-		s.table.View(),
+		content,
 	)
 }
 
@@ -86,11 +91,14 @@ func (s *Service) renderDetailView() string {
 	// Metadata section
 	metaRows := []components.KeyValue{
 		{Key: "Timestamp", Value: e.Timestamp.Local().Format("2006-01-02 15:04:05.000")},
-		{Key: "Severity", Value: e.Severity},
+		{Key: "Severity", Value: formatSeverityShort(e.Severity)},
 		{Key: "Resource", Value: fmt.Sprintf("%s / %s", e.ResourceType, e.ResourceName)},
 		{Key: "Location", Value: e.Location},
 		{Key: "Log Name", Value: e.LogName},
 		{Key: "Insert ID", Value: e.InsertID},
+	}
+	if e.ProjectID != "" {
+		metaRows = append(metaRows, components.KeyValue{Key: "Project", Value: e.ProjectID})
 	}
 
 	metaCard := components.DetailCard(components.DetailCardOpts{

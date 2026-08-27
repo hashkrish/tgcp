@@ -277,9 +277,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "enter":
 				var actionCmd tea.Cmd
-				if s.pendingAction == "start" {
+				switch s.pendingAction {
+				case "start":
 					actionCmd = s.startInstanceCmd(*s.selectedInstance)
-				} else if s.pendingAction == "stop" {
+				case "stop":
 					actionCmd = s.stopInstanceCmd(*s.selectedInstance)
 				}
 				s.viewState = s.actionSource
@@ -401,14 +402,6 @@ func (s *Service) updateTable(instances []Instance) {
 		state := string(inst.State)
 		if state == "" {
 			state = "UNKNOWN"
-		}
-
-		if state == "RUNNABLE" {
-			state = "RUNNABLE"
-		} else if state == "STOPPED" || state == "FAILED" {
-			state = string(inst.State)
-		} else {
-			state = string(inst.State)
 		}
 
 		rows[i] = table.Row{
