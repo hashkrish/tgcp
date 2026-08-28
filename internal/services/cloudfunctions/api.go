@@ -12,7 +12,10 @@
 // (trigger type/detail, runtime, memory/CPU, entry point, source location,
 // env var count) that the Cloud Run "Functions" tab does not.
 //
-// No mutating calls are made anywhere in this package — list/get only.
+// Create/Update remain out of scope (see the app's TODO reference table for
+// why); Delete and the `call` Lifecycle action (added via the v1 API purely
+// to invoke an existing Gen1 function — see CallFunction's doc comment for
+// why v1 rather than v2) are both implemented.
 package cloudfunctions
 
 import (
@@ -22,12 +25,14 @@ import (
 	"time"
 
 	"github.com/yogirk/tgcp/internal/demo"
+	cloudfunctionsv1 "google.golang.org/api/cloudfunctions/v1"
 	"google.golang.org/api/cloudfunctions/v2"
 	"google.golang.org/api/option"
 )
 
 type Client struct {
-	service *cloudfunctions.Service
+	service   *cloudfunctions.Service
+	serviceV1 *cloudfunctionsv1.Service
 }
 
 func NewClient(ctx context.Context) (*Client, error) {
@@ -39,7 +44,41 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cloud functions service: %w", err)
 	}
-	return &Client{service: svc}, nil
+	// The v1 API is only used for the `call` (Lifecycle) RPC below, which
+	// has no v2 equivalent — see CallFunction's doc comment.
+	svcV1, err := cloudfunctionsv1.NewService(ctx, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cloud functions v1 service: %w", err)
+	}
+	return &Client{service: svc, serviceV1: svcV1}, nil
+}
+
+// CallFunction synchronously invokes a Gen1 Cloud Function with the given
+// JSON data payload, matching `gcloud functions call`. Only the v1 API
+// exposes a `call` RPC — Gen2 functions are backed by Cloud Run and are
+// invoked over HTTPS instead, which this app doesn't have a trigger-URL/auth
+// flow for, so Gen2 calls are rejected client-side with a clear error rather
+// than silently failing against the API.
+func (c *Client) CallFunction(fn Function, data string) (string, error) {
+	if demo.Enabled {
+		return `{"result":"demo response"}`, nil
+	}
+	if fn.Environment != "GEN_1" {
+		return "", fmt.Errorf("call is only supported for Gen1 functions in this app; %s is Gen2 (invoke its Cloud Run HTTPS trigger directly instead)", fn.Name)
+	}
+	if c.serviceV1 == nil {
+		return "", fmt.Errorf("cloud functions client not initialized")
+	}
+	resp, err := c.serviceV1.Projects.Locations.Functions.Call(fn.FullName, &cloudfunctionsv1.CallFunctionRequest{
+		Data: data,
+	}).Do()
+	if err != nil {
+		return "", err
+	}
+	if resp.Error != "" {
+		return "", fmt.Errorf("function returned an error: %s", resp.Error)
+	}
+	return resp.Result, nil
 }
 
 // ListFunctions lists all Cloud Functions (Gen1 and Gen2) across every
@@ -151,6 +190,20 @@ func describeSource(src *cloudfunctions.Source) string {
 func shortName(fullName string) string {
 	parts := strings.Split(fullName, "/")
 	return parts[len(parts)-1]
+}
+
+// DeleteFunction deletes a Cloud Function, matching `gcloud functions delete`.
+// fullName is the fully-qualified resource name
+// (projects/{project}/locations/{location}/functions/{name}).
+func (c *Client) DeleteFunction(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	_, err := c.service.Projects.Locations.Functions.Delete(fullName).Do()
+	return err
 }
 
 // extractRegion pulls the location segment out of a fully qualified

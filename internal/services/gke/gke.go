@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,22 @@ import (
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
+
+// newClusterCreateForm builds the FormModel for creating a new GKE cluster.
+func newClusterCreateForm() components.FormModel {
+	return components.NewForm("Create Cluster", []components.FormField{
+		{Label: "Name", Placeholder: "my-cluster", Required: true},
+		{Label: "Zone/Location", Placeholder: "us-central1-a", Required: true},
+		{Label: "Node Count", Default: "3", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				return "must be a positive number"
+			}
+			return ""
+		}},
+		{Label: "Machine Type", Default: "e2-medium", Required: true},
+	})
+}
 
 const CacheTTL = 60 * time.Second
 
@@ -29,7 +46,25 @@ const (
 	ViewList ViewState = iota
 	ViewDetail
 	ViewConfirmation
+	ViewCreate
+	ViewUpdate
 )
+
+// newNodePoolUpdateForm builds the FormModel for resizing a cluster's first
+// node pool, seeded with its current node count. Multi-node-pool clusters
+// only expose the first pool here; cluster/node-pool version `upgrade` is a
+// separate, higher-risk operation and is out of scope.
+func newNodePoolUpdateForm(cluster Cluster, pool NodePool) components.FormModel {
+	return components.NewForm(fmt.Sprintf("Resize Node Pool: %s (%s)", pool.Name, cluster.Name), []components.FormField{
+		{Label: "Node Count", Default: strconv.FormatInt(pool.InitialNodeCount, 10), Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				return "must be a non-negative integer"
+			}
+			return ""
+		}},
+	})
+}
 
 // Msg types
 type clustersMsg []Cluster
@@ -69,6 +104,12 @@ type Service struct {
 	pendingAction string    // e.g. "connect"
 	actionSource  ViewState // Where to return after confirmation
 
+	// Create State
+	createForm components.FormModel
+
+	// Update State
+	updateForm components.FormModel
+
 	// Cache
 	cache *core.Cache
 }
@@ -107,13 +148,16 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  K:k9s  l:Logs  Ent:Detail"
+		return "r:Refresh  /:Filter  K:k9s  l:Logs  Ent:Detail  c:Create"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  K:k9s"
+		return "Esc/q:Back  K:k9s  u:Update (resize node pool)  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
 	return ""
 }
@@ -203,14 +247,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionResultMsg:
 		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
 			s.err = msg.err
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		} else if msg.msg != "" {
-			return s, func() tea.Msg {
-				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
-			}
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
 		}
 		return s, nil
 
@@ -281,6 +332,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					heading := fmt.Sprintf("Cluster: %s", c.Name)
 					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "gke", Heading: heading} }
 				}
+			case "c": // Create
+				s.createForm = newClusterCreateForm()
+				s.viewState = ViewCreate
+				return s, nil
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.table.Update(msg)
@@ -299,23 +354,81 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if s.selectedCluster != nil {
 					return s, s.launchK9s(*s.selectedCluster)
 				}
+			case "u": // Update (resize first node pool)
+				if s.selectedCluster != nil && len(s.selectedCluster.NodePools) > 0 {
+					s.updateForm = newNodePoolUpdateForm(*s.selectedCluster, s.selectedCluster.NodePools[0])
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d": // Delete (Confirm) — double-confirm, this is the most
+				// destructive action in the app: it destroys every node pool
+				// and workload in the cluster with no undo.
+				if s.selectedCluster != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
 			}
 		}
 
 		// CONFIRMATION VIEW
-		// (Not currently used but ready)
 		if s.viewState == ViewConfirmation {
 			switch msg.String() {
 			case "y", "enter":
-				// s.pendingAction logic
-				s.viewState = s.actionSource
+				if s.pendingAction == "delete" {
+					// First confirmation only escalates to a second one —
+					// deleting a GKE cluster is irreversible and destroys
+					// every node pool and workload in it.
+					s.pendingAction = "delete-confirm2"
+					return s, nil
+				}
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete-confirm2" && s.selectedCluster != nil {
+					actionCmd = s.DeleteClusterCmd(*s.selectedCluster)
+					s.selectedCluster = nil
+				}
+				s.viewState = ViewList
 				s.pendingAction = ""
-				return s, nil
+				return s, actionCmd
 			case "n", "esc", "q":
 				s.viewState = s.actionSource
 				s.pendingAction = ""
 				return s, nil
 			}
+		}
+
+		// CREATE VIEW
+		if s.viewState == ViewCreate {
+			result, fcmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.createForm.Values()
+				nodeCount, _ := strconv.ParseInt(vals["Node Count"], 10, 64)
+				s.viewState = ViewList
+				return s, s.CreateClusterCmd(vals["Name"], vals["Zone/Location"], nodeCount, vals["Machine Type"])
+			}
+			return s, fcmd
+		}
+
+		// UPDATE VIEW
+		if s.viewState == ViewUpdate {
+			result, fcmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedCluster != nil && len(s.selectedCluster.NodePools) > 0 {
+				nodeCount, _ := strconv.ParseInt(s.updateForm.Value("Node Count"), 10, 64)
+				cluster := *s.selectedCluster
+				pool := cluster.NodePools[0]
+				s.viewState = ViewDetail
+				return s, s.ResizeNodePoolCmd(cluster, pool, nodeCount)
+			}
+			return s, fcmd
 		}
 	}
 
@@ -338,6 +451,18 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
 	}
 
 	return s.renderListView()
@@ -394,6 +519,45 @@ func (s *Service) fetchClustersCmd(force bool) tea.Cmd {
 		}
 
 		return clustersMsg(clusters)
+	}
+}
+
+// CreateClusterCmd triggers creation of a new GKE cluster
+func (s *Service) CreateClusterCmd(name, location string, nodeCount int64, machineType string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateCluster(s.projectID, location, name, nodeCount, machineType); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating cluster %s...", name)}
+	}
+}
+
+// DeleteClusterCmd triggers deletion of the given GKE cluster
+func (s *Service) DeleteClusterCmd(cluster Cluster) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteCluster(s.projectID, cluster.Location, cluster.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting cluster %s...", cluster.Name)}
+	}
+}
+
+// ResizeNodePoolCmd triggers a node-pool resize for the given cluster/pool
+func (s *Service) ResizeNodePoolCmd(cluster Cluster, pool NodePool, nodeCount int64) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ResizeNodePool(s.projectID, cluster.Location, cluster.Name, pool.Name, nodeCount); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Resizing node pool %s to %d nodes...", pool.Name, nodeCount)}
 	}
 }
 

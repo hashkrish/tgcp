@@ -8,6 +8,24 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
+// renderConfirmation renders the delete confirmation dialog. Cluster delete
+// requires a second confirmation ("delete-confirm2") because it is
+// irreversible and destroys every node pool and workload in the cluster.
+func (s *Service) renderConfirmation() string {
+	if s.selectedCluster == nil {
+		return "Error: No cluster selected"
+	}
+	if s.pendingAction == "delete-confirm2" {
+		return components.RenderConfirmationWithMessage(
+			"delete",
+			s.selectedCluster.Name,
+			"cluster",
+			fmt.Sprintf("FINAL WARNING: this will permanently destroy cluster %s and every node pool/workload running on it.", s.selectedCluster.Name),
+		)
+	}
+	return components.RenderConfirmation(s.pendingAction, s.selectedCluster.Name, "cluster")
+}
+
 func (s *Service) renderDetailView() string {
 	if s.selectedCluster == nil {
 		return "No cluster selected"

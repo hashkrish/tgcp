@@ -79,12 +79,110 @@ func (c *Client) ListServices(projectID string) ([]RunService, error) {
 			}
 		}
 
+		image := ""
+		if item.Spec != nil && item.Spec.Template != nil && item.Spec.Template.Spec != nil {
+			if containers := item.Spec.Template.Spec.Containers; len(containers) > 0 {
+				image = containers[0].Image
+			}
+		}
+
 		services = append(services, RunService{
 			Name:   name,
 			Region: region,
 			URL:    url,
 			Status: status,
+			Image:  image,
 		})
 	}
 	return services, nil
+}
+
+// CreateService creates a new Cloud Run service running a single container
+// with an ephemeral revision name (auto-assigned by the API). This
+// intentionally omits most of the Knative ServiceSpec's optional fields
+// (env vars, resource limits, concurrency, VPC access, ingress, etc.) —
+// only the container image and listening port are set, matching the
+// minimal viable field set for this Create flow.
+func (c *Client) CreateService(projectID, region, name, image string, port int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+
+	svc := &run.Service{
+		ApiVersion: "serving.knative.dev/v1",
+		Kind:       "Service",
+		Metadata: &run.ObjectMeta{
+			Name:      name,
+			Namespace: projectID,
+		},
+		Spec: &run.ServiceSpec{
+			Template: &run.RevisionTemplate{
+				Spec: &run.RevisionSpec{
+					Containers: []*run.Container{
+						{
+							Image: image,
+							Ports: []*run.ContainerPort{
+								{ContainerPort: port},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	_, err := c.service.Projects.Locations.Services.Create(parent, svc).Do()
+	return err
+}
+
+// UpdateServiceImage patches a single field on an existing Cloud Run
+// service: the container image of the first container in the revision
+// template. This is the minimal viable "update" flow for Cloud Run —
+// update-traffic (traffic split management) and full service replace
+// (env vars, resources, concurrency, VPC access, ingress, etc.) are
+// explicitly out of scope and skipped.
+//
+// The run/v1 API has no field-level PATCH for services, so this reads the
+// current service, mutates only the image, and calls ReplaceService with
+// the full object (as gcloud's `run services update --image` does under
+// the hood).
+func (c *Client) UpdateServiceImage(projectID, region, name, image string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, name)
+
+	svc, err := c.service.Projects.Locations.Services.Get(fqName).Do()
+	if err != nil {
+		return err
+	}
+	if svc.Spec == nil || svc.Spec.Template == nil || svc.Spec.Template.Spec == nil || len(svc.Spec.Template.Spec.Containers) == 0 {
+		return fmt.Errorf("service %s has no container spec to update", name)
+	}
+	svc.Spec.Template.Spec.Containers[0].Image = image
+
+	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
+	return err
+}
+
+// DeleteService deletes a Cloud Run service, matching `gcloud run services delete`.
+func (c *Client) DeleteService(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, name)
+	_, err := c.service.Projects.Locations.Services.Delete(fqName).Do()
+	return err
 }

@@ -59,7 +59,7 @@ func (s *Service) renderDetailView() string {
 			{Key: "Internal IP", Value: i.InternalIP},
 			{Key: "External IP", Value: i.ExternalIP},
 		},
-		FooterHint: "s Start | x Stop | h SSH | q Back",
+		FooterHint: "s Start | x Stop | R Reset | z Suspend | Z Resume | h SSH | u Update | d Delete | q Back",
 	})
 
 	doc.WriteString(card)
@@ -73,6 +73,12 @@ func renderStatus(state InstanceState) string {
 
 // renderConfirmation renders a confirmation dialog
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "delete-mig" {
+		if s.selectedGroup == nil {
+			return "Error: No instance group selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedGroup.Name, "instance group")
+	}
 	if s.selectedInstance == nil {
 		return "Error: No instance selected"
 	}

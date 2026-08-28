@@ -42,6 +42,45 @@ func (s *Service) StopInstanceCmd(instance Instance) tea.Cmd {
 	}
 }
 
+// ResetInstanceCmd triggers a hard reset of the given instance
+func (s *Service) ResetInstanceCmd(instance Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ResetInstance(s.projectID, instance.Zone, instance.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Resetting instance %s...", instance.Name)}
+	}
+}
+
+// SuspendInstanceCmd triggers suspending the given instance to disk
+func (s *Service) SuspendInstanceCmd(instance Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.SuspendInstance(s.projectID, instance.Zone, instance.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Suspending instance %s...", instance.Name)}
+	}
+}
+
+// ResumeInstanceCmd triggers resuming the given suspended instance
+func (s *Service) ResumeInstanceCmd(instance Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ResumeInstance(s.projectID, instance.Zone, instance.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Resuming instance %s...", instance.Name)}
+	}
+}
+
 // SSHCmd constructs the gcloud ssh command
 func (s *Service) SSHCmd(instance Instance) tea.Cmd {
 	// Build base arguments

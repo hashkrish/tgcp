@@ -3,6 +3,7 @@ package disks
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,7 +27,25 @@ const (
 	ViewList ViewState = iota
 	ViewDetail
 	ViewConfirmation
+	ViewCreate
+	ViewUpdate
 )
+
+// newDiskUpdateForm builds the FormModel for resizing a disk, seeded with
+// its current size. The Compute API only supports growing a disk, never
+// shrinking (matching `gcloud compute disks resize`); move and
+// update-kms-key are out of scope.
+func newDiskUpdateForm(disk Disk) components.FormModel {
+	return components.NewForm("Resize Disk: "+disk.Name, []components.FormField{
+		{Label: "New Size (GB)", Default: strconv.FormatInt(disk.SizeGb, 10), Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= disk.SizeGb {
+				return fmt.Sprintf("must be an integer greater than %d", disk.SizeGb)
+			}
+			return ""
+		}},
+	})
+}
 
 type disksMsg []Disk
 type errMsg error
@@ -59,6 +78,12 @@ type Service struct {
 	// Confirmation State
 	pendingAction string    // "snapshot"
 	actionSource  ViewState // Where to return after confirmation
+
+	// Create State
+	createForm components.FormModel
+
+	// Update State
+	updateForm components.FormModel
 
 	cache *core.Cache
 }
@@ -96,15 +121,34 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  c:Create  u:Update  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  s:Snapshot"
+		return "Esc/q:Back  s:Snapshot  u:Update  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
+	}
 	return ""
+}
+
+// newDiskCreateForm builds the FormModel for creating a standalone disk.
+func newDiskCreateForm() components.FormModel {
+	return components.NewForm("Create Disk", []components.FormField{
+		{Label: "Name", Placeholder: "my-disk", Required: true},
+		{Label: "Zone", Placeholder: "us-central1-a", Required: true},
+		{Label: "Size (GB)", Default: "10", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				return "must be a positive number"
+			}
+			return ""
+		}},
+		{Label: "Type", Default: "pd-balanced", Required: true},
+	})
 }
 
 // -----------------------------------------------------------------------------
@@ -244,6 +288,26 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.selectedDisk = &disks[idx]
 					s.viewState = ViewDetail
 				}
+			case "c": // Create
+				s.createForm = newDiskCreateForm()
+				s.viewState = ViewCreate
+				return s, nil
+			case "u": // Update (resize)
+				disks := s.getFilteredDisks(s.disks, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(disks) {
+					s.selectedDisk = &disks[idx]
+					s.updateForm = newDiskUpdateForm(*s.selectedDisk)
+					s.viewState = ViewUpdate
+					return s, nil
+				}
+			case "d": // Delete (Confirm)
+				disks := s.getFilteredDisks(s.disks, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(disks) {
+					s.selectedDisk = &disks[idx]
+					s.pendingAction = "delete"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.table.Update(msg)
@@ -264,6 +328,19 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "u": // Update (resize)
+				if s.selectedDisk != nil {
+					s.updateForm = newDiskUpdateForm(*s.selectedDisk)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if s.selectedDisk != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
 			}
 		}
 
@@ -271,10 +348,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "enter": // Confirm
 				var actionCmd tea.Cmd
-				if s.pendingAction == "snapshot" && s.selectedDisk != nil {
-					actionCmd = s.CreateSnapshotCmd(*s.selectedDisk)
+				switch s.pendingAction {
+				case "snapshot":
+					if s.selectedDisk != nil {
+						actionCmd = s.CreateSnapshotCmd(*s.selectedDisk)
+					}
+				case "delete":
+					if s.selectedDisk != nil {
+						actionCmd = s.DeleteDiskCmd(*s.selectedDisk)
+					}
 				}
-				s.viewState = s.actionSource
+				if s.pendingAction == "delete" {
+					s.viewState = ViewList
+					s.selectedDisk = nil
+				} else {
+					s.viewState = s.actionSource
+				}
 				s.pendingAction = ""
 				return s, actionCmd
 			case "n", "esc", "q": // Cancel
@@ -282,6 +371,36 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.pendingAction = ""
 				return s, nil
 			}
+		}
+
+		if s.viewState == ViewCreate {
+			result, fcmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.createForm.Values()
+				sizeGB, _ := strconv.ParseInt(vals["Size (GB)"], 10, 64)
+				s.viewState = ViewList
+				return s, s.CreateDiskCmd(vals["Name"], vals["Zone"], sizeGB, vals["Type"])
+			}
+			return s, fcmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, fcmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted && s.selectedDisk != nil {
+				newSize, _ := strconv.ParseInt(s.updateForm.Value("New Size (GB)"), 10, 64)
+				disk := *s.selectedDisk
+				s.viewState = ViewList
+				return s, s.ResizeDiskCmd(disk, newSize)
+			}
+			return s, fcmd
 		}
 	}
 
@@ -308,6 +427,14 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewConfirmation {
 		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
 	}
 
 	return s.renderListView()
@@ -349,6 +476,45 @@ func (s *Service) CreateSnapshotCmd(disk Disk) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s for disk %s...", snapshotName, disk.Name)}
+	}
+}
+
+// CreateDiskCmd triggers creation of a new standalone disk
+func (s *Service) CreateDiskCmd(name, zone string, sizeGB int64, diskType string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateDisk(s.projectID, zone, name, sizeGB, diskType); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating disk %s...", name)}
+	}
+}
+
+// DeleteDiskCmd triggers deletion of the given disk
+func (s *Service) DeleteDiskCmd(disk Disk) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteDisk(s.projectID, disk.Zone, disk.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting disk %s...", disk.Name)}
+	}
+}
+
+// ResizeDiskCmd triggers a resize of the given disk to newSizeGB
+func (s *Service) ResizeDiskCmd(disk Disk, newSizeGB int64) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ResizeDisk(s.projectID, disk.Zone, disk.Name, newSizeGB); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Resizing disk %s to %dGB...", disk.Name, newSizeGB)}
 	}
 }
 

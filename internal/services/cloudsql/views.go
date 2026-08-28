@@ -58,6 +58,16 @@ func (s *Service) renderDetailView() string {
 	if len(i.ReplicaNames) > 0 {
 		rows = append(rows, components.KeyValue{Key: "Read Replicas", Value: strings.Join(i.ReplicaNames, ", ")})
 	}
+	if i.InstanceType != "" {
+		rows = append(rows, components.KeyValue{Key: "Instance Type", Value: i.InstanceType})
+	}
+	if i.ServiceAccountEmail != "" {
+		rows = append(rows, components.KeyValue{Key: "Service Account", Value: i.ServiceAccountEmail})
+	}
+	if i.CreateTime != "" {
+		rows = append(rows, components.KeyValue{Key: "Created", Value: i.CreateTime})
+	}
+	rows = append(rows, components.KeyValue{Key: "Point-in-Time Recovery", Value: fmt.Sprintf("%v", i.PointInTimeRecovery)})
 
 	card := components.DetailCard(components.DetailCardOpts{
 		Title:      "Instance Details",
@@ -91,10 +101,68 @@ func (s *Service) renderConfirmation() string {
 	if s.selectedInstance == nil {
 		return "Error: No instance selected"
 	}
+	if s.pendingAction == "delete-confirm2" {
+		return components.RenderConfirmationWithMessage(
+			"delete",
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("FINAL WARNING: this will permanently destroy instance %s and all its databases.", s.selectedInstance.Name),
+		)
+	}
 
 	return components.RenderConfirmation(s.pendingAction, s.selectedInstance.Name, "instance")
 }
 
 func renderState(state InstanceState) string {
 	return components.RenderStatus(string(state))
+}
+
+// renderQueryResult renders the outcome of the read-only "Execute SQL"
+// data-plane feature: either an error, or the returned rows in a table.
+func (s *Service) renderQueryResult() string {
+	instName := ""
+	if s.selectedInstance != nil {
+		instName = s.selectedInstance.Name
+	}
+
+	doc := strings.Builder{}
+	doc.WriteString(components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		instName,
+		"Execute SQL",
+	))
+	doc.WriteString("\n\n")
+
+	if s.queryErr != nil {
+		doc.WriteString(components.RenderError(s.queryErr, s.Name(), "Execute SQL"))
+		return doc.String()
+	}
+
+	if s.queryResult == nil {
+		doc.WriteString(components.EmptyState("results"))
+		return doc.String()
+	}
+
+	if s.queryResult.Message != "" {
+		doc.WriteString(s.queryResult.Message)
+		doc.WriteString("\n\n")
+	}
+
+	if len(s.queryResult.Columns) == 0 || s.queryTable == nil {
+		doc.WriteString(components.EmptyState("results"))
+		return doc.String()
+	}
+
+	doc.WriteString(s.queryTable.View())
+	doc.WriteString("\n")
+
+	if s.queryResult.Truncated {
+		doc.WriteString("(results truncated)\n")
+	}
+	if s.queryResult.ExecutionTime != "" {
+		fmt.Fprintf(&doc, "Execution time: %s\n", s.queryResult.ExecutionTime)
+	}
+
+	return doc.String()
 }

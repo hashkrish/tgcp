@@ -182,6 +182,55 @@ func (c *Client) ListInstanceGroups(projectID string) ([]InstanceGroup, error) {
 	return groups, nil
 }
 
+// ResizeInstanceGroup changes a Managed Instance Group's target size,
+// matching `gcloud compute instance-groups managed resize`. This is the
+// minimal viable Update for MIGs — set-autoscaling and update-instances
+// (rolling replace/restart) are separate, higher-risk operations and are
+// intentionally out of scope.
+func (c *Client) ResizeInstanceGroup(projectID, location, name string, size int64, regional bool) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if regional {
+		_, err := c.service.RegionInstanceGroupManagers.Resize(projectID, location, name, size).Do()
+		return err
+	}
+	_, err := c.service.InstanceGroupManagers.Resize(projectID, location, name, size).Do()
+	return err
+}
+
+// DeleteInstance deletes a VM instance, matching `gcloud compute instances delete`.
+func (c *Client) DeleteInstance(projectID, zone, instanceName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Instances.Delete(projectID, zone, instanceName).Do()
+	return err
+}
+
+// DeleteInstanceGroup deletes a Managed Instance Group (and all instances it
+// manages), matching `gcloud compute instance-groups managed delete`.
+func (c *Client) DeleteInstanceGroup(projectID, location, name string, regional bool) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if regional {
+		_, err := c.service.RegionInstanceGroupManagers.Delete(projectID, location, name).Do()
+		return err
+	}
+	_, err := c.service.InstanceGroupManagers.Delete(projectID, location, name).Do()
+	return err
+}
+
 // StartInstance starts a stopped instance
 func (c *Client) StartInstance(projectID, zone, instanceName string) error {
 	if demo.Enabled {
@@ -197,5 +246,103 @@ func (c *Client) StopInstance(projectID, zone, instanceName string) error {
 		return nil
 	}
 	_, err := c.service.Instances.Stop(projectID, zone, instanceName).Do()
+	return err
+}
+
+// ResetInstance performs a hard reset of a running instance, matching
+// `gcloud compute instances reset`.
+func (c *Client) ResetInstance(projectID, zone, instanceName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	_, err := c.service.Instances.Reset(projectID, zone, instanceName).Do()
+	return err
+}
+
+// SuspendInstance suspends a running instance to disk, matching
+// `gcloud compute instances suspend`.
+func (c *Client) SuspendInstance(projectID, zone, instanceName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	_, err := c.service.Instances.Suspend(projectID, zone, instanceName).Do()
+	return err
+}
+
+// ResumeInstance resumes a previously-suspended instance, matching
+// `gcloud compute instances resume`. perform-maintenance is intentionally
+// out of scope: it only applies to sole-tenant-node-hosted instances and is
+// rarely applicable outside that setup.
+func (c *Client) ResumeInstance(projectID, zone, instanceName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	_, err := c.service.Instances.Resume(projectID, zone, instanceName).Do()
+	return err
+}
+
+// CreateInstance creates a new VM instance with a single boot disk and a
+// single network interface with an ephemeral external IP.
+func (c *Client) CreateInstance(projectID, zone, name, machineType, sourceImage, network string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+
+	inst := &compute.Instance{
+		Name:        name,
+		MachineType: fmt.Sprintf("zones/%s/machineTypes/%s", zone, machineType),
+		Disks: []*compute.AttachedDisk{
+			{
+				Boot:       true,
+				AutoDelete: true,
+				InitializeParams: &compute.AttachedDiskInitializeParams{
+					SourceImage: sourceImage,
+				},
+			},
+		},
+		NetworkInterfaces: []*compute.NetworkInterface{
+			{
+				Network: fmt.Sprintf("global/networks/%s", network),
+				AccessConfigs: []*compute.AccessConfig{
+					{Type: "ONE_TO_ONE_NAT", Name: "External NAT"},
+				},
+			},
+		},
+	}
+
+	_, err := c.service.Instances.Insert(projectID, zone, inst).Do()
+	return err
+}
+
+// UpdateInstanceTags replaces the network tags on an existing VM instance.
+// This is the minimal viable Update flow for VM Instances: machine-type
+// changes require the instance to be stopped first and label/metadata
+// updates each need their own fingerprinted Set* call, so they're
+// intentionally left out in favor of the single most common
+// `gcloud compute instances add-tags`-equivalent operation. The Compute API
+// requires re-reading the current tag fingerprint immediately before the
+// SetTags call to avoid a conflicting-concurrent-modification error.
+func (c *Client) UpdateInstanceTags(projectID, zone, instanceName string, tags []string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	inst, err := c.service.Instances.Get(projectID, zone, instanceName).Do()
+	if err != nil {
+		return err
+	}
+	fingerprint := ""
+	if inst.Tags != nil {
+		fingerprint = inst.Tags.Fingerprint
+	}
+	_, err = c.service.Instances.SetTags(projectID, zone, instanceName, &compute.Tags{
+		Items:       tags,
+		Fingerprint: fingerprint,
+	}).Do()
 	return err
 }

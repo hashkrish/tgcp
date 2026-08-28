@@ -87,3 +87,56 @@ func (c *Client) CreateSnapshot(projectID, zone, diskName string) (string, error
 
 	return snapshotName, nil
 }
+
+// DeleteDisk deletes a standalone persistent disk, matching
+// `gcloud compute disks delete`. The Compute API itself refuses to delete a
+// disk that is still attached to an instance.
+func (c *Client) DeleteDisk(projectID, zone, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Disks.Delete(projectID, zone, name).Do()
+	return err
+}
+
+// CreateDisk creates a new standalone persistent disk in the given zone.
+func (c *Client) CreateDisk(projectID, zone, name string, sizeGB int64, diskType string) error {
+	if demo.Enabled {
+		return nil
+	}
+
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+
+	req := &compute.Disk{
+		Name:   name,
+		SizeGb: sizeGB,
+		Type:   fmt.Sprintf("zones/%s/diskTypes/%s", zone, diskType),
+	}
+
+	_, err := c.service.Disks.Insert(projectID, zone, req).Do()
+	return err
+}
+
+// ResizeDisk grows a persistent disk to newSizeGB. This is the minimal
+// viable Update for Disks — the Compute API only supports growing a disk,
+// never shrinking, matching `gcloud compute disks resize`. Move and
+// update-kms-key are separate, higher-risk operations and are intentionally
+// out of scope.
+func (c *Client) ResizeDisk(projectID, zone, name string, newSizeGB int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	req := &compute.DisksResizeRequest{
+		SizeGb: newSizeGB,
+	}
+	_, err := c.service.Disks.Resize(projectID, zone, name, req).Do()
+	return err
+}

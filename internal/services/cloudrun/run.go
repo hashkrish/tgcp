@@ -3,6 +3,7 @@ package cloudrun
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -36,7 +37,36 @@ const (
 	ViewList ViewState = iota
 	ViewDetail
 	ViewConfirmation
+	ViewCreate
+	ViewUpdate
 )
+
+// newServiceCreateForm builds the FormModel for creating a new Cloud Run service.
+func newServiceCreateForm() components.FormModel {
+	return components.NewForm("Create Cloud Run Service", []components.FormField{
+		{Label: "Name", Placeholder: "my-service", Required: true},
+		{Label: "Region", Placeholder: "us-central1", Required: true},
+		{Label: "Container Image", Placeholder: "gcr.io/my-project/my-image:latest", Required: true},
+		{Label: "Port", Default: "8080", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 || n > 65535 {
+				return "must be a valid port number"
+			}
+			return ""
+		}},
+	})
+}
+
+// newServiceUpdateForm builds the FormModel for updating a Cloud Run
+// service's container image, seeded with the service's current image. This
+// is the only field this Update flow touches -- update-traffic and full
+// service replace (env vars, resources, concurrency, ingress, etc.) are
+// explicitly out of scope.
+func newServiceUpdateForm(svc RunService) components.FormModel {
+	return components.NewForm("Update Cloud Run Service: "+svc.Name, []components.FormField{
+		{Label: "Container Image", Default: svc.Image, Placeholder: "gcr.io/my-project/my-image:latest", Required: true},
+	})
+}
 
 // servicesMsg is the message used to pass fetched data
 type servicesMsg []RunService
@@ -46,6 +76,12 @@ type functionsMsg []Function
 
 // errMsg is the standard error message
 type errMsg error
+
+// actionResultMsg carries the result of an async mutating action (e.g. service creation)
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -75,6 +111,16 @@ type Service struct {
 	viewState       ViewState
 	selectedService *RunService
 	selectedFunc    *Function
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
+
+	// Create State
+	createForm components.FormModel
+
+	// Update State
+	updateForm components.FormModel
 
 	// Cache
 	cache *core.Cache
@@ -128,10 +174,22 @@ func (s *Service) ShortName() string {
 // HelpText returns context-aware keybindings
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
+		if s.activeTab == TabServices {
+			return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail  c:Create  u:Update  d:Delete"
+		}
 		return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
+		if s.activeTab == TabServices {
+			return "Esc/q:Back  u:Update  d:Delete"
+		}
 		return "Esc/q:Back"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
 	return ""
 }
@@ -270,6 +328,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	// 4. Window Resize
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
@@ -370,6 +444,33 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "run", Heading: heading} }
 					}
 				}
+			case "c": // Create (Services tab only)
+				if s.activeTab == TabServices {
+					s.createForm = newServiceCreateForm()
+					s.viewState = ViewCreate
+					return s, nil
+				}
+			case "u": // Update (Services tab only)
+				if s.activeTab == TabServices {
+					svcs := s.getFilteredServices(s.services, s.filter.Value())
+					if idx := s.table.Cursor(); idx >= 0 && idx < len(svcs) {
+						s.selectedService = &svcs[idx]
+						s.updateForm = newServiceUpdateForm(*s.selectedService)
+						s.viewState = ViewUpdate
+						return s, nil
+					}
+				}
+			case "d": // Delete (Services tab only, Confirm)
+				if s.activeTab == TabServices {
+					svcs := s.getFilteredServices(s.services, s.filter.Value())
+					if idx := s.table.Cursor(); idx >= 0 && idx < len(svcs) {
+						s.selectedService = &svcs[idx]
+						s.pendingAction = "delete"
+						s.actionSource = ViewList
+						s.viewState = ViewConfirmation
+						return s, nil
+					}
+				}
 			}
 			var updatedTable *components.StandardTable
 			if s.activeTab == TabServices {
@@ -387,7 +488,65 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.selectedService = nil
 				s.selectedFunc = nil
 				return s, nil
+			case "u":
+				if s.activeTab == TabServices && s.selectedService != nil {
+					s.updateForm = newServiceUpdateForm(*s.selectedService)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d":
+				if s.activeTab == TabServices && s.selectedService != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
 			}
+
+		case ViewConfirmation:
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" && s.selectedService != nil {
+					actionCmd = s.DeleteServiceCmd(*s.selectedService)
+				}
+				s.viewState = ViewList
+				s.selectedService = nil
+				s.pendingAction = ""
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
+			}
+
+		case ViewCreate:
+			result, fcmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.createForm.Values()
+				port, _ := strconv.ParseInt(vals["Port"], 10, 64)
+				s.viewState = ViewList
+				return s, s.CreateServiceCmd(vals["Name"], vals["Region"], vals["Container Image"], port)
+			}
+			return s, fcmd
+
+		case ViewUpdate:
+			result, fcmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted && s.selectedService != nil {
+				vals := s.updateForm.Values()
+				svc := *s.selectedService
+				s.viewState = ViewList
+				return s, s.UpdateServiceCmd(svc.Name, svc.Region, vals["Container Image"])
+			}
+			return s, fcmd
 		}
 	}
 
@@ -410,6 +569,18 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
 	}
 
 	// Default: List View
@@ -510,6 +681,14 @@ func (s *Service) renderDetailView() string {
 	)
 }
 
+// renderConfirmation renders the delete confirmation dialog for services.
+func (s *Service) renderConfirmation() string {
+	if s.selectedService == nil {
+		return "Error: No service selected"
+	}
+	return components.RenderConfirmation(s.pendingAction, s.selectedService.Name, "service")
+}
+
 func (s *Service) renderFuncDetailView() string {
 	if s.selectedFunc == nil {
 		return "No function selected"
@@ -546,6 +725,46 @@ func (s *Service) renderFuncDetailView() string {
 // -----------------------------------------------------------------------------
 // Helper Commands
 // -----------------------------------------------------------------------------
+
+// CreateServiceCmd triggers creation of a new Cloud Run service
+func (s *Service) CreateServiceCmd(name, region, image string, port int64) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateService(s.projectID, region, name, image, port); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating service %s...", name)}
+	}
+}
+
+// UpdateServiceCmd fires the UpdateServiceImage API call for the given
+// service, updating only its container image.
+func (s *Service) UpdateServiceCmd(name, region, image string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateServiceImage(s.projectID, region, name, image); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating service %s...", name)}
+	}
+}
+
+// DeleteServiceCmd triggers deletion of the given Cloud Run service
+func (s *Service) DeleteServiceCmd(svc RunService) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteService(s.projectID, svc.Region, svc.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting service %s...", svc.Name)}
+	}
+}
 
 func (s *Service) fetchDataCmd(force bool) tea.Cmd {
 	return func() tea.Msg {

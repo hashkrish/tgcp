@@ -14,6 +14,18 @@ import (
 
 const CacheTTL = 60 * time.Second
 
+// TODO(create): Cloud Functions deploy is intentionally NOT implemented in
+// this package's Create pass. Unlike gce/disks/gke/cloudsql/cloudrun, a real
+// `functions deploy` (v2 Functions.Create / Patch) requires a source code
+// bundle — a GCS object (zip) or a repo/git reference — that the build step
+// actually compiles and runs; there is no "empty" or placeholder source that
+// produces a working function. Wiring a Create form here without a real
+// source upload flow would submit a request that is guaranteed to fail the
+// build, i.e. a broken API call, which this pass explicitly avoids. Full
+// source upload (zip + GCS staging bucket resolution) is out of scope for
+// this minimal Create pass; revisit as a follow-up once that upload flow
+// exists.
+
 // -----------------------------------------------------------------------------
 // Models & Msgs
 // -----------------------------------------------------------------------------
@@ -25,10 +37,16 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCall
+	ViewConfirmation
 )
 
 type functionsMsg []Function
 type errMsg error
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -48,6 +66,16 @@ type Service struct {
 
 	viewState    ViewState
 	selectedFunc *Function
+
+	// Call State (Lifecycle) — a single JSON data field, matching
+	// `gcloud functions call --data`. Only meaningful for Gen1 functions;
+	// see CallFunction's doc comment for why Gen2 is rejected.
+	callForm components.FormModel
+	callData string
+
+	// Confirmation State
+	pendingAction string    // "delete", "call"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -85,10 +113,16 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back"
+		return "Esc/q:Back  c:Call  d:Delete"
+	}
+	if s.viewState == ViewCall {
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
 	}
 	return ""
 }
@@ -187,6 +221,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -199,6 +249,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCall {
+			result, formCmd := s.callForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedFunc != nil {
+				s.callData = s.callForm.Value("Data (JSON)")
+				s.pendingAction = "call"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
+		}
+
 		if s.viewState == ViewList {
 			result := s.filterSession.HandleKey(msg)
 
@@ -222,6 +288,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.selectedFunc = &funcs[idx]
 					s.viewState = ViewDetail
 				}
+			case "d": // Delete (Confirm)
+				funcs := s.getFilteredFunctions(s.functions, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(funcs) {
+					s.selectedFunc = &funcs[idx]
+					s.pendingAction = "delete"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.table.Update(msg)
@@ -234,6 +308,45 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q":
 				s.viewState = ViewList
 				s.selectedFunc = nil
+				return s, nil
+			case "c": // Call (open data-payload form)
+				if s.selectedFunc != nil {
+					s.callForm = components.NewForm("Call Function: "+s.selectedFunc.Name, []components.FormField{
+						{Label: "Data (JSON)", Default: "{}"},
+					})
+					s.viewState = ViewCall
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if s.selectedFunc != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "call" && s.selectedFunc != nil {
+					actionCmd = s.CallFunctionCmd(*s.selectedFunc, s.callData)
+					s.viewState = ViewDetail
+					s.pendingAction = ""
+					return s, actionCmd
+				}
+				if s.pendingAction == "delete" && s.selectedFunc != nil {
+					actionCmd = s.DeleteFunctionCmd(*s.selectedFunc)
+				}
+				s.viewState = ViewList
+				s.selectedFunc = nil
+				s.pendingAction = ""
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
 				return s, nil
 			}
 		}
@@ -257,6 +370,14 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
+	}
+
+	if s.viewState == ViewCall {
+		return s.callForm.View()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
 	}
 
 	return s.renderListView()
@@ -346,9 +467,46 @@ func (s *Service) renderDetailView() string {
 	return fmt.Sprintf("%s\n\n%s", title, card)
 }
 
+// renderConfirmation renders the delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedFunc == nil {
+		return "Error: No function selected"
+	}
+	return components.RenderConfirmation(s.pendingAction, s.selectedFunc.Name, "function")
+}
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+// DeleteFunctionCmd triggers deletion of the given Cloud Function
+func (s *Service) DeleteFunctionCmd(fn Function) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteFunction(fn.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting function %s...", fn.Name)}
+	}
+}
+
+// CallFunctionCmd triggers a synchronous invocation of the given function
+// with the given JSON data payload. Only Gen1 functions are actually
+// callable here — see Client.CallFunction's doc comment.
+func (s *Service) CallFunctionCmd(fn Function, data string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		result, err := s.client.CallFunction(fn, data)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Called %s: %s", fn.Name, result)}
+	}
+}
 
 func (s *Service) fetchFunctionsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
