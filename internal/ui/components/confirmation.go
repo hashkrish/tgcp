@@ -65,23 +65,42 @@ func getActionStyle(action string) actionStyle {
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorError).Bold(true),
 			impactText:  "This action cannot be undone.",
 		}
-	case "stop", "terminate", "shutdown":
+	case "stop", "terminate", "shutdown", "cancel", "drain", "disable", "pause", "detach", "suspend":
 		// Disruptive actions - orange warning
 		return actionStyle{
 			icon:        "⏸",
-			title:       "Confirm Stop",
+			title:       "Confirm " + capitalize(action),
 			borderColor: styles.ColorWarning,
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
 			impactText:  "",
 		}
-	case "start", "restart", "resume":
-		// Safe actions - blue/info
+	case "purge":
+		// Bulk-destructive but recoverable-by-nature action - red warning like delete
+		return actionStyle{
+			icon:        "⚠",
+			title:       "Confirm Purge",
+			borderColor: styles.ColorError,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorError).Bold(true),
+			impactText:  "This immediately drops every task currently queued.",
+		}
+	case "start", "restart", "resume", "enable", "failover", "call", "run", "publish":
+		// Safe/expected actions - blue/info
 		return actionStyle{
 			icon:        "▶",
-			title:       "Confirm Start",
+			title:       "Confirm " + capitalize(action),
 			borderColor: styles.ColorInfo,
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorInfo).Bold(true),
 			impactText:  "",
+		}
+	case "grant":
+		// IAM policy writes - cautionary but not destructive; distinct
+		// styling so it's never confused with delete/disable.
+		return actionStyle{
+			icon:        "🔑",
+			title:       "Confirm IAM Grant",
+			borderColor: styles.ColorWarning,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
+			impactText:  "Double-check the role and member before confirming.",
 		}
 	case "snapshot", "backup":
 		// Neutral actions - subtle
@@ -173,6 +192,36 @@ func (m ConfirmationModel) buildActionText() string {
 		verb = "RESTART"
 	case "snapshot":
 		verb = "CREATE SNAPSHOT OF"
+	case "cancel":
+		verb = "CANCEL"
+	case "drain":
+		verb = "DRAIN"
+	case "disable":
+		verb = "DISABLE"
+	case "enable":
+		verb = "ENABLE"
+	case "pause":
+		verb = "PAUSE"
+	case "resume":
+		verb = "RESUME"
+	case "failover":
+		verb = "FAILOVER"
+	case "call":
+		verb = "CALL"
+	case "run":
+		verb = "RUN"
+	case "publish":
+		verb = "PUBLISH TO"
+	case "purge":
+		verb = "PURGE"
+	case "detach":
+		verb = "DETACH"
+	case "destroy":
+		verb = "DESTROY"
+	case "reset":
+		verb = "RESET"
+	case "suspend":
+		verb = "SUSPEND"
 	default:
 		verb = actionUpper
 	}
