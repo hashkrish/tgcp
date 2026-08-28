@@ -3,6 +3,7 @@ package secrets
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -40,7 +41,39 @@ const (
 	ViewDetail
 	ViewVersions
 	ViewVersionDetail
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
+	ViewIAM
+	ViewIAMForm
+	ViewAddVersion
 )
+
+// newSecretUpdateForm builds the FormModel for updating a secret's labels,
+// seeded with its current labels rendered as comma-separated key=value
+// pairs. Replication policy changes are out of scope for this minimal
+// Update flow.
+func newSecretUpdateForm(sec Secret) components.FormModel {
+	var pairs []string
+	for k, v := range sec.Labels {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
+	}
+	return components.NewForm("Update Secret: "+sec.Name, []components.FormField{
+		{Label: "Labels (key=value,key2=value2)", Default: strings.Join(pairs, ",")},
+	})
+}
+
+// actionResultMsg carries the result of an async create action.
+type actionResultMsg struct {
+	err error
+	msg string
+}
+
+// iamPolicyMsg carries the result of a GetSecretIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -79,6 +112,28 @@ type Service struct {
 	revealed      bool
 	revealedValue string
 	revealErr     error
+
+	createForm     components.FormModel
+	updateForm     components.FormModel
+	addVersionForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
+
+	// pendingVersionValue is the plaintext value captured at add-version-form
+	// submit time, so the confirmation dialog and the actual AddVersion call
+	// use the same value regardless of what the form field holds later.
+	pendingVersionValue string
+
+	// IAM: current bindings for the selected secret, and the add-binding
+	// form. pendingIAMRole/pendingIAMMember are captured at form-submit
+	// time so the confirmation dialog and the actual API call use the same
+	// values regardless of what the form fields hold later.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	// Cache
 	cache *core.Cache
@@ -125,16 +180,25 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewList:
-		return "r:Refresh  /:Filter  Enter:Detail"
+		return "r:Refresh  /:Filter  n:New Secret  Enter:Detail"
+	case ViewConfirmation:
+		return "y:Confirm  n:Cancel"
 	case ViewDetail:
-		return "v:Versions  Esc/q:Back"
+		return "v:Versions  u:Update  n:New Version  d:Delete  i:IAM  Esc/q:Back"
+	case ViewIAM:
+		return "a:Add Binding  q/Esc:Back"
+	case ViewIAMForm:
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	case ViewVersions:
 		return "Enter:View Version  Esc/q:Back to Detail"
 	case ViewVersionDetail:
+		reveal := "v:Reveal Value"
 		if s.revealed {
-			return "v:Hide Value  Esc/q:Back"
+			reveal = "v:Hide Value"
 		}
-		return "v:Reveal Value  Esc/q:Back"
+		return reveal + "  E:Enable  D:Disable  X:Destroy  Esc/q:Back"
+	case ViewCreate, ViewUpdate, ViewAddVersion:
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
 	}
@@ -234,6 +298,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.versions = msg
 		s.updateVersionTable(msg)
+		if s.selectedVersion != nil {
+			for i := range s.versions {
+				if s.versions[i].FullName == s.selectedVersion.FullName {
+					s.selectedVersion = &s.versions[i]
+					break
+				}
+			}
+		}
 		return s, nil
 
 	case revealedMsg:
@@ -254,6 +326,88 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.err = msg
 		return s, nil
+
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
+	case actionResultMsg:
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedSecret != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedSecret),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "delete" || s.pendingAction == "version-enable" || s.pendingAction == "version-disable" || s.pendingAction == "version-destroy" || s.pendingAction == "add-version" {
+			action := s.pendingAction
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if action == "delete" {
+				s.selectedSecret = nil
+				s.viewState = ViewList
+				return s, tea.Batch(
+					func() tea.Msg {
+						return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+					},
+					s.Refresh(),
+				)
+			}
+			// Version-level actions: stay on the version detail view and
+			// refresh the version list in the background so the state
+			// column picks up the change.
+			var refreshCmd tea.Cmd
+			if s.selectedSecret != nil {
+				refreshCmd = s.fetchVersionsCmd(s.selectedSecret.FullName)
+			}
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				refreshCmd,
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		if s.viewState == ViewUpdate {
+			s.viewState = ViewDetail
+		} else {
+			s.viewState = ViewList
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
 
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
@@ -302,6 +456,13 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "n":
+			s.createForm = components.NewForm("New Secret", []components.FormField{
+				{Label: "Secret ID", Placeholder: "my-secret", Required: true},
+				{Label: "Replication", Default: "automatic"},
+			})
+			s.viewState = ViewCreate
+			return s, nil
 		case "enter":
 			secrets := s.getCurrentSecrets()
 			if idx := s.table.Cursor(); idx >= 0 && idx < len(secrets) {
@@ -316,12 +477,84 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.table = updatedTable
 		return s, cmd
 
+	case ViewCreate:
+		result, formCmd := s.createForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewList
+			return s, nil
+		}
+		if result.Submitted {
+			return s, s.submitCreateCmd()
+		}
+		return s, formCmd
+
+	case ViewUpdate:
+		result, formCmd := s.updateForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewDetail
+			return s, nil
+		}
+		if result.Submitted && s.selectedSecret != nil {
+			return s, s.submitUpdateCmd(*s.selectedSecret)
+		}
+		return s, formCmd
+
+	case ViewAddVersion:
+		result, formCmd := s.addVersionForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewDetail
+			return s, nil
+		}
+		if result.Submitted && s.selectedSecret != nil {
+			s.pendingVersionValue = s.addVersionForm.Value("Secret Value")
+			s.pendingAction = "add-version"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+
+	case ViewIAMForm:
+		result, formCmd := s.iamForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewIAM
+			return s, nil
+		}
+		if result.Submitted && s.selectedSecret != nil {
+			s.pendingIAMRole = s.iamForm.Value("Role")
+			s.pendingIAMMember = s.iamForm.Value("Member")
+			s.pendingAction = "grant"
+			s.actionSource = ViewIAM
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+
+	case ViewIAM:
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewDetail
+			return s, nil
+		case "a":
+			if s.selectedSecret != nil {
+				s.iamForm = components.NewIAMAddBindingForm(s.selectedSecret.Name)
+				s.viewState = ViewIAMForm
+			}
+			return s, nil
+		}
+
 	case ViewDetail:
 		switch msg.String() {
 		case "esc", "q":
 			s.viewState = ViewList
 			s.selectedSecret = nil
 			s.versions = nil
+			return s, nil
+		case "u":
+			if s.selectedSecret != nil {
+				s.updateForm = newSecretUpdateForm(*s.selectedSecret)
+				s.viewState = ViewUpdate
+			}
 			return s, nil
 		case "v":
 			// Fetch versions for selected secret
@@ -332,6 +565,64 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					s.fetchVersionsCmd(s.selectedSecret.FullName),
 				)
 			}
+		case "n":
+			if s.selectedSecret != nil {
+				s.addVersionForm = components.NewForm("Add New Version: "+s.selectedSecret.Name, []components.FormField{
+					{Label: "Secret Value", Placeholder: "new secret value", Required: true},
+				})
+				s.viewState = ViewAddVersion
+			}
+			return s, nil
+		case "d":
+			if s.selectedSecret != nil {
+				s.pendingAction = "delete"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "i":
+			if s.selectedSecret != nil {
+				return s, tea.Batch(s.fetchIAMCmd(*s.selectedSecret), s.spinner.Start(""))
+			}
+			return s, nil
+		}
+
+	case ViewConfirmation:
+		switch msg.String() {
+		case "y", "enter":
+			var actionCmd tea.Cmd
+			switch s.pendingAction {
+			case "delete":
+				if s.selectedSecret != nil {
+					actionCmd = s.deleteSecretCmd(*s.selectedSecret)
+				}
+			case "grant":
+				if s.selectedSecret != nil {
+					actionCmd = s.addIAMBindingCmd(*s.selectedSecret, s.pendingIAMRole, s.pendingIAMMember)
+				}
+			case "version-enable":
+				if s.selectedVersion != nil {
+					actionCmd = s.enableVersionCmd(*s.selectedVersion)
+				}
+			case "version-disable":
+				if s.selectedVersion != nil {
+					actionCmd = s.disableVersionCmd(*s.selectedVersion)
+				}
+			case "version-destroy":
+				if s.selectedVersion != nil {
+					actionCmd = s.destroyVersionCmd(*s.selectedVersion)
+				}
+			case "add-version":
+				if s.selectedSecret != nil {
+					actionCmd = s.addVersionCmd(*s.selectedSecret, s.pendingVersionValue)
+				}
+			}
+			s.viewState = s.actionSource
+			return s, actionCmd
+		case "n", "esc", "q":
+			s.viewState = s.actionSource
+			s.pendingAction = ""
+			return s, nil
 		}
 
 	case ViewVersions:
@@ -376,6 +667,27 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.spinner.Start(""),
 				s.fetchRevealCmd(s.selectedVersion.FullName),
 			)
+		case "E": // Enable (Confirm)
+			if s.selectedVersion != nil {
+				s.pendingAction = "version-enable"
+				s.actionSource = ViewVersionDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "D": // Disable (Confirm)
+			if s.selectedVersion != nil {
+				s.pendingAction = "version-disable"
+				s.actionSource = ViewVersionDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "X": // Destroy (Confirm)
+			if s.selectedVersion != nil {
+				s.pendingAction = "version-destroy"
+				s.actionSource = ViewVersionDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
 		}
 	}
 
@@ -402,9 +714,131 @@ func (s *Service) View() string {
 		return s.renderVersionsView()
 	case ViewVersionDetail:
 		return s.renderVersionDetailView()
+	case ViewCreate:
+		return s.createForm.View()
+	case ViewUpdate:
+		return s.updateForm.View()
+	case ViewAddVersion:
+		return s.addVersionForm.View()
+	case ViewConfirmation:
+		return s.renderConfirmation()
+	case ViewIAM:
+		return s.renderIAMView()
+	case ViewIAMForm:
+		return s.iamForm.View()
 	default:
 		return s.renderListView()
 	}
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// secret, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedSecret == nil {
+		return "Error: No secret selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Secrets",
+		s.selectedSecret.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedSecret.Name, rows)
+}
+
+// fetchIAMCmd fetches the current IAM policy for a secret.
+func (s *Service) fetchIAMCmd(sec Secret) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetSecretIAMPolicy(sec.FullName)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given secret.
+func (s *Service) addIAMBindingCmd(sec Secret, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddSecretIAMBinding(sec.FullName, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on secret %s", role, member, sec.Name)}
+	}
+}
+
+// renderConfirmation renders the secret-delete or version-level (enable /
+// disable / destroy) confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	switch s.pendingAction {
+	case "delete":
+		if s.selectedSecret == nil {
+			return "Error: No secret selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			s.pendingAction,
+			s.selectedSecret.Name,
+			"secret",
+			fmt.Sprintf("Are you sure you want to DELETE secret %s? This deletes every version of it.", s.selectedSecret.Name),
+		)
+	case "grant":
+		if s.selectedSecret == nil {
+			return "Error: No secret selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"grant",
+			s.selectedSecret.Name,
+			"secret",
+			components.IAMConfirmMessage("secret", s.selectedSecret.Name, s.pendingIAMRole, s.pendingIAMMember),
+		)
+	case "version-enable", "version-disable", "version-destroy":
+		if s.selectedVersion == nil {
+			return "Error: No version selected"
+		}
+		verb := strings.TrimPrefix(s.pendingAction, "version-")
+		label := fmt.Sprintf("version %s", s.selectedVersion.Name)
+		if verb == "destroy" {
+			return components.RenderConfirmationWithMessage(
+				"destroy",
+				label,
+				"secret version",
+				fmt.Sprintf("Are you sure you want to DESTROY %s of secret %s? This irrecoverably deletes its payload.", label, s.selectedSecretName()),
+			)
+		}
+		return components.RenderConfirmation(verb, label, "secret version")
+	case "add-version":
+		if s.selectedSecret == nil {
+			return "Error: No secret selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"add-version",
+			s.selectedSecret.Name,
+			"secret",
+			fmt.Sprintf("Add new version to secret %s?", s.selectedSecret.Name),
+		)
+	default:
+		return "Error: No pending action"
+	}
+}
+
+// selectedSecretName returns the currently selected secret's name, or an
+// empty string if none is selected — used only for confirmation-dialog text.
+func (s *Service) selectedSecretName() string {
+	if s.selectedSecret == nil {
+		return ""
+	}
+	return s.selectedSecret.Name
 }
 
 func (s *Service) renderListView() string {
@@ -554,6 +988,119 @@ func (s *Service) renderVersionDetailView() string {
 		"",
 		valueBlock,
 	)
+}
+
+// -----------------------------------------------------------------------------
+// Create
+// -----------------------------------------------------------------------------
+
+func (s *Service) submitCreateCmd() tea.Cmd {
+	secretID := s.createForm.Value("Secret ID")
+	replication := s.createForm.Value("Replication")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateSecret(s.projectID, secretID, replication); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Secret %s created", secretID)}
+	}
+}
+
+// submitUpdateCmd fires the UpdateSecretLabels API call, parsing the
+// update-form's comma-separated key=value pairs into a labels map.
+func (s *Service) submitUpdateCmd(sec Secret) tea.Cmd {
+	raw := s.updateForm.Value("Labels (key=value,key2=value2)")
+	labels := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) == 2 {
+			labels[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+		}
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateSecretLabels(sec.FullName, labels); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating secret %s...", sec.Name)}
+	}
+}
+
+// deleteSecretCmd triggers deletion of the given secret
+func (s *Service) deleteSecretCmd(sec Secret) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteSecret(sec.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting secret %s...", sec.Name)}
+	}
+}
+
+// addVersionCmd adds a new version with the given plaintext value to the
+// given secret. This is the data-plane "add version" operation
+// (`gcloud secrets versions add`) — additive/non-destructive, but still
+// gated behind the standard confirmation dialog since it writes real data.
+func (s *Service) addVersionCmd(sec Secret, value string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		versionName, err := s.client.AddVersion(sec.FullName, value)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Added version %s to secret %s", versionName, sec.Name)}
+	}
+}
+
+// enableVersionCmd triggers re-enabling the given secret version
+func (s *Service) enableVersionCmd(ver SecretVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.EnableVersion(ver.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Enabling version %s...", ver.Name)}
+	}
+}
+
+// disableVersionCmd triggers disabling the given secret version
+func (s *Service) disableVersionCmd(ver SecretVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DisableVersion(ver.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Disabling version %s...", ver.Name)}
+	}
+}
+
+// destroyVersionCmd triggers irrecoverably destroying the given secret version
+func (s *Service) destroyVersionCmd(ver SecretVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DestroyVersion(ver.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Destroying version %s...", ver.Name)}
+	}
 }
 
 // -----------------------------------------------------------------------------

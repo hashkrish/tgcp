@@ -3,6 +3,7 @@ package parametermanager
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -33,7 +34,30 @@ const (
 	ViewDetail
 	ViewVersions
 	ViewVersionDetail
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
 )
+
+// newParameterUpdateForm builds the FormModel for updating a parameter's
+// labels, seeded with its current labels rendered as comma-separated
+// key=value pairs. Format is immutable after creation and versions
+// create/render are out of scope for this minimal Update flow.
+func newParameterUpdateForm(p Parameter) components.FormModel {
+	var pairs []string
+	for k, v := range p.Labels {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, v))
+	}
+	return components.NewForm("Update Parameter: "+p.Name, []components.FormField{
+		{Label: "Labels (key=value,key2=value2)", Default: strings.Join(pairs, ",")},
+	})
+}
+
+// actionResultMsg carries the result of an async create action.
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -66,6 +90,13 @@ type Service struct {
 	selectedVersion   *ParameterVersion
 	value             string
 	valueErr          error
+
+	createForm components.FormModel
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	// Cache
 	cache *core.Cache
@@ -112,13 +143,17 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewList:
-		return "r:Refresh  /:Filter  Enter:Detail"
+		return "r:Refresh  /:Filter  n:New Parameter  Enter:Detail"
+	case ViewConfirmation:
+		return "y:Confirm  n:Cancel"
 	case ViewDetail:
-		return "v:Versions  Esc/q:Back"
+		return "v:Versions  u:Update  d:Delete  Esc/q:Back"
 	case ViewVersions:
 		return "Enter:View Version  Esc/q:Back to Detail"
 	case ViewVersionDetail:
 		return "Esc/q:Back"
+	case ViewCreate, ViewUpdate:
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
 	}
@@ -223,6 +258,46 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedParameter = nil
+			s.viewState = ViewList
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		if s.viewState == ViewUpdate {
+			s.viewState = ViewDetail
+		} else {
+			s.viewState = ViewList
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
 		s.height = msg.Height
@@ -270,6 +345,13 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "n":
+			s.createForm = components.NewForm("New Parameter", []components.FormField{
+				{Label: "Parameter ID", Placeholder: "my-parameter", Required: true},
+				{Label: "Format", Default: "UNFORMATTED"},
+			})
+			s.viewState = ViewCreate
+			return s, nil
 		case "enter":
 			params := s.getCurrentParameters()
 			if idx := s.table.Cursor(); idx >= 0 && idx < len(params) {
@@ -284,12 +366,40 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		s.table = updatedTable
 		return s, cmd
 
+	case ViewCreate:
+		result, formCmd := s.createForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewList
+			return s, nil
+		}
+		if result.Submitted {
+			return s, s.submitCreateCmd()
+		}
+		return s, formCmd
+
+	case ViewUpdate:
+		result, formCmd := s.updateForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewDetail
+			return s, nil
+		}
+		if result.Submitted && s.selectedParameter != nil {
+			return s, s.submitUpdateCmd(*s.selectedParameter)
+		}
+		return s, formCmd
+
 	case ViewDetail:
 		switch msg.String() {
 		case "esc", "q":
 			s.viewState = ViewList
 			s.selectedParameter = nil
 			s.versions = nil
+			return s, nil
+		case "u":
+			if s.selectedParameter != nil {
+				s.updateForm = newParameterUpdateForm(*s.selectedParameter)
+				s.viewState = ViewUpdate
+			}
 			return s, nil
 		case "v":
 			// Fetch versions for selected parameter
@@ -300,6 +410,28 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					s.fetchVersionsCmd(s.selectedParameter.FullName),
 				)
 			}
+		case "d":
+			if s.selectedParameter != nil {
+				s.pendingAction = "delete"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		}
+
+	case ViewConfirmation:
+		switch msg.String() {
+		case "y", "enter":
+			var actionCmd tea.Cmd
+			if s.pendingAction == "delete" && s.selectedParameter != nil {
+				actionCmd = s.deleteParameterCmd(*s.selectedParameter)
+			}
+			s.viewState = s.actionSource
+			return s, actionCmd
+		case "n", "esc", "q":
+			s.viewState = s.actionSource
+			s.pendingAction = ""
+			return s, nil
 		}
 
 	case ViewVersions:
@@ -363,9 +495,28 @@ func (s *Service) View() string {
 		return s.renderVersionsView()
 	case ViewVersionDetail:
 		return s.renderVersionDetailView()
+	case ViewCreate:
+		return s.createForm.View()
+	case ViewUpdate:
+		return s.updateForm.View()
+	case ViewConfirmation:
+		return s.renderConfirmation()
 	default:
 		return s.renderListView()
 	}
+}
+
+// renderConfirmation renders the parameter-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedParameter == nil {
+		return "Error: No parameter selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedParameter.Name,
+		"parameter",
+		fmt.Sprintf("Are you sure you want to DELETE parameter %s? This deletes every version of it.", s.selectedParameter.Name),
+	)
 }
 
 func (s *Service) renderListView() string {
@@ -500,6 +651,63 @@ func (s *Service) renderVersionDetailView() string {
 		"",
 		valueBlock,
 	)
+}
+
+// -----------------------------------------------------------------------------
+// Create
+// -----------------------------------------------------------------------------
+
+func (s *Service) submitCreateCmd() tea.Cmd {
+	parameterID := s.createForm.Value("Parameter ID")
+	format := s.createForm.Value("Format")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateParameter(s.projectID, parameterID, format); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Parameter %s created", parameterID)}
+	}
+}
+
+// submitUpdateCmd fires the UpdateParameterLabels API call, parsing the
+// update-form's comma-separated key=value pairs into a labels map.
+func (s *Service) submitUpdateCmd(p Parameter) tea.Cmd {
+	raw := s.updateForm.Value("Labels (key=value,key2=value2)")
+	labels := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) == 2 {
+			labels[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+		}
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateParameterLabels(p.FullName, labels); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating parameter %s...", p.Name)}
+	}
+}
+
+// deleteParameterCmd triggers deletion of the given parameter
+func (s *Service) deleteParameterCmd(p Parameter) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteParameter(p.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting parameter %s...", p.Name)}
+	}
 }
 
 // -----------------------------------------------------------------------------

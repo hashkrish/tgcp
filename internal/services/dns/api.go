@@ -83,6 +83,44 @@ func (c *Client) ListRecordSets(projectID, zoneName string) ([]RecordSet, error)
 	return records, nil
 }
 
+// CreateZone creates a new Cloud DNS managed zone. visibility is either
+// "public" or "private"; anything else falls back to "public".
+func (c *Client) CreateZone(projectID, name, dnsName, description, visibility string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	visibility = strings.ToLower(strings.TrimSpace(visibility))
+	if visibility != "private" {
+		visibility = "public"
+	}
+	zone := &gdns.ManagedZone{
+		Name:        name,
+		DnsName:     dnsName,
+		Description: description,
+		Visibility:  visibility,
+	}
+	_, err := c.service.ManagedZones.Create(projectID, zone).Do()
+	return err
+}
+
+// DeleteZone deletes a Cloud DNS managed zone, matching
+// `gcloud dns managed-zones delete`. The API itself refuses to delete a
+// zone that still has any record sets beyond the default NS/SOA pair, which
+// is the safety behavior this app relies on (no record-set delete is
+// implemented here to empty it first).
+func (c *Client) DeleteZone(projectID, zoneName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	return c.service.ManagedZones.Delete(projectID, zoneName).Do()
+}
+
 func toZone(z *gdns.ManagedZone) Zone {
 	visibility := strings.ToUpper(z.Visibility)
 	if visibility == "" {

@@ -25,11 +25,19 @@ type ViewState int
 const (
 	ViewZones ViewState = iota
 	ViewRecords
+	ViewCreate
+	ViewConfirmation
 )
 
 type zonesMsg []Zone
 type recordsMsg []RecordSet
 type errMsg error
+
+// actionResultMsg carries the result of an async create action.
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -52,6 +60,12 @@ type Service struct {
 
 	viewState    ViewState
 	selectedZone *Zone
+
+	createForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -96,9 +110,13 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewZones:
-		return "r:Refresh  /:Filter  Ent:Records"
+		return "r:Refresh  /:Filter  n:New Zone  Ent:Records  d:Delete"
 	case ViewRecords:
 		return "Esc/q:Back"
+	case ViewConfirmation:
+		return "y:Confirm  n:Cancel"
+	case ViewCreate:
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
 	}
@@ -204,6 +222,38 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedZone = nil
+			s.viewState = ViewZones
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			s.createForm.SubmitErr = msg.err.Error()
+			return s, nil
+		}
+		s.viewState = ViewZones
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.zoneTable.HandleWindowSizeDefault(msg)
 		s.recordTable.HandleWindowSizeDefault(msg)
@@ -232,6 +282,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if s.viewState == ViewCreate {
+		result, formCmd := s.createForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewZones
+			return s, nil
+		}
+		if result.Submitted {
+			return s, s.submitCreateCmd()
+		}
+		return s, formCmd
+	}
+
 	if s.viewState == ViewZones {
 		result := s.filterSession.HandleKey(msg)
 		if result.Handled {
@@ -246,6 +308,15 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "n":
+			s.createForm = components.NewForm("New Managed Zone", []components.FormField{
+				{Label: "Zone Name", Placeholder: "my-zone", Required: true},
+				{Label: "DNS Name", Placeholder: "example.com.", Required: true},
+				{Label: "Description"},
+				{Label: "Visibility", Default: "public"},
+			})
+			s.viewState = ViewCreate
+			return s, nil
 		case "enter":
 			zones := s.getFilteredZones(s.zones, s.filter.Value())
 			if idx := s.zoneTable.Cursor(); idx >= 0 && idx < len(zones) {
@@ -256,12 +327,37 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					s.fetchRecordsCmd(s.selectedZone.Name),
 				)
 			}
+		case "d":
+			zones := s.getFilteredZones(s.zones, s.filter.Value())
+			if idx := s.zoneTable.Cursor(); idx >= 0 && idx < len(zones) {
+				s.selectedZone = &zones[idx]
+				s.pendingAction = "delete"
+				s.actionSource = ViewZones
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
 		}
 
 		var updatedTable *components.StandardTable
 		updatedTable, cmd = s.zoneTable.Update(msg)
 		s.zoneTable = updatedTable
 		return s, cmd
+	}
+
+	if s.viewState == ViewConfirmation {
+		switch msg.String() {
+		case "y", "enter":
+			var actionCmd tea.Cmd
+			if s.pendingAction == "delete" && s.selectedZone != nil {
+				actionCmd = s.deleteZoneCmd(*s.selectedZone)
+			}
+			s.viewState = s.actionSource
+			return s, actionCmd
+		case "n", "esc", "q":
+			s.viewState = s.actionSource
+			s.pendingAction = ""
+			return s, nil
+		}
 	}
 
 	if s.viewState == ViewRecords {
@@ -301,7 +397,28 @@ func (s *Service) View() string {
 		return s.renderRecordsView()
 	}
 
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
 	return s.renderListView()
+}
+
+// renderConfirmation renders the zone-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedZone == nil {
+		return "Error: No zone selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedZone.Name,
+		"managed zone",
+		fmt.Sprintf("Are you sure you want to DELETE zone %s? Only zones with no records beyond the default NS/SOA can be deleted.", s.selectedZone.Name),
+	)
 }
 
 func (s *Service) renderListView() string {
@@ -316,6 +433,39 @@ func (s *Service) renderListView() string {
 	content.WriteString("\n")
 	content.WriteString(s.zoneTable.View())
 	return content.String()
+}
+
+// -----------------------------------------------------------------------------
+// Create
+// -----------------------------------------------------------------------------
+
+func (s *Service) submitCreateCmd() tea.Cmd {
+	name := s.createForm.Value("Zone Name")
+	dnsName := s.createForm.Value("DNS Name")
+	description := s.createForm.Value("Description")
+	visibility := s.createForm.Value("Visibility")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateZone(s.projectID, name, dnsName, description, visibility); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Zone %s created", name)}
+	}
+}
+
+// deleteZoneCmd triggers deletion of the given zone
+func (s *Service) deleteZoneCmd(zone Zone) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteZone(s.projectID, zone.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting zone %s...", zone.Name)}
+	}
 }
 
 // -----------------------------------------------------------------------------

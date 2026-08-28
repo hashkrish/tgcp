@@ -2,6 +2,12 @@ package secrets
 
 import "time"
 
+// IAMBinding is a single role -> members pair from a secret's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}
+
 // Secret represents a Secret Manager secret
 type Secret struct {
 	Name         string // Short name (e.g., "api-key")

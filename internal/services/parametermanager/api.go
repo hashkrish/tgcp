@@ -136,6 +136,56 @@ func (c *Client) GetVersionPayload(versionFullName string) (string, error) {
 	return string(decoded), nil
 }
 
+// CreateParameter creates a new Parameter Manager parameter (metadata only
+// — no version/value is set here; adding a version is a separate,
+// out-of-scope data-plane operation) in the project's global location.
+func (c *Client) CreateParameter(projectID, parameterID, format string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("parametermanager client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, defaultLocation)
+	if format == "" {
+		format = "UNFORMATTED"
+	}
+	param := &parametermanager.Parameter{
+		Format: format,
+	}
+	_, err := c.service.Projects.Locations.Parameters.Create(parent, param).ParameterId(parameterID).Do()
+	return err
+}
+
+// UpdateParameterLabels replaces a parameter's labels via a labels-only
+// Patch, matching `gcloud parametermanager parameters update
+// --update-labels`. Format is immutable after creation and versions
+// create/render are out of scope for this minimal Update flow.
+func (c *Client) UpdateParameterLabels(parameterName string, labels map[string]string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("parametermanager client not initialized")
+	}
+	param := &parametermanager.Parameter{Labels: labels}
+	_, err := c.service.Projects.Locations.Parameters.Patch(parameterName, param).UpdateMask("labels").Do()
+	return err
+}
+
+// DeleteParameter deletes a Parameter Manager parameter and all of its
+// versions, matching `gcloud parametermanager parameters delete`.
+func (c *Client) DeleteParameter(parameterName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("parametermanager client not initialized")
+	}
+	_, err := c.service.Projects.Locations.Parameters.Delete(parameterName).Do()
+	return err
+}
+
 // extractParameterName extracts the short parameter name from the full
 // resource name, e.g. "projects/p/locations/global/parameters/x" -> "x"
 func extractParameterName(fullName string) string {

@@ -2,6 +2,7 @@ package iam
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/styles"
@@ -41,7 +42,7 @@ func (s *Service) renderDetailView() string {
 		s.selectedAccount.DisplayName,
 	)
 
-	content := lipgloss.JoinVertical(lipgloss.Left,
+	sections := []string{
 		header,
 		"",
 		components.DetailCard(components.DetailCardOpts{
@@ -55,9 +56,40 @@ func (s *Service) renderDetailView() string {
 				{Key: "Resource Name", Value: s.selectedAccount.Name},
 			},
 		}),
-	)
+	}
 
-	return content
+	if roles := s.rolesForSelectedAccount(); len(roles) > 0 {
+		rows := make([]components.KeyValue, len(roles))
+		for i, role := range roles {
+			rows[i] = components.KeyValue{Key: fmt.Sprintf("%d", i+1), Value: role}
+		}
+		sections = append(sections, "", components.DetailCard(components.DetailCardOpts{
+			Title: "IAM Roles",
+			Rows:  rows,
+		}))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, sections...)
+}
+
+// rolesForSelectedAccount returns the sorted, deduplicated list of project
+// roles granted to the selected service account, derived from the
+// project-wide IAM policy fetched once and shared across all accounts.
+func (s *Service) rolesForSelectedAccount() []string {
+	if s.selectedAccount == nil {
+		return nil
+	}
+	member := "serviceAccount:" + s.selectedAccount.Email
+	seen := make(map[string]bool)
+	var roles []string
+	for _, b := range s.policyBindings {
+		if b.Member == member && !seen[b.Role] {
+			seen[b.Role] = true
+			roles = append(roles, b.Role)
+		}
+	}
+	sort.Strings(roles)
+	return roles
 }
 
 func activeStatus(disabled bool) string {

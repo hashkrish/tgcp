@@ -8,7 +8,9 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
+	"github.com/yogirk/tgcp/internal/styles"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
@@ -25,11 +27,60 @@ type ViewState int
 const (
 	ViewRings ViewState = iota
 	ViewKeys
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
+	ViewIAM
+	ViewIAMForm
+	ViewPublicKey
 )
+
+// newKeyUpdateForm builds the FormModel for updating a crypto key's
+// automatic rotation period (e.g. "7776000s" for 90 days), seeded with its
+// current value if set. Key-version operations (set-primary-version,
+// enable/disable/destroy/restore) are out of scope for this minimal Update
+// flow.
+func newKeyUpdateForm(key CryptoKey) components.FormModel {
+	return components.NewForm("Update Crypto Key: "+key.Name, []components.FormField{
+		{Label: "Rotation Period (Go duration, e.g. 2160h)", Default: rotationDefault(key.RotationPeriod), Required: true, Validate: func(v string) string {
+			d, err := time.ParseDuration(v)
+			if err != nil || d <= 0 {
+				return "must be a valid positive Go duration, e.g. 2160h"
+			}
+			return ""
+		}},
+	})
+}
+
+func rotationDefault(existing string) string {
+	if existing == "" {
+		return "2160h0m0s"
+	}
+	return existing
+}
 
 type ringsMsg []KeyRing
 type keysMsg []CryptoKey
 type errMsg error
+
+// actionResultMsg carries the result of an async create action.
+type actionResultMsg struct {
+	err error
+	msg string
+}
+
+// iamPolicyMsg carries the result of a GetKeyRingIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
+}
+
+// publicKeyMsg carries the result of a GetPublicKey fetch, triggered only by
+// the explicit "k" keypress on an asymmetric key — never automatically.
+type publicKeyMsg struct {
+	pem string
+	err error
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -52,6 +103,36 @@ type Service struct {
 
 	viewState    ViewState
 	selectedRing *KeyRing
+	selectedKey  *CryptoKey
+
+	// Create form state. createReturnView records whether "n" was pressed
+	// from ViewRings (create a key ring) or ViewKeys (create a key inside
+	// the currently selected ring).
+	createForm       components.FormModel
+	createReturnView ViewState
+
+	// Update form state
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
+
+	// IAM: current bindings for the selected key ring, and the add-binding
+	// form. pendingIAMRole/pendingIAMMember are captured at form-submit
+	// time so the confirmation dialog and the actual API call use the same
+	// values regardless of what the form fields hold later.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
+
+	// Public key state — session-only, holds the PEM fetched for the
+	// currently selected asymmetric key's version 1 (see api.go GetPublicKey
+	// for the "version 1 only" simplification). Cleared whenever the user
+	// leaves the view.
+	publicKeyPem string
+	publicKeyErr error
 
 	cache *core.Cache
 }
@@ -97,9 +178,19 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewRings:
-		return "r:Refresh  /:Filter  Ent:Keys"
+		return "r:Refresh  /:Filter  n:New Key Ring  Ent:Keys  i:IAM"
 	case ViewKeys:
-		return "Esc/q:Back"
+		return "Esc/q:Back  n:New Key  u:Update  d:Delete  k:Public Key"
+	case ViewConfirmation:
+		return "y:Confirm  n:Cancel"
+	case ViewIAM:
+		return "a:Add Binding  q/Esc:Back"
+	case ViewIAMForm:
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
+	case ViewPublicKey:
+		return "q/Esc:Back"
+	case ViewCreate, ViewUpdate:
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
 	}
@@ -205,6 +296,79 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
+	case publicKeyMsg:
+		s.spinner.Stop()
+		s.publicKeyPem = msg.pem
+		s.publicKeyErr = msg.err
+		s.viewState = ViewPublicKey
+		return s, nil
+
+	case actionResultMsg:
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedRing != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedRing),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedKey = nil
+			s.viewState = ViewKeys
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		if s.viewState == ViewUpdate {
+			s.viewState = ViewKeys
+		} else {
+			s.viewState = s.createReturnView
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.ringTable.HandleWindowSizeDefault(msg)
 		s.keyTable.HandleWindowSizeDefault(msg)
@@ -233,6 +397,72 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if s.viewState == ViewCreate {
+		result, formCmd := s.createForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = s.createReturnView
+			return s, nil
+		}
+		if result.Submitted {
+			return s, s.submitCreateCmd()
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewUpdate {
+		result, formCmd := s.updateForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewKeys
+			return s, nil
+		}
+		if result.Submitted && s.selectedKey != nil {
+			return s, s.submitUpdateCmd(*s.selectedKey)
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewIAMForm {
+		result, formCmd := s.iamForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewIAM
+			return s, nil
+		}
+		if result.Submitted && s.selectedRing != nil {
+			s.pendingIAMRole = s.iamForm.Value("Role")
+			s.pendingIAMMember = s.iamForm.Value("Member")
+			s.pendingAction = "grant"
+			s.actionSource = ViewIAM
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewPublicKey {
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewKeys
+			s.publicKeyPem = ""
+			s.publicKeyErr = nil
+			return s, nil
+		}
+		return s, nil
+	}
+
+	if s.viewState == ViewIAM {
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewRings
+			return s, nil
+		case "a":
+			if s.selectedRing != nil {
+				s.iamForm = components.NewIAMAddBindingForm(s.selectedRing.Name)
+				s.viewState = ViewIAMForm
+			}
+			return s, nil
+		}
+	}
+
 	if s.viewState == ViewRings {
 		result := s.filterSession.HandleKey(msg)
 		if result.Handled {
@@ -247,6 +477,14 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "n":
+			s.createReturnView = ViewRings
+			s.createForm = components.NewForm("New Key Ring", []components.FormField{
+				{Label: "Key Ring ID", Placeholder: "my-keyring", Required: true},
+				{Label: "Location", Placeholder: "us-central1", Required: true},
+			})
+			s.viewState = ViewCreate
+			return s, nil
 		case "enter":
 			rings := s.getFilteredRings(s.rings, s.filter.Value())
 			if idx := s.ringTable.Cursor(); idx >= 0 && idx < len(rings) {
@@ -257,6 +495,13 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 					s.fetchKeysCmd(s.selectedRing.FullName),
 				)
 			}
+		case "i":
+			rings := s.getFilteredRings(s.rings, s.filter.Value())
+			if idx := s.ringTable.Cursor(); idx >= 0 && idx < len(rings) {
+				s.selectedRing = &rings[idx]
+				return s, tea.Batch(s.fetchIAMCmd(*s.selectedRing), s.spinner.Start(""))
+			}
+			return s, nil
 		}
 
 		var updatedTable *components.StandardTable
@@ -269,17 +514,78 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "n":
+			if s.selectedRing != nil {
+				s.createReturnView = ViewKeys
+				s.createForm = components.NewForm("New Crypto Key", []components.FormField{
+					{Label: "Key ID", Placeholder: "my-key", Required: true},
+					{Label: "Purpose", Default: "ENCRYPT_DECRYPT"},
+					{Label: "Algorithm", Default: "GOOGLE_SYMMETRIC_ENCRYPTION"},
+				})
+				s.viewState = ViewCreate
+			}
+			return s, nil
 		case "esc", "q":
 			s.viewState = ViewRings
 			s.selectedRing = nil
 			s.keys = nil
 			return s, nil
+		case "u":
+			if idx := s.keyTable.Cursor(); idx >= 0 && idx < len(s.keys) {
+				s.selectedKey = &s.keys[idx]
+				s.updateForm = newKeyUpdateForm(*s.selectedKey)
+				s.viewState = ViewUpdate
+				return s, nil
+			}
+		case "d":
+			if idx := s.keyTable.Cursor(); idx >= 0 && idx < len(s.keys) {
+				s.selectedKey = &s.keys[idx]
+				s.pendingAction = "delete"
+				s.actionSource = ViewKeys
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+		case "k":
+			if idx := s.keyTable.Cursor(); idx >= 0 && idx < len(s.keys) {
+				key := s.keys[idx]
+				s.selectedKey = &key
+				if key.Purpose != "ASYMMETRIC_SIGN" && key.Purpose != "ASYMMETRIC_DECRYPT" {
+					return s, func() tea.Msg {
+						return core.ToastMsg{
+							Message: "Get public key only applies to asymmetric keys (ASYMMETRIC_SIGN/ASYMMETRIC_DECRYPT), not " + key.Purpose,
+							Type:    core.ToastError,
+						}
+					}
+				}
+				if s.selectedRing == nil {
+					return s, nil
+				}
+				return s, tea.Batch(s.spinner.Start(""), s.fetchPublicKeyCmd(*s.selectedRing, key))
+			}
 		}
 
 		var updatedTable *components.StandardTable
 		updatedTable, cmd = s.keyTable.Update(msg)
 		s.keyTable = updatedTable
 		return s, cmd
+	}
+
+	if s.viewState == ViewConfirmation {
+		switch msg.String() {
+		case "y", "enter":
+			var actionCmd tea.Cmd
+			if s.pendingAction == "delete" && s.selectedKey != nil && s.selectedRing != nil {
+				actionCmd = s.deleteKeyCmd(*s.selectedKey)
+			} else if s.pendingAction == "grant" && s.selectedRing != nil {
+				actionCmd = s.addIAMBindingCmd(*s.selectedRing, s.pendingIAMRole, s.pendingIAMMember)
+			}
+			s.viewState = s.actionSource
+			return s, actionCmd
+		case "n", "esc", "q":
+			s.viewState = s.actionSource
+			s.pendingAction = ""
+			return s, nil
+		}
 	}
 
 	return s, nil
@@ -302,7 +608,121 @@ func (s *Service) View() string {
 		return s.renderKeysView()
 	}
 
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
+	if s.viewState == ViewPublicKey {
+		return s.renderPublicKeyView()
+	}
+
 	return s.renderListView()
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// key ring, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedRing == nil {
+		return "Error: No key ring selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Key Rings",
+		s.selectedRing.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedRing.Name, rows)
+}
+
+// renderPublicKeyView renders the PEM-encoded public key fetched for the
+// currently selected asymmetric crypto key's version 1 (see api.go
+// GetPublicKey for the "version 1 only" simplification), mirroring the
+// Secret Manager "reveal value" display pattern.
+func (s *Service) renderPublicKeyView() string {
+	if s.selectedRing == nil || s.selectedKey == nil {
+		return "Error: No key selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Key Rings",
+		s.selectedRing.Name,
+		s.selectedKey.Name,
+		"Public Key",
+	)
+
+	var valueBlock string
+	if s.publicKeyErr != nil {
+		valueBlock = lipgloss.NewStyle().
+			Foreground(styles.ColorError).
+			Render(fmt.Sprintf("Failed to get public key: %v", s.publicKeyErr))
+	} else {
+		valueBlock = lipgloss.NewStyle().
+			Foreground(styles.ColorTextPrimary).
+			Render(s.publicKeyPem)
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		breadcrumb,
+		"",
+		fmt.Sprintf("Public key for %s (version 1):", s.selectedKey.Name),
+		"",
+		valueBlock,
+	)
+}
+
+// renderConfirmation renders the key-delete confirmation dialog. Note that
+// this will only succeed if every version of the key has already been
+// destroyed — a precondition this app has no way to satisfy, since
+// key-version operations are out of scope.
+func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "grant" {
+		return s.renderIAMConfirmation()
+	}
+	if s.selectedKey == nil {
+		return "Error: No key selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedKey.Name,
+		"crypto key",
+		fmt.Sprintf("Are you sure you want to DELETE key %s? This only succeeds if every key version has already been destroyed — this app has no key-version management, so this will likely fail for keys with active versions.", s.selectedKey.Name),
+	)
+}
+
+// renderIAMConfirmation renders the IAM-grant confirmation dialog for the
+// selected key ring.
+func (s *Service) renderIAMConfirmation() string {
+	if s.selectedRing == nil {
+		return "Error: No key ring selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		"grant",
+		s.selectedRing.Name,
+		"key ring",
+		components.IAMConfirmMessage("key ring", s.selectedRing.Name, s.pendingIAMRole, s.pendingIAMMember),
+	)
 }
 
 func (s *Service) renderListView() string {
@@ -335,6 +755,112 @@ func (s *Service) renderKeysView() string {
 	content.WriteString("\n")
 	content.WriteString(s.keyTable.View())
 	return content.String()
+}
+
+// -----------------------------------------------------------------------------
+// Create
+// -----------------------------------------------------------------------------
+
+func (s *Service) submitCreateCmd() tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if s.createReturnView == ViewRings {
+			keyRingID := s.createForm.Value("Key Ring ID")
+			location := s.createForm.Value("Location")
+			if err := s.client.CreateKeyRing(s.projectID, location, keyRingID); err != nil {
+				return actionResultMsg{err: err}
+			}
+			return actionResultMsg{msg: fmt.Sprintf("Key ring %s created in %s", keyRingID, location)}
+		}
+
+		if s.selectedRing == nil {
+			return actionResultMsg{err: fmt.Errorf("no key ring selected")}
+		}
+		keyID := s.createForm.Value("Key ID")
+		purpose := s.createForm.Value("Purpose")
+		algorithm := s.createForm.Value("Algorithm")
+		if err := s.client.CreateCryptoKey(s.selectedRing.FullName, keyID, purpose, algorithm); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Key %s created in %s", keyID, s.selectedRing.Name)}
+	}
+}
+
+// submitUpdateCmd fires the UpdateCryptoKeyRotationSchedule API call using
+// the current update-form value.
+func (s *Service) submitUpdateCmd(key CryptoKey) tea.Cmd {
+	raw := s.updateForm.Value("Rotation Period (Go duration, e.g. 2160h)")
+	period, err := time.ParseDuration(raw)
+	if err != nil || period <= 0 {
+		period = 2160 * time.Hour
+	}
+	return func() tea.Msg {
+		if s.client == nil || s.selectedRing == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateCryptoKeyRotationSchedule(s.selectedRing.FullName, key.Name, period); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating rotation schedule for key %s...", key.Name)}
+	}
+}
+
+// deleteKeyCmd triggers deletion of the given crypto key
+func (s *Service) deleteKeyCmd(key CryptoKey) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil || s.selectedRing == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteCryptoKey(s.selectedRing.FullName, key.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting key %s...", key.Name)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a key ring.
+func (s *Service) fetchIAMCmd(ring KeyRing) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetKeyRingIAMPolicy(ring.FullName)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// fetchPublicKeyCmd fetches the PEM-encoded public key for an asymmetric
+// crypto key's version 1. Only ever invoked from the explicit "k" keypress
+// on an asymmetric key in ViewKeys — never automatically.
+func (s *Service) fetchPublicKeyCmd(ring KeyRing, key CryptoKey) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return publicKeyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		pem, err := s.client.GetPublicKey(ring.FullName, key.Name)
+		if err != nil {
+			return publicKeyMsg{err: err}
+		}
+		return publicKeyMsg{pem: pem}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given key ring.
+func (s *Service) addIAMBindingCmd(ring KeyRing, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddKeyRingIAMBinding(ring.FullName, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on key ring %s", role, member, ring.Name)}
+	}
 }
 
 // -----------------------------------------------------------------------------
