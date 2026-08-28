@@ -8,6 +8,19 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
+// renderConfirmation renders the database-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedDB == nil {
+		return "Error: No database selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedDB.Name,
+		"database",
+		fmt.Sprintf("Are you sure you want to DELETE database %s? This permanently deletes all its data. Databases with delete protection enabled cannot be deleted until protection is disabled (u:Update).", s.selectedDB.Name),
+	)
+}
+
 func (s *Service) View() string {
 	if s.err != nil {
 		return components.RenderError(s.err, "Firestore", "Databases")
@@ -25,6 +38,12 @@ func (s *Service) View() string {
 		return s.renderNamespacesView()
 	case ViewKinds:
 		return s.renderKindsView()
+	case ViewCreate:
+		return s.createForm.View()
+	case ViewUpdate:
+		return s.updateForm.View()
+	case ViewConfirmation:
+		return s.renderConfirmation()
 	}
 
 	// Default: List view
@@ -54,15 +73,33 @@ func (s *Service) renderDetailView() string {
 		db.Name,
 	)
 
+	rows := []components.KeyValue{
+		{Key: "Name", Value: db.Name},
+		{Key: "Type", Value: strings.Replace(db.Type, "FIRESTORE_", "", 1)},
+		{Key: "Location", Value: db.Location},
+		{Key: "Created", Value: db.CreateTime},
+		{Key: "UID", Value: db.Uid},
+	}
+	if db.UpdateTime != "" {
+		rows = append(rows, components.KeyValue{Key: "Updated", Value: db.UpdateTime})
+	}
+	if db.DatabaseEdition != "" {
+		rows = append(rows, components.KeyValue{Key: "Edition", Value: db.DatabaseEdition})
+	}
+	if db.ConcurrencyMode != "" {
+		rows = append(rows, components.KeyValue{Key: "Concurrency Mode", Value: db.ConcurrencyMode})
+	}
+	if db.DeleteProtectionState != "" {
+		rows = append(rows, components.KeyValue{Key: "Delete Protection", Value: db.DeleteProtectionState})
+	}
+	if db.PointInTimeRecoveryEnablement != "" {
+		rows = append(rows, components.KeyValue{Key: "Point-in-Time Recovery", Value: db.PointInTimeRecoveryEnablement})
+	}
+	rows = append(rows, components.KeyValue{Key: "Free Tier", Value: fmt.Sprintf("%t", db.FreeTier)})
+
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Database Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: db.Name},
-			{Key: "Type", Value: strings.Replace(db.Type, "FIRESTORE_", "", 1)},
-			{Key: "Location", Value: db.Location},
-			{Key: "Created", Value: db.CreateTime},
-			{Key: "UID", Value: db.Uid},
-		},
+		Rows:  rows,
 	})
 	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", card)
 }

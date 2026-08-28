@@ -25,10 +25,18 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCreate
+	ViewConfirmation
 )
 
 type jobsMsg []Job
 type errMsg error
+
+// actionResultMsg carries the result of an async action (e.g. launching a job)
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -48,6 +56,12 @@ type Service struct {
 
 	viewState   ViewState
 	selectedJob *Job
+
+	createForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "archive"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -83,7 +97,16 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  n:Run Job"
+	}
+	if s.viewState == ViewCreate {
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewDetail {
+		return "Esc/q:Back  c:Cancel  x:Drain  d:Archive"
 	}
 	return "Esc/q:Back"
 }
@@ -179,6 +202,38 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "archive" || s.pendingAction == "cancel" || s.pendingAction == "drain" {
+			action := s.pendingAction
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if action == "archive" {
+				s.selectedJob = nil
+				s.viewState = ViewList
+			}
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			s.createForm.SubmitErr = msg.err.Error()
+			return s, nil
+		}
+		s.viewState = ViewList
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -192,6 +247,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.launchTemplateJobCmd()
+			}
+			return s, formCmd
+		}
+
 		// Handle filter mode (only in list view)
 		if s.viewState == ViewList {
 			result := s.filterSession.HandleKey(msg)
@@ -211,6 +278,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "r":
 				return s, s.Refresh()
+			case "n":
+				s.createForm = components.NewForm("Run Dataflow Job", []components.FormField{
+					{Label: "Job Name", Placeholder: "my-job", Required: true},
+					{Label: "Region", Placeholder: "us-central1", Required: true},
+					{Label: "Template GCS Path", Placeholder: "gs://bucket/templates/mytemplate", Required: true},
+					{Label: "Parameters", Placeholder: "key=value,key2=value2"},
+				})
+				s.viewState = ViewCreate
+				return s, nil
 			case "enter":
 				jobs := s.getFilteredJobs(s.jobs, s.filter.Value())
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(jobs) {
@@ -230,6 +306,50 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedJob = nil
 				return s, nil
+			case "c": // Cancel (Confirm)
+				if s.selectedJob != nil {
+					s.pendingAction = "cancel"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "x": // Drain (Confirm)
+				if s.selectedJob != nil {
+					s.pendingAction = "drain"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "d": // Archive (Confirm)
+				if s.selectedJob != nil {
+					s.pendingAction = "archive"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.selectedJob != nil {
+					switch s.pendingAction {
+					case "archive":
+						actionCmd = s.archiveJobCmd(*s.selectedJob)
+					case "cancel":
+						actionCmd = s.cancelJobCmd(*s.selectedJob)
+					case "drain":
+						actionCmd = s.drainJobCmd(*s.selectedJob)
+					}
+				}
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
 			}
 		}
 	}
@@ -239,6 +359,83 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // -----------------------------------------------------------------------------
 // Data & Helpers
 // -----------------------------------------------------------------------------
+
+// launchTemplateJobCmd fires the LaunchTemplateJob API call using the current form values.
+func (s *Service) launchTemplateJobCmd() tea.Cmd {
+	jobName := s.createForm.Value("Job Name")
+	region := s.createForm.Value("Region")
+	gcsPath := s.createForm.Value("Template GCS Path")
+	parameters := parseParameters(s.createForm.Value("Parameters"))
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.LaunchTemplateJob(s.projectID, region, jobName, gcsPath, parameters); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Job %s launched", jobName)}
+	}
+}
+
+// archiveJobCmd triggers archiving of the given Dataflow job (Delete
+// category — Dataflow has no true delete, only archive; see ArchiveJob).
+func (s *Service) archiveJobCmd(job Job) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ArchiveJob(s.projectID, job.Location, job.ID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Archiving job %s...", job.Name)}
+	}
+}
+
+// cancelJobCmd triggers immediate cancellation of the given job
+func (s *Service) cancelJobCmd(job Job) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CancelJob(s.projectID, job.Location, job.ID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Cancelling job %s...", job.Name)}
+	}
+}
+
+// drainJobCmd triggers a graceful drain of the given streaming job
+func (s *Service) drainJobCmd(job Job) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DrainJob(s.projectID, job.Location, job.ID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Draining job %s...", job.Name)}
+	}
+}
+
+// parseParameters parses a "key=value,key2=value2" free-text field into a
+// map, ignoring malformed entries.
+func parseParameters(raw string) map[string]string {
+	if raw == "" {
+		return nil
+	}
+	params := make(map[string]string)
+	for _, pair := range strings.Split(raw, ",") {
+		kv := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(kv) != 2 || kv[0] == "" {
+			continue
+		}
+		params[kv[0]] = kv[1]
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
 
 func (s *Service) fetchJobsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {

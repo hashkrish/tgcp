@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -24,10 +25,35 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
 )
+
+// newInstanceUpdateForm builds the FormModel for updating a Redis instance's
+// memory size, seeded with the current value. Version "upgrade" and
+// "reschedule-maintenance" are separate, higher-risk RPCs and are
+// intentionally out of scope.
+func newInstanceUpdateForm(inst Instance) components.FormModel {
+	return components.NewForm("Update Redis Instance: "+inst.Name, []components.FormField{
+		{Label: "Memory Size GB", Default: strconv.Itoa(inst.MemorySizeGb), Placeholder: "1", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				return "must be a positive integer"
+			}
+			return ""
+		}},
+	})
+}
 
 type instancesMsg []Instance
 type errMsg error
+
+// actionResultMsg carries the result of an async action (e.g. instance creation)
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -47,6 +73,13 @@ type Service struct {
 
 	viewState        ViewState
 	selectedInstance *Instance
+
+	createForm components.FormModel
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -83,7 +116,16 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  n:New Instance  u:Update"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewDetail {
+		return "Esc/q:Back  u:Update  f:Failover  d:Delete"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
 	}
 	return "Esc/q:Back"
 }
@@ -179,6 +221,42 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" || s.pendingAction == "failover" {
+			action := s.pendingAction
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if action == "delete" {
+				s.selectedInstance = nil
+				s.viewState = ViewList
+			}
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		s.viewState = ViewList
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -192,6 +270,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createInstanceCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.updateInstanceCmd(*s.selectedInstance)
+			}
+			return s, formCmd
+		}
+
 		// Handle filter mode (only in list view)
 		if s.viewState == ViewList {
 			result := s.filterSession.HandleKey(msg)
@@ -211,11 +313,28 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "r":
 				return s, s.Refresh()
+			case "n":
+				s.createForm = components.NewForm("Create Redis Instance", []components.FormField{
+					{Label: "Instance ID", Placeholder: "my-redis-instance", Required: true},
+					{Label: "Region", Placeholder: "us-central1", Required: true},
+					{Label: "Tier", Placeholder: "BASIC", Default: "BASIC"},
+					{Label: "Memory Size GB", Placeholder: "1", Default: "1"},
+				})
+				s.viewState = ViewCreate
+				return s, nil
 			case "enter":
 				instances := s.getFilteredInstances(s.instances, s.filter.Value())
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
 					s.selectedInstance = &instances[idx]
 					s.viewState = ViewDetail
+				}
+			case "u":
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+					s.viewState = ViewUpdate
+					return s, nil
 				}
 			}
 			var updatedTable *components.StandardTable
@@ -230,6 +349,47 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedInstance = nil
 				return s, nil
+			case "u":
+				if s.selectedInstance != nil {
+					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "f": // Failover (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "failover"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.selectedInstance != nil {
+					switch s.pendingAction {
+					case "delete":
+						actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
+					case "failover":
+						actionCmd = s.failoverInstanceCmd(*s.selectedInstance)
+					}
+				}
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
 			}
 		}
 	}
@@ -239,6 +399,75 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // -----------------------------------------------------------------------------
 // Data & Helpers
 // -----------------------------------------------------------------------------
+
+// createInstanceCmd fires the CreateInstance API call using the current form values.
+func (s *Service) createInstanceCmd() tea.Cmd {
+	id := s.createForm.Value("Instance ID")
+	region := s.createForm.Value("Region")
+	tier := s.createForm.Value("Tier")
+	if tier == "" {
+		tier = "BASIC"
+	}
+	memoryGb, err := strconv.ParseInt(s.createForm.Value("Memory Size GB"), 10, 64)
+	if err != nil || memoryGb <= 0 {
+		memoryGb = 1
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateInstance(s.projectID, id, region, tier, memoryGb); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating Redis instance %s...", id)}
+	}
+}
+
+// updateInstanceCmd fires the UpdateInstanceMemorySize API call using the
+// current form values, scoped to the instance selected before entering the
+// update form.
+func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
+	memoryGb, err := strconv.ParseInt(s.updateForm.Value("Memory Size GB"), 10, 64)
+	if err != nil || memoryGb <= 0 {
+		memoryGb = int64(inst.MemorySizeGb)
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateInstanceMemorySize(s.projectID, inst.Name, inst.Location, memoryGb); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating Redis instance %s...", inst.Name)}
+	}
+}
+
+// deleteInstanceCmd triggers deletion of the given Redis instance
+func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteInstance(s.projectID, inst.Name, inst.Location); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting Redis instance %s...", inst.Name)}
+	}
+}
+
+// failoverInstanceCmd triggers a failover of the given Redis instance to its
+// current read replica.
+func (s *Service) failoverInstanceCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.FailoverInstance(s.projectID, inst.Name, inst.Location); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Failing over Redis instance %s...", inst.Name)}
+	}
+}
 
 func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 	return func() tea.Msg {

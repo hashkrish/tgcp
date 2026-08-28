@@ -27,7 +27,29 @@ const (
 	ViewDetail
 	ViewNamespaces // Datastore mode: list namespaces
 	ViewKinds      // Datastore mode: list kinds in a namespace
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
 )
+
+// newDatabaseUpdateForm builds the FormModel for toggling a database's
+// delete protection state, seeded with its current value. Concurrency
+// mode, PITR, and other database fields are out of scope for this minimal
+// Update flow.
+func newDatabaseUpdateForm(db Database) components.FormModel {
+	current := "true"
+	if db.DeleteProtectionState != "DELETE_PROTECTION_ENABLED" {
+		current = "false"
+	}
+	return components.NewForm("Update Database: "+db.Name, []components.FormField{
+		{Label: "Delete Protection (true/false)", Default: current, Required: true, Validate: func(v string) string {
+			if v != "true" && v != "false" {
+				return "must be \"true\" or \"false\""
+			}
+			return ""
+		}},
+	})
+}
 
 type dbsMsg []Database
 type namespacesMsg struct {
@@ -40,6 +62,12 @@ type kindsMsg struct {
 	kinds         []Kind
 }
 type errMsg error
+
+// actionResultMsg carries the result of an async action (e.g. database creation)
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -66,6 +94,13 @@ type Service struct {
 	kinds             []Kind
 	nsTable           *components.StandardTable
 	kindTable         *components.StandardTable
+
+	createForm components.FormModel
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -116,11 +151,17 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewList:
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  n:New Database"
 	case ViewNamespaces:
 		return "r:Refresh  Ent:Kinds  Esc/q:Back"
 	case ViewKinds:
 		return "Esc/q:Back"
+	case ViewCreate, ViewUpdate:
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
+	case ViewDetail:
+		return "Esc/q:Back  u:Update  d:Delete"
+	case ViewConfirmation:
+		return "y:Confirm  n:Cancel"
 	default:
 		return "Esc/q:Back"
 	}
@@ -242,6 +283,43 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedDB = nil
+			s.viewState = ViewList
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		if s.viewState == ViewUpdate {
+			s.viewState = ViewDetail
+		} else {
+			s.viewState = ViewList
+		}
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 		s.nsTable.HandleWindowSizeDefault(msg)
@@ -257,6 +335,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createDatabaseCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedDB != nil {
+				return s, s.updateDatabaseCmd(*s.selectedDB)
+			}
+			return s, formCmd
+		}
+
 		// Handle filter mode (only in list view)
 		if s.viewState == ViewList {
 			result := s.filterSession.HandleKey(msg)
@@ -276,6 +378,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "r":
 				return s, s.Refresh()
+			case "n":
+				s.createForm = components.NewForm("Create Database", []components.FormField{
+					{Label: "Database ID", Placeholder: "(default)", Default: "(default)", Required: true},
+					{Label: "Location", Placeholder: "nam5", Required: true},
+					{Label: "Type", Placeholder: "FIRESTORE_NATIVE", Default: "FIRESTORE_NATIVE"},
+				})
+				s.viewState = ViewCreate
+				return s, nil
 			case "enter":
 				dbs := s.getFilteredDBs(s.dbs, s.filter.Value())
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(dbs) {
@@ -302,6 +412,35 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q":
 				s.viewState = ViewList
 				s.selectedDB = nil
+				return s, nil
+			case "u":
+				if s.selectedDB != nil {
+					s.updateForm = newDatabaseUpdateForm(*s.selectedDB)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if s.selectedDB != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" && s.selectedDB != nil {
+					actionCmd = s.deleteDatabaseCmd(*s.selectedDB)
+				}
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
 				return s, nil
 			}
 		}
@@ -354,6 +493,55 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // -----------------------------------------------------------------------------
 // Data & Helpers
 // -----------------------------------------------------------------------------
+
+// createDatabaseCmd fires the CreateDatabase API call using the current form values.
+// updateDatabaseCmd fires the UpdateDatabaseDeleteProtection API call using
+// the current update-form value.
+func (s *Service) updateDatabaseCmd(db Database) tea.Cmd {
+	enabled := s.updateForm.Value("Delete Protection (true/false)") == "true"
+	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateDatabaseDeleteProtection(fullName, enabled); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating database %s...", db.Name)}
+	}
+}
+
+// deleteDatabaseCmd triggers deletion of the given Firestore database
+func (s *Service) deleteDatabaseCmd(db Database) tea.Cmd {
+	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteDatabase(fullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting database %s...", db.Name)}
+	}
+}
+
+func (s *Service) createDatabaseCmd() tea.Cmd {
+	id := s.createForm.Value("Database ID")
+	location := s.createForm.Value("Location")
+	dbType := s.createForm.Value("Type")
+	if dbType == "" {
+		dbType = "FIRESTORE_NATIVE"
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateDatabase(s.projectID, id, location, dbType); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Database %s created", id)}
+	}
+}
 
 func (s *Service) fetchDBsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {

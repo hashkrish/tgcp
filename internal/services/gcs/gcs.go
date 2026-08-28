@@ -29,8 +29,23 @@ const (
 	ViewList ViewState = iota
 	ViewDetail
 	ViewObjects
+	ViewObjectDetail
 	ViewConfirmation
+	ViewCreate
+	ViewUpdate
+	ViewIAM
+	ViewIAMForm
 )
+
+// newBucketUpdateForm builds the FormModel for updating a bucket's default
+// storage class, seeded with its current value. Lifecycle rules, CORS,
+// versioning, retention, and relocate are out of scope for this minimal
+// Update flow.
+func newBucketUpdateForm(b Bucket) components.FormModel {
+	return components.NewForm("Update Bucket: "+b.Name, []components.FormField{
+		{Label: "Storage Class", Default: b.StorageClass, Placeholder: "STANDARD", Required: true},
+	})
+}
 
 // bucketsMsg is the message used to pass fetched data
 type bucketsMsg []Bucket
@@ -39,6 +54,25 @@ type objectsMsg []Object
 
 // errMsg is the standard error message
 type errMsg error
+
+// actionResultMsg carries the result of an async action (e.g. bucket creation)
+type actionResultMsg struct {
+	err error
+	msg string
+}
+
+// downloadResultMsg carries the result of downloading an object to local
+// disk (the "cp" data-plane action).
+type downloadResultMsg struct {
+	err  error
+	path string
+}
+
+// iamPolicyMsg carries the result of a GetBucketIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -67,6 +101,25 @@ type Service struct {
 	selectedBucket *Bucket
 	selectedObject *Object
 	currentPrefix  string
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
+
+	// Create form
+	createForm components.FormModel
+
+	// Update form
+	updateForm components.FormModel
+
+	// IAM: current bindings for the selected bucket, and the add-binding
+	// form. pendingIAMRole/pendingIAMMember are captured at form-submit time
+	// so the confirmation dialog and the actual API call use the same
+	// values regardless of what the form fields hold later.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	// Cache
 	cache *core.Cache
@@ -119,13 +172,28 @@ func (s *Service) ShortName() string {
 // HelpText returns context-aware keybindings
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  n:New Bucket"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewDetail {
-		return "Enter:Browse Objects  Esc/q:Back"
+		return "Enter:Browse Objects  Esc/q:Back  u:Update  d:Delete  i:IAM"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
 	}
 	if s.viewState == ViewObjects {
-		return "Enter:Open  Esc/q:Back/Up"
+		return "Enter:Open  d:Delete  c:Download  Esc/q:Back/Up"
+	}
+	if s.viewState == ViewObjectDetail {
+		return "Esc/q:Back"
+	}
+	if s.viewState == ViewIAM {
+		return "a:Add Binding  q/Esc:Back"
+	}
+	if s.viewState == ViewIAMForm {
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	return ""
 }
@@ -244,6 +312,92 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
+	case downloadResultMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		return s, func() tea.Msg {
+			return core.ToastMsg{Message: fmt.Sprintf("Downloaded to %s", msg.path), Type: core.ToastSuccess}
+		}
+
+	case actionResultMsg:
+		if s.pendingAction == "delete-object" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedObject != nil {
+				s.objects = removeObjectByName(s.objects, s.selectedObject.Name)
+				s.objectFilterSession.Apply(s.objects)
+			}
+			s.selectedObject = nil
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			}
+		}
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedBucket != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedBucket),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedBucket = nil
+			s.viewState = ViewList
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		s.viewState = ViewList
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+
 	// 4. Window Resize
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
@@ -267,6 +421,47 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// 5. User Input
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createBucketCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedBucket != nil {
+				return s, s.updateBucketCmd(*s.selectedBucket)
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewIAMForm {
+			result, formCmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedBucket != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
+		}
+
 		// Handle filter mode (list or object view)
 		if s.viewState == ViewList || s.viewState == ViewObjects {
 			var result components.FilterUpdateResult
@@ -292,6 +487,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "r":
 				return s, s.Refresh()
+			case "n":
+				s.createForm = components.NewForm("Create Bucket", []components.FormField{
+					{Label: "Name", Placeholder: "my-new-bucket", Required: true},
+					{Label: "Location", Placeholder: "US", Default: "US"},
+					{Label: "Storage Class", Placeholder: "STANDARD", Default: "STANDARD"},
+				})
+				s.viewState = ViewCreate
+				return s, nil
 			case "enter":
 				// Handle bucket selection -> Go to Details
 				if s.selectedBucket == nil {
@@ -320,6 +523,63 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewObjects
 				s.currentPrefix = ""
 				return s, tea.Batch(s.fetchObjectsCmd(), s.spinner.Start(""))
+			case "u":
+				if s.selectedBucket != nil {
+					s.updateForm = newBucketUpdateForm(*s.selectedBucket)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d": // Delete (Confirm) — empty-bucket check happens before the call fires
+				if s.selectedBucket != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "i": // View IAM bindings
+				if s.selectedBucket != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedBucket), s.spinner.Start(""))
+				}
+				return s, nil
+			}
+
+		case ViewIAM:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedBucket != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedBucket.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+
+		case ViewConfirmation:
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" && s.selectedBucket != nil {
+					actionCmd = s.DeleteBucketCmd(*s.selectedBucket)
+				} else if s.pendingAction == "delete-object" && s.selectedBucket != nil && s.selectedObject != nil {
+					actionCmd = s.deleteObjectCmd(*s.selectedBucket, *s.selectedObject)
+				} else if s.pendingAction == "grant" && s.selectedBucket != nil {
+					actionCmd = s.addIAMBindingCmd(*s.selectedBucket, s.pendingIAMRole, s.pendingIAMMember)
+				}
+				// Stay on pendingAction until actionResultMsg arrives — it
+				// decides whether to show a toast and pop back to the
+				// list/IAM view, or surface an error without losing the
+				// current selection.
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				if s.pendingAction == "delete-object" {
+					s.selectedObject = nil
+				}
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
 			}
 
 		case ViewObjects:
@@ -343,13 +603,43 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return s, tea.Batch(s.fetchObjectsCmd(), s.spinner.Start(""))
 					} else {
 						s.selectedObject = &obj
+						s.viewState = ViewObjectDetail
 					}
 				}
+			case "d": // Delete object (Confirm) — data-plane rm
+				objs := s.objects
+				if idx := s.objectTable.Cursor(); idx >= 0 && idx < len(objs) {
+					obj := objs[idx]
+					if obj.Type != "Folder" {
+						s.selectedObject = &obj
+						s.pendingAction = "delete-object"
+						s.actionSource = ViewObjects
+						s.viewState = ViewConfirmation
+					}
+				}
+				return s, nil
+			case "c": // Download object to local disk — data-plane cp
+				objs := s.objects
+				if idx := s.objectTable.Cursor(); idx >= 0 && idx < len(objs) && s.selectedBucket != nil {
+					obj := objs[idx]
+					if obj.Type != "Folder" {
+						return s, tea.Batch(s.downloadObjectCmd(*s.selectedBucket, obj), s.spinner.Start(""))
+					}
+				}
+				return s, nil
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.objectTable.Update(msg)
 			s.objectTable = updatedTable
 			return s, cmd
+
+		case ViewObjectDetail:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewObjects
+				s.selectedObject = nil
+				return s, nil
+			}
 		}
 	}
 
@@ -374,8 +664,32 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
 	if s.viewState == ViewObjects {
 		return s.renderObjectListView()
+	}
+
+	if s.viewState == ViewObjectDetail {
+		return s.renderObjectDetailView()
+	}
+
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
+	}
+
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
 	}
 
 	// Default: List View
@@ -436,14 +750,35 @@ func (s *Service) renderDetailView() string {
 		b.Name,
 	)
 
+	rows := []components.KeyValue{
+		{Key: "Name", Value: b.Name},
+		{Key: "Location", Value: b.Location},
+		{Key: "Location Type", Value: b.LocationType},
+		{Key: "Class", Value: b.StorageClass},
+		{Key: "Created", Value: b.Created.Format(time.RFC822)},
+		{Key: "Updated", Value: b.Updated.Format(time.RFC822)},
+		{Key: "Versioning", Value: formatBool(b.VersioningEnabled)},
+		{Key: "Requester Pays", Value: formatBool(b.RequesterPays)},
+		{Key: "Uniform Bucket Access", Value: formatBool(b.UniformBucketLevelAccess)},
+		{Key: "Public Access Prevention", Value: b.PublicAccessPrevention},
+		{Key: "Autoclass", Value: formatBool(b.AutoclassEnabled)},
+		{Key: "Labels", Value: formatLabels(b.Labels)},
+		{Key: "Lifecycle Rules", Value: fmt.Sprintf("%d", b.LifecycleRuleCount)},
+		{Key: "CORS Rules", Value: fmt.Sprintf("%d", b.CORSRuleCount)},
+	}
+	if b.RetentionPeriod > 0 {
+		rows = append(rows, components.KeyValue{Key: "Retention Period", Value: b.RetentionPeriod.String()})
+	}
+	if b.DefaultKMSKeyName != "" {
+		rows = append(rows, components.KeyValue{Key: "Default KMS Key", Value: b.DefaultKMSKeyName})
+	}
+	if b.LoggingBucket != "" {
+		rows = append(rows, components.KeyValue{Key: "Logging Bucket", Value: b.LoggingBucket})
+	}
+
 	view := components.DetailCard(components.DetailCardOpts{
 		Title: "Bucket Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: b.Name},
-			{Key: "Location", Value: b.Location},
-			{Key: "Class", Value: b.StorageClass},
-			{Key: "Created", Value: b.Created.Format(time.RFC822)},
-		},
+		Rows:  rows,
 	})
 
 	// Action Bar
@@ -458,9 +793,288 @@ func (s *Service) renderDetailView() string {
 	)
 }
 
+func (s *Service) renderObjectDetailView() string {
+	if s.selectedObject == nil {
+		return "No object selected"
+	}
+
+	o := s.selectedObject
+
+	title := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Buckets",
+		s.selectedBucket.Name,
+		o.Name,
+	)
+
+	rows := []components.KeyValue{
+		{Key: "Name", Value: o.Name},
+		{Key: "Content Type", Value: o.Type},
+		{Key: "Size", Value: formatObjectSize(o.Size)},
+		{Key: "Class", Value: o.StorageClass},
+		{Key: "Created", Value: o.Created.Format(time.RFC822)},
+		{Key: "Updated", Value: o.Updated.Format(time.RFC822)},
+		{Key: "Generation", Value: fmt.Sprintf("%d", o.Generation)},
+		{Key: "Metageneration", Value: fmt.Sprintf("%d", o.Metageneration)},
+		{Key: "Event-Based Hold", Value: formatBool(o.EventBasedHold)},
+		{Key: "Temporary Hold", Value: formatBool(o.TemporaryHold)},
+	}
+	if o.CacheControl != "" {
+		rows = append(rows, components.KeyValue{Key: "Cache Control", Value: o.CacheControl})
+	}
+	if o.ContentEncoding != "" {
+		rows = append(rows, components.KeyValue{Key: "Content Encoding", Value: o.ContentEncoding})
+	}
+	if o.MD5 != "" {
+		rows = append(rows, components.KeyValue{Key: "MD5", Value: o.MD5})
+	}
+	if o.CRC32C != 0 {
+		rows = append(rows, components.KeyValue{Key: "CRC32C", Value: fmt.Sprintf("%d", o.CRC32C)})
+	}
+	if o.KMSKeyName != "" {
+		rows = append(rows, components.KeyValue{Key: "KMS Key", Value: o.KMSKeyName})
+	}
+	if len(o.Metadata) > 0 {
+		rows = append(rows, components.KeyValue{Key: "Metadata", Value: formatLabels(o.Metadata)})
+	}
+
+	view := components.DetailCard(components.DetailCardOpts{
+		Title: "Object Details",
+		Rows:  rows,
+	})
+
+	actions := components.RenderFooterHint("q Back")
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		title,
+		"\n",
+		view,
+		"\n",
+		actions,
+	)
+}
+
+// renderConfirmation renders the bucket-delete, object-delete, or
+// IAM-grant confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "delete-object" {
+		if s.selectedObject == nil {
+			return "Error: No object selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"delete",
+			s.selectedObject.Name,
+			"object",
+			fmt.Sprintf("Are you sure you want to DELETE object %s? This cannot be undone.", s.selectedObject.Name),
+		)
+	}
+	if s.selectedBucket == nil {
+		return "Error: No bucket selected"
+	}
+	if s.pendingAction == "grant" {
+		return components.RenderConfirmationWithMessage(
+			"grant",
+			s.selectedBucket.Name,
+			"bucket",
+			components.IAMConfirmMessage("bucket", s.selectedBucket.Name, s.pendingIAMRole, s.pendingIAMMember),
+		)
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedBucket.Name,
+		"bucket",
+		fmt.Sprintf("Are you sure you want to DELETE bucket %s? Only empty buckets can be deleted — this app does not support deleting objects.", s.selectedBucket.Name),
+	)
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// bucket, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedBucket == nil {
+		return "Error: No bucket selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Buckets",
+		s.selectedBucket.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedBucket.Name, rows)
+}
+
+// formatBool renders a boolean as Yes/No for detail views.
+func formatBool(b bool) string {
+	if b {
+		return "Yes"
+	}
+	return "No"
+}
+
+// formatLabels renders a string map as a compact, single-line key=value list.
+func formatLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(labels))
+	for k, v := range labels {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// formatObjectSize renders a byte count as a human-readable string.
+func formatObjectSize(n int64) string {
+	switch {
+	case n > 1024*1024:
+		return fmt.Sprintf("%.1f MB", float64(n)/1024/1024)
+	case n > 1024:
+		return fmt.Sprintf("%.1f KB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Helper Commands
 // -----------------------------------------------------------------------------
+
+// createBucketCmd fires the CreateBucket API call using the current form values.
+func (s *Service) createBucketCmd() tea.Cmd {
+	name := s.createForm.Value("Name")
+	location := s.createForm.Value("Location")
+	if location == "" {
+		location = "US"
+	}
+	storageClass := s.createForm.Value("Storage Class")
+	if storageClass == "" {
+		storageClass = "STANDARD"
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateBucket(s.projectID, name, location, storageClass); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Bucket %s created", name)}
+	}
+}
+
+// updateBucketCmd fires the UpdateBucketStorageClass API call using the
+// current update-form value.
+func (s *Service) updateBucketCmd(b Bucket) tea.Cmd {
+	storageClass := s.updateForm.Value("Storage Class")
+	if storageClass == "" {
+		storageClass = b.StorageClass
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateBucketStorageClass(b.Name, storageClass); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating bucket %s...", b.Name)}
+	}
+}
+
+// DeleteBucketCmd triggers deletion of the given bucket, only if it is
+// empty — the GCS API refuses to delete a non-empty bucket, and this app
+// has no object-level delete (data-plane) to empty it first, so the check
+// happens client-side to give a clear error instead of a raw API failure.
+func (s *Service) DeleteBucketCmd(b Bucket) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		empty, err := s.client.IsBucketEmpty(b.Name)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		if !empty {
+			return actionResultMsg{err: fmt.Errorf("bucket %s is not empty; delete its objects first (not supported in this app)", b.Name)}
+		}
+		if err := s.client.DeleteBucket(b.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting bucket %s...", b.Name)}
+	}
+}
+
+// deleteObjectCmd deletes a single object from a bucket (data-plane rm).
+func (s *Service) deleteObjectCmd(b Bucket, o Object) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteObject(b.Name, o.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleted object %s", o.Name)}
+	}
+}
+
+// downloadObjectCmd downloads a single object's contents to local disk
+// (data-plane cp). Non-destructive, so it runs without a confirmation step.
+func (s *Service) downloadObjectCmd(b Bucket, o Object) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return downloadResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		path, err := s.client.DownloadObject(b.Name, o.Name)
+		if err != nil {
+			return downloadResultMsg{err: err}
+		}
+		return downloadResultMsg{path: path}
+	}
+}
+
+// removeObjectByName returns objs with the first entry named name removed,
+// used to update local state after a successful object delete without a
+// full refetch.
+func removeObjectByName(objs []Object, name string) []Object {
+	out := make([]Object, 0, len(objs))
+	for _, o := range objs {
+		if o.Name == name {
+			continue
+		}
+		out = append(out, o)
+	}
+	return out
+}
+
+// fetchIAMCmd fetches the current IAM policy for a bucket.
+func (s *Service) fetchIAMCmd(b Bucket) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetBucketIAMPolicy(b.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given bucket.
+func (s *Service) addIAMBindingCmd(b Bucket, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddBucketIAMBinding(b.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on bucket %s", role, member, b.Name)}
+	}
+}
 
 func (s *Service) fetchBucketsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {

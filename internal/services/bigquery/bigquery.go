@@ -26,12 +26,30 @@ const (
 	ViewDatasets ViewState = iota
 	ViewTables
 	ViewSchema
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
 )
+
+// newDatasetUpdateForm builds the FormModel for updating a dataset's
+// description, seeded with its current value. Labels, access, and default
+// table expiration are out of scope for this minimal Update flow.
+func newDatasetUpdateForm(ds Dataset) components.FormModel {
+	return components.NewForm("Update Dataset: "+ds.ID, []components.FormField{
+		{Label: "Description", Default: ds.Description},
+	})
+}
 
 type datasetsMsg []Dataset
 type tablesMsg []Table
 type schemaMsg []SchemaField
 type errMsg error
+
+// actionResultMsg carries the result of an async action (e.g. dataset creation)
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -57,6 +75,13 @@ type Service struct {
 	selectedDataset *Dataset
 	selectedTable   *Table
 
+	createForm components.FormModel
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
+
 	cache *core.Cache
 }
 
@@ -65,6 +90,9 @@ func NewService(cache *core.Cache) *Service {
 	dsCols := []table.Column{
 		{Title: "ID", Width: 30},
 		{Title: "Location", Width: 15},
+		{Title: "Labels", Width: 8},
+		{Title: "Created", Width: 12},
+		{Title: "Description", Width: 30},
 	}
 	dsTable := components.NewStandardTable(dsCols)
 
@@ -74,6 +102,8 @@ func NewService(cache *core.Cache) *Service {
 		{Title: "Type", Width: 10},
 		{Title: "Rows", Width: 10},
 		{Title: "Size", Width: 10},
+		{Title: "Partitioning", Width: 18},
+		{Title: "Created", Width: 12},
 	}
 	tTable := components.NewStandardTable(tCols)
 
@@ -101,13 +131,19 @@ func (s *Service) ShortName() string { return "bq" }
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewDatasets {
-		return "Ent:Select  r:Refresh"
+		return "Ent:Select  r:Refresh  n:New Dataset  u:Update  d:Delete"
 	}
 	if s.viewState == ViewTables {
 		return "Ent:Schema  Esc/q:Back"
 	}
 	if s.viewState == ViewSchema {
 		return "Esc/q:Back"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	return ""
 }
@@ -221,6 +257,39 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedDataset = nil
+			s.viewState = ViewDatasets
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+			} else {
+				s.createForm.SubmitErr = msg.err.Error()
+			}
+			return s, nil
+		}
+		s.viewState = ViewDatasets
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+
 	case tea.WindowSizeMsg:
 		s.datasetTable.HandleWindowSizeDefault(msg)
 		s.tableTable.HandleWindowSizeDefault(msg)
@@ -242,17 +311,85 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDatasets
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createDatasetCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDatasets
+				return s, nil
+			}
+			if result.Submitted && s.selectedDataset != nil {
+				return s, s.updateDatasetCmd(*s.selectedDataset)
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" && s.selectedDataset != nil {
+					actionCmd = s.deleteDatasetCmd(*s.selectedDataset)
+				}
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
+			}
+			return s, nil
+		}
+
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
 		}
 
 		if s.viewState == ViewDatasets {
+			if msg.String() == "n" {
+				s.createForm = components.NewForm("Create Dataset", []components.FormField{
+					{Label: "Dataset ID", Placeholder: "my_dataset", Required: true},
+					{Label: "Location", Placeholder: "US", Default: "US"},
+				})
+				s.viewState = ViewCreate
+				return s, nil
+			}
 			if msg.String() == "enter" {
 				if s.datasetTable.Cursor() >= 0 && s.datasetTable.Cursor() < len(s.datasets) {
 					s.selectedDataset = &s.datasets[s.datasetTable.Cursor()]
 					s.viewState = ViewTables
 					return s, tea.Batch(s.fetchTablesCmd(), s.spinner.Start(""))
+				}
+			}
+			if msg.String() == "u" {
+				if s.datasetTable.Cursor() >= 0 && s.datasetTable.Cursor() < len(s.datasets) {
+					ds := s.datasets[s.datasetTable.Cursor()]
+					s.selectedDataset = &ds
+					s.updateForm = newDatasetUpdateForm(ds)
+					s.viewState = ViewUpdate
+					return s, nil
+				}
+			}
+			if msg.String() == "d" {
+				if s.datasetTable.Cursor() >= 0 && s.datasetTable.Cursor() < len(s.datasets) {
+					ds := s.datasets[s.datasetTable.Cursor()]
+					s.selectedDataset = &ds
+					s.pendingAction = "delete"
+					s.actionSource = ViewDatasets
+					s.viewState = ViewConfirmation
+					return s, nil
 				}
 			}
 			var updatedTable *components.StandardTable
@@ -310,6 +447,12 @@ func (s *Service) View() string {
 	}
 
 	switch s.viewState {
+	case ViewCreate:
+		return s.createForm.View()
+	case ViewUpdate:
+		return s.updateForm.View()
+	case ViewConfirmation:
+		return s.renderConfirmation()
 	case ViewDatasets:
 		breadcrumb := components.Breadcrumb(
 			fmt.Sprintf("Project %s", s.projectID),
@@ -341,9 +484,70 @@ func (s *Service) View() string {
 	return ""
 }
 
+// renderConfirmation renders the dataset-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedDataset == nil {
+		return "Error: No dataset selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedDataset.ID,
+		"dataset",
+		fmt.Sprintf("Are you sure you want to DELETE dataset %s? Only empty datasets can be deleted — this app does not support deleting tables.", s.selectedDataset.ID),
+	)
+}
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+// deleteDatasetCmd triggers deletion of the given dataset. The BigQuery API
+// itself refuses to delete a non-empty dataset (matching `bq rm -d` without
+// -f/--recursive), which is the safety behavior wanted here.
+func (s *Service) deleteDatasetCmd(ds Dataset) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteDataset(ds.ID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting dataset %s...", ds.ID)}
+	}
+}
+
+// createDatasetCmd fires the CreateDataset API call using the current form values.
+func (s *Service) createDatasetCmd() tea.Cmd {
+	id := s.createForm.Value("Dataset ID")
+	location := s.createForm.Value("Location")
+	if location == "" {
+		location = "US"
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateDataset(id, location); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Dataset %s created", id)}
+	}
+}
+
+// updateDatasetCmd fires the UpdateDatasetDescription API call using the
+// current update-form value.
+func (s *Service) updateDatasetCmd(ds Dataset) tea.Cmd {
+	description := s.updateForm.Value("Description")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateDatasetDescription(ds.ID, description); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating dataset %s...", ds.ID)}
+	}
+}
 
 func (s *Service) fetchDatasetsCmd() tea.Cmd {
 	return func() tea.Msg {
@@ -387,7 +591,11 @@ func (s *Service) fetchSchemaCmd() tea.Cmd {
 func (s *Service) updateDatasetTable() {
 	rows := make([]table.Row, len(s.datasets))
 	for i, d := range s.datasets {
-		rows[i] = table.Row{d.ID, d.Location}
+		created := ""
+		if !d.CreationTime.IsZero() {
+			created = d.CreationTime.Format("2006-01-02")
+		}
+		rows[i] = table.Row{d.ID, d.Location, fmt.Sprintf("%d", len(d.Labels)), created, d.Description}
 	}
 	s.datasetTable.SetRows(rows)
 }
@@ -402,7 +610,12 @@ func (s *Service) updateTableTable() {
 			size = fmt.Sprintf("%.1f MB", float64(t.TotalBytes)/1024/1024)
 		}
 
-		rows[i] = table.Row{t.ID, t.Type, fmt.Sprintf("%d", t.NumRows), size}
+		created := ""
+		if !t.CreationTime.IsZero() {
+			created = t.CreationTime.Format("2006-01-02")
+		}
+
+		rows[i] = table.Row{t.ID, t.Type, fmt.Sprintf("%d", t.NumRows), size, t.Partitioning, created}
 	}
 	s.tableTable.SetRows(rows)
 }

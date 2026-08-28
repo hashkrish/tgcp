@@ -50,18 +50,76 @@ func (c *Client) ListDatabases(projectID string) ([]Database, error) {
 		shortName := parts[len(parts)-1]
 
 		dbs = append(dbs, Database{
-			Name:      shortName,
-			ProjectID: projectID,
-			Location:  db.LocationId,
-			Type:      db.Type,
-			State:     "READY", // API v1 Database object doesn't always show state clearly in struct? Checking docs...
-			// Actually Database object has `Uid`, `CreateTime`, `UpdateTime`, `LocationId`, `Type`, `ConcurrencyMode`, etc.
-			// "State" key might be missing in basic v1 struct or it's implicitly Active.
-			CreateTime: db.CreateTime,
-			Uid:        db.Uid,
+			Name:                          shortName,
+			ProjectID:                     projectID,
+			Location:                      db.LocationId,
+			Type:                          db.Type,
+			CreateTime:                    db.CreateTime,
+			UpdateTime:                    db.UpdateTime,
+			Uid:                           db.Uid,
+			DatabaseEdition:               db.DatabaseEdition,
+			ConcurrencyMode:               db.ConcurrencyMode,
+			DeleteProtectionState:         db.DeleteProtectionState,
+			PointInTimeRecoveryEnablement: db.PointInTimeRecoveryEnablement,
+			FreeTier:                      db.FreeTier,
 		})
 	}
 	return dbs, nil
+}
+
+// CreateDatabase creates a new Firestore database in the given project.
+func (c *Client) CreateDatabase(projectID, databaseID, location, dbType string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s", projectID)
+	db := &firestore.GoogleFirestoreAdminV1Database{
+		LocationId: location,
+		Type:       dbType,
+	}
+	_, err := c.firestoreSvc.Projects.Databases.Create(parent, db).DatabaseId(databaseID).Do()
+	return err
+}
+
+// UpdateDatabaseDeleteProtection patches a Firestore database's delete
+// protection state, matching `gcloud firestore databases update
+// --delete-protection`/`--no-delete-protection`. Concurrency mode, PITR, and
+// other database fields are out of scope for this minimal Update flow.
+func (c *Client) UpdateDatabaseDeleteProtection(databaseName string, enabled bool) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	state := "DELETE_PROTECTION_DISABLED"
+	if enabled {
+		state = "DELETE_PROTECTION_ENABLED"
+	}
+	db := &firestore.GoogleFirestoreAdminV1Database{
+		DeleteProtectionState: state,
+	}
+	_, err := c.firestoreSvc.Projects.Databases.Patch(databaseName, db).UpdateMask("deleteProtectionState").Do()
+	return err
+}
+
+// DeleteDatabase deletes a Firestore database, matching
+// `gcloud firestore databases delete`. The API itself refuses to delete a
+// database with delete protection enabled (DELETE_PROTECTION_ENABLED),
+// which is the safety behavior this app relies on — see
+// UpdateDatabaseDeleteProtection to disable it first.
+func (c *Client) DeleteDatabase(databaseName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	_, err := c.firestoreSvc.Projects.Databases.Delete(databaseName).Do()
+	return err
 }
 
 // ListNamespaces lists all namespaces in a Datastore mode database

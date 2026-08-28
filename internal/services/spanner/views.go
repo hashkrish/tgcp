@@ -8,6 +8,19 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
+// renderConfirmation renders the instance-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedInstance == nil {
+		return "Error: No instance selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedInstance.Name,
+		"instance",
+		fmt.Sprintf("Are you sure you want to DELETE instance %s? This destroys every database in it.", s.selectedInstance.Name),
+	)
+}
+
 func (s *Service) View() string {
 	if s.err != nil {
 		return components.RenderError(s.err, "Spanner", "Instances")
@@ -20,6 +33,18 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
+	}
+
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
 	}
 
 	// Filter Bar
@@ -54,6 +79,15 @@ func (s *Service) renderDetailView() string {
 		capacity = fmt.Sprintf("%d Processing Units", i.ProcessingUnits)
 	}
 
+	edition := i.Edition
+	if edition == "" {
+		edition = "-"
+	}
+	backupSchedule := i.DefaultBackupScheduleType
+	if backupSchedule == "" {
+		backupSchedule = "-"
+	}
+
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Instance Details",
 		Rows: []components.KeyValue{
@@ -62,7 +96,25 @@ func (s *Service) renderDetailView() string {
 			{Key: "Display Name", Value: i.DisplayName},
 			{Key: "Configuration", Value: i.Config},
 			{Key: "Capacity", Value: capacity},
+			{Key: "Edition", Value: edition},
+			{Key: "Default Backup Schedule", Value: backupSchedule},
+			{Key: "Labels", Value: formatLabels(i.Labels)},
+			{Key: "Created", Value: i.CreateTime},
+			{Key: "Updated", Value: i.UpdateTime},
 		},
 	})
 	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", card)
+}
+
+// formatLabels renders a label map as a compact, single-line key=value list
+// for display in a detail card row.
+func formatLabels(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "-"
+	}
+	parts := make([]string, 0, len(labels))
+	for k, v := range labels {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	return strings.Join(parts, ", ")
 }

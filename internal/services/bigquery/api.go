@@ -53,12 +53,60 @@ func (c *Client) ListDatasets(projectID string) ([]Dataset, error) {
 		}
 
 		datasets = append(datasets, Dataset{
-			ID:        ds.DatasetID,
-			ProjectID: ds.ProjectID,
-			Location:  md.Location,
+			ID:           ds.DatasetID,
+			ProjectID:    ds.ProjectID,
+			Location:     md.Location,
+			Description:  md.Description,
+			Labels:       md.Labels,
+			CreationTime: md.CreationTime,
 		})
 	}
 	return datasets, nil
+}
+
+// CreateDataset creates a new BigQuery dataset with the given ID and location.
+func (c *Client) CreateDataset(datasetID, location string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("bigquery client not initialized")
+	}
+	meta := &bigquery.DatasetMetadata{
+		Location: location,
+	}
+	return c.client.Dataset(datasetID).Create(context.Background(), meta)
+}
+
+// UpdateDatasetDescription patches a dataset's description, matching
+// `bq update --description`. Other update fields (labels, access, default
+// table expiration, etc.) are out of scope for this minimal Update flow.
+func (c *Client) UpdateDatasetDescription(datasetID, description string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("bigquery client not initialized")
+	}
+	update := bigquery.DatasetMetadataToUpdate{
+		Description: description,
+	}
+	_, err := c.client.Dataset(datasetID).Update(context.Background(), update, "")
+	return err
+}
+
+// DeleteDataset deletes a BigQuery dataset, matching `bq rm -d` (without
+// -f/--recursive) — the API itself refuses to delete a non-empty dataset,
+// which is the safety behavior this app wants (no table-level delete is
+// implemented here to empty it first).
+func (c *Client) DeleteDataset(datasetID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("bigquery client not initialized")
+	}
+	return c.client.Dataset(datasetID).Delete(context.Background())
 }
 
 func (c *Client) ListTables(datasetID string) ([]Table, error) {
@@ -98,13 +146,27 @@ func (c *Client) ListTables(datasetID string) ([]Table, error) {
 			continue
 		}
 
+		partitioning := ""
+		if md.TimePartitioning != nil {
+			partitioning = string(md.TimePartitioning.Type)
+			if md.TimePartitioning.Field != "" {
+				partitioning = fmt.Sprintf("%s (%s)", partitioning, md.TimePartitioning.Field)
+			}
+		} else if md.RangePartitioning != nil {
+			partitioning = fmt.Sprintf("RANGE (%s)", md.RangePartitioning.Field)
+		}
+
 		tables = append(tables, Table{
-			ID:         t.TableID,
-			DatasetID:  datasetID,
-			Type:       string(md.Type),
-			NumRows:    md.NumRows,
-			TotalBytes: md.NumBytes,
-			LastMod:    md.LastModifiedTime,
+			ID:             t.TableID,
+			DatasetID:      datasetID,
+			Type:           string(md.Type),
+			NumRows:        md.NumRows,
+			TotalBytes:     md.NumBytes,
+			LastMod:        md.LastModifiedTime,
+			Description:    md.Description,
+			CreationTime:   md.CreationTime,
+			ExpirationTime: md.ExpirationTime,
+			Partitioning:   partitioning,
 		})
 	}
 	return tables, nil

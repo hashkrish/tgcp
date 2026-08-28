@@ -1,0 +1,5 @@
+[
+  { "name": "events", "columnFamilies": ["cf1", "cf2"] },
+  { "name": "user-profiles", "columnFamilies": ["profile", "prefs"] },
+  { "name": "metrics-raw", "columnFamilies": ["cf1"] }
+]

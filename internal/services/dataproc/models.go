@@ -8,4 +8,10 @@ type Cluster struct {
 	WorkerCount   int
 	WorkerMachine string
 	Zone          string
+
+	ClusterUUID    string
+	StatusDetail   string
+	StateStartTime string
+	ConfigBucket   string
+	Labels         map[string]string
 }
