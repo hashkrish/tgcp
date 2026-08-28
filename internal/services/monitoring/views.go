@@ -20,7 +20,31 @@ func (s *Service) View() string {
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
 	}
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
+	}
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
 	return s.renderListView()
+}
+
+// renderConfirmation renders the uptime-check/alert-policy delete
+// confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.activeTab == TabUptimeChecks {
+		if s.selectedCheck == nil {
+			return "Error: No uptime check selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedCheck.DisplayName, "uptime check")
+	}
+	if s.selectedAlert == nil {
+		return "Error: No alert policy selected"
+	}
+	return components.RenderConfirmation(s.pendingAction, s.selectedAlert.DisplayName, "alert policy")
 }
 
 func (s *Service) renderListView() string {

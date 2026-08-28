@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	gmonitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
 	"github.com/yogirk/tgcp/internal/demo"
+	"google.golang.org/genproto/googleapis/api/monitoredres"
+	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 // Client wraps the two Cloud Monitoring sub-clients this service needs.
@@ -16,9 +20,6 @@ import (
 // API surface (cloud.google.com/go/monitoring/apiv3/v2), but are exposed via
 // separate typed clients (UptimeCheckClient / AlertPolicyClient) rather than
 // one combined client — so we hold both here.
-//
-// Read-only: only List* calls are ever made. No check/policy is ever
-// created, updated, or deleted through this client.
 type Client struct {
 	uptime *gmonitoring.UptimeCheckClient
 	alert  *gmonitoring.AlertPolicyClient
@@ -85,9 +86,101 @@ func (c *Client) ListAlertPolicies(projectID string) ([]AlertPolicy, error) {
 	return policies, nil
 }
 
+// CreateUptimeCheck creates a new HTTP/HTTPS Uptime check config targeting
+// the given host. This is a minimal-viable create form, not full parity with
+// `gcloud monitoring uptime create` (no TCP checks, content matchers, or
+// selected regions here).
+func (c *Client) CreateUptimeCheck(projectID string, opts UptimeCheckCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.uptime == nil {
+		return fmt.Errorf("client not init")
+	}
+
+	interval, err := strconv.ParseInt(opts.CheckIntervalSec, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid check interval %q: %w", opts.CheckIntervalSec, err)
+	}
+
+	cfg := &monitoringpb.UptimeCheckConfig{
+		DisplayName: opts.DisplayName,
+		Resource: &monitoringpb.UptimeCheckConfig_MonitoredResource{
+			MonitoredResource: &monitoredres.MonitoredResource{
+				Type:   "uptime_url",
+				Labels: map[string]string{"host": opts.Host},
+			},
+		},
+		CheckRequestType: &monitoringpb.UptimeCheckConfig_HttpCheck_{
+			HttpCheck: &monitoringpb.UptimeCheckConfig_HttpCheck{
+				UseSsl: strings.EqualFold(opts.Protocol, "HTTPS"),
+				Path:   opts.Path,
+			},
+		},
+		Period:  durationpb.New(time.Duration(interval) * time.Second),
+		Timeout: durationpb.New(10 * time.Second),
+	}
+
+	ctx := context.Background()
+	_, err = c.uptime.CreateUptimeCheckConfig(ctx, &monitoringpb.CreateUptimeCheckConfigRequest{
+		Parent:            fmt.Sprintf("projects/%s", projectID),
+		UptimeCheckConfig: cfg,
+	})
+	return err
+}
+
+// UpdateUptimeCheckPeriod patches an uptime check's check interval,
+// matching `gcloud monitoring uptime update --period`. HTTP/path/host,
+// content matchers, and alert-policy fields are out of scope for this
+// minimal Update flow.
+func (c *Client) UpdateUptimeCheckPeriod(fullName string, periodSec int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.uptime == nil {
+		return fmt.Errorf("client not init")
+	}
+	cfg := &monitoringpb.UptimeCheckConfig{
+		Name:   fullName,
+		Period: durationpb.New(time.Duration(periodSec) * time.Second),
+	}
+	_, err := c.uptime.UpdateUptimeCheckConfig(context.Background(), &monitoringpb.UpdateUptimeCheckConfigRequest{
+		UptimeCheckConfig: cfg,
+		UpdateMask: &fieldmaskpb.FieldMask{
+			Paths: []string{"period"},
+		},
+	})
+	return err
+}
+
+// DeleteUptimeCheck deletes an uptime check config, matching
+// `gcloud monitoring uptime delete`.
+func (c *Client) DeleteUptimeCheck(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.uptime == nil {
+		return fmt.Errorf("client not init")
+	}
+	return c.uptime.DeleteUptimeCheckConfig(context.Background(), &monitoringpb.DeleteUptimeCheckConfigRequest{Name: fullName})
+}
+
+// DeleteAlertPolicy deletes an alerting policy, matching
+// `gcloud alpha monitoring policies delete`.
+func (c *Client) DeleteAlertPolicy(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.alert == nil {
+		return fmt.Errorf("client not init")
+	}
+	return c.alert.DeleteAlertPolicy(context.Background(), &monitoringpb.DeleteAlertPolicyRequest{Name: fullName})
+}
+
 func toUptimeCheck(cfg *monitoringpb.UptimeCheckConfig) UptimeCheck {
 	uc := UptimeCheck{
 		Name:        shortName(cfg.GetName()),
+		FullName:    cfg.GetName(),
 		DisplayName: cfg.GetDisplayName(),
 		Period:      cfg.GetPeriod().AsDuration().String(),
 		Timeout:     cfg.GetTimeout().AsDuration().String(),
@@ -144,6 +237,7 @@ func toAlertPolicy(p *monitoringpb.AlertPolicy) AlertPolicy {
 
 	ap := AlertPolicy{
 		Name:                     shortName(p.GetName()),
+		FullName:                 p.GetName(),
 		DisplayName:              p.GetDisplayName(),
 		Enabled:                  enabled,
 		Combiner:                 p.GetCombiner().String(),

@@ -1,9 +1,20 @@
 package monitoring
 
+// UptimeCheckCreateOpts holds the minimal set of fields needed to create an
+// HTTP(S) Uptime check via the Create form.
+type UptimeCheckCreateOpts struct {
+	DisplayName      string
+	Host             string
+	Path             string
+	CheckIntervalSec string // numeric string
+	Protocol         string // HTTP or HTTPS
+}
+
 // UptimeCheck represents a Cloud Monitoring Uptime check configuration
 // (read-only view).
 type UptimeCheck struct {
 	Name         string // Short check ID
+	FullName     string // Full resource name (projects/*/uptimeCheckConfigs/*)
 	DisplayName  string
 	ResourceType string // Monitored resource type, e.g. uptime_url, gce_instance
 	CheckType    string // HTTP, HTTPS, TCP
@@ -25,6 +36,7 @@ type ContentMatcher struct {
 // AlertPolicy represents a Cloud Monitoring alerting policy (read-only view).
 type AlertPolicy struct {
 	Name        string // Short policy ID
+	FullName    string // projects/{project}/alertPolicies/{id}
 	DisplayName string
 	Enabled     bool
 	Combiner    string // AND, OR, AND_WITH_MATCHING_RESOURCE
