@@ -1,29 +1,27 @@
 // Package loadbalancing (this file) implements the Service UI for Cloud
 // Load Balancing.
 //
-// Scope: Load Balancing spans many resource types in the real product
-// (backend services, backend buckets, URL maps, forwarding rules, target
-// proxies, SSL certificates, ...). Per TODO.md's guidance to find "the
-// minimum useful slice first" rather than trying to cover everything
-// `gcloud compute` exposes, this MVP covers exactly two tabs:
+// Scope: Backend Services, Health Checks, URL Maps, Forwarding Rules, and
+// SSL Certificates — the core resources involved in understanding how a
+// load balancer routes and serves traffic. Backend buckets and target
+// proxies are still left out; they're thin pass-through resources with
+// little standalone value beyond what URL Maps/Forwarding Rules already
+// show.
 //
-//   - Backend Services: the resource that actually groups backends behind
-//     a health check and is common to every LB type (external/internal,
-//     HTTP(S)/TCP/UDP). Understanding backend health/config is usually the
-//     first thing you reach for when debugging a load balancer.
-//   - Health Checks: directly referenced by backend services, and useful
-//     to browse independently (a health check can be shared by multiple
-//     backend services).
+// All resources here live in the same `compute/v1` API surface already used
+// by internal/services/gce and internal/services/net, so this package
+// reuses that same compute.Service client construction pattern. Every
+// resource type here can be either global or regional, so every listing
+// uses AggregatedList (project-wide across all scopes) rather than a
+// hardcoded region list or per-region fan-out.
 //
-// URL maps, forwarding rules, and SSL certificates are deliberately left
-// out of this pass — they're more about routing/exposure than backend
-// health, and each would need its own tab plus cross-referencing logic to
-// be useful, which is a larger design surface than this MVP scope.
+// No mutating calls are made anywhere in this package — list only.
 package loadbalancing
 
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -47,6 +45,8 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCreate
+	ViewConfirmation
 )
 
 type Tab int
@@ -54,11 +54,42 @@ type Tab int
 const (
 	TabBackendServices Tab = iota
 	TabHealthChecks
+	TabUrlMaps
+	TabForwardingRules
+	TabSslCertificates
+	tabCount // sentinel, keep last
 )
+
+func (t Tab) label() string {
+	switch t {
+	case TabBackendServices:
+		return "Backend Services"
+	case TabHealthChecks:
+		return "Health Checks"
+	case TabUrlMaps:
+		return "URL Maps"
+	case TabForwardingRules:
+		return "Forwarding Rules"
+	case TabSslCertificates:
+		return "SSL Certificates"
+	default:
+		return ""
+	}
+}
 
 type backendServicesMsg []BackendService
 type healthChecksMsg []HealthCheck
+type urlMapsMsg []UrlMap
+type forwardingRulesMsg []ForwardingRule
+type sslCertificatesMsg []SslCertificate
 type errMsg error
+
+// actionResultMsg carries the result of an async mutating action (e.g.
+// health check creation).
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -71,18 +102,34 @@ type Service struct {
 	// Tables
 	backendTable *components.StandardTable
 	healthTable  *components.StandardTable
+	urlMapTable  *components.StandardTable
+	fwdRuleTable *components.StandardTable
+	sslCertTable *components.StandardTable
 
 	activeTab Tab
 
 	// State
 	backendServices []BackendService
 	healthChecks    []HealthCheck
+	urlMaps         []UrlMap
+	forwardingRules []ForwardingRule
+	sslCertificates []SslCertificate
 	spinner         components.SpinnerModel
 	err             error
 
 	viewState       ViewState
 	selectedBackend *BackendService
 	selectedHealth  *HealthCheck
+	selectedUrlMap  *UrlMap
+	selectedFwdRule *ForwardingRule
+	selectedSslCert *SslCertificate
+
+	createForm     components.FormModel
+	createReturnTo ViewState
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -108,9 +155,37 @@ func NewService(cache *core.Cache) *Service {
 	}
 	hTable := components.NewStandardTable(hCols)
 
+	uCols := []table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Region", Width: 14},
+		{Title: "Default Service", Width: 30},
+	}
+	uTable := components.NewStandardTable(uCols)
+
+	fCols := []table.Column{
+		{Title: "Name", Width: 26},
+		{Title: "Region", Width: 12},
+		{Title: "IP Address", Width: 16},
+		{Title: "Protocol", Width: 10},
+		{Title: "Ports", Width: 12},
+		{Title: "Target", Width: 26},
+	}
+	fTable := components.NewStandardTable(fCols)
+
+	sCols := []table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Region", Width: 12},
+		{Title: "Type", Width: 14},
+		{Title: "Domains", Width: 34},
+	}
+	sTable := components.NewStandardTable(sCols)
+
 	return &Service{
 		backendTable: bTable,
 		healthTable:  hTable,
+		urlMapTable:  uTable,
+		fwdRuleTable: fTable,
+		sslCertTable: sTable,
 		spinner:      components.NewSpinner(),
 		viewState:    ViewList,
 		activeTab:    TabBackendServices,
@@ -123,10 +198,22 @@ func (s *Service) ShortName() string { return "loadbalancing" }
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
+		if s.activeTab == TabHealthChecks {
+			return "[]:Tabs  r:Refresh  Ent:Detail  n:New Health Check"
+		}
 		return "[]:Tabs  r:Refresh  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back"
+		return "Esc/q:Back  d:Delete"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewCreate {
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
+	}
+	if s.viewState == ViewCreate {
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	return ""
 }
@@ -162,23 +249,60 @@ func (s *Service) tick() tea.Cmd {
 	return tea.Tick(CacheTTL, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-func (s *Service) Refresh() tea.Cmd {
-	var fetchCmd tea.Cmd
-	if s.activeTab == TabBackendServices {
-		fetchCmd = s.fetchBackendServicesCmd(true)
-	} else {
-		fetchCmd = s.fetchHealthChecksCmd(true)
+// fetchCmdForTab returns the fetch command for the given tab.
+func (s *Service) fetchCmdForTab(tab Tab, force bool) tea.Cmd {
+	switch tab {
+	case TabBackendServices:
+		return s.fetchBackendServicesCmd(force)
+	case TabHealthChecks:
+		return s.fetchHealthChecksCmd(force)
+	case TabUrlMaps:
+		return s.fetchUrlMapsCmd(force)
+	case TabForwardingRules:
+		return s.fetchForwardingRulesCmd(force)
+	case TabSslCertificates:
+		return s.fetchSslCertificatesCmd(force)
+	default:
+		return nil
 	}
-	return tea.Batch(s.spinner.Start(""), fetchCmd)
+}
+
+// tabHasData reports whether the given tab's data slice has already been
+// fetched at least once (nil means "never fetched").
+func (s *Service) tabHasData(tab Tab) bool {
+	switch tab {
+	case TabBackendServices:
+		return s.backendServices != nil
+	case TabHealthChecks:
+		return s.healthChecks != nil
+	case TabUrlMaps:
+		return s.urlMaps != nil
+	case TabForwardingRules:
+		return s.forwardingRules != nil
+	case TabSslCertificates:
+		return s.sslCertificates != nil
+	default:
+		return true
+	}
+}
+
+func (s *Service) Refresh() tea.Cmd {
+	return tea.Batch(s.spinner.Start(""), s.fetchCmdForTab(s.activeTab, true))
 }
 
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedBackend = nil
 	s.selectedHealth = nil
+	s.selectedUrlMap = nil
+	s.selectedFwdRule = nil
+	s.selectedSslCert = nil
 	s.err = nil
 	s.backendTable.SetCursor(0)
 	s.healthTable.SetCursor(0)
+	s.urlMapTable.SetCursor(0)
+	s.fwdRuleTable.SetCursor(0)
+	s.sslCertTable.SetCursor(0)
 	s.activeTab = TabBackendServices
 }
 
@@ -189,11 +313,50 @@ func (s *Service) IsRootView() bool {
 func (s *Service) Focus() {
 	s.backendTable.Focus()
 	s.healthTable.Focus()
+	s.urlMapTable.Focus()
+	s.fwdRuleTable.Focus()
+	s.sslCertTable.Focus()
 }
 
 func (s *Service) Blur() {
 	s.backendTable.Blur()
 	s.healthTable.Blur()
+	s.urlMapTable.Blur()
+	s.fwdRuleTable.Blur()
+	s.sslCertTable.Blur()
+}
+
+// activeTable returns the StandardTable backing the currently active tab.
+func (s *Service) activeTable() *components.StandardTable {
+	switch s.activeTab {
+	case TabBackendServices:
+		return s.backendTable
+	case TabHealthChecks:
+		return s.healthTable
+	case TabUrlMaps:
+		return s.urlMapTable
+	case TabForwardingRules:
+		return s.fwdRuleTable
+	case TabSslCertificates:
+		return s.sslCertTable
+	default:
+		return s.backendTable
+	}
+}
+
+func (s *Service) setActiveTable(t *components.StandardTable) {
+	switch s.activeTab {
+	case TabBackendServices:
+		s.backendTable = t
+	case TabHealthChecks:
+		s.healthTable = t
+	case TabUrlMaps:
+		s.urlMapTable = t
+	case TabForwardingRules:
+		s.fwdRuleTable = t
+	case TabSslCertificates:
+		s.sslCertTable = t
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -209,14 +372,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
-		var batch []tea.Cmd
-		if s.activeTab == TabBackendServices {
-			batch = append(batch, s.fetchBackendServicesCmd(false))
-		} else {
-			batch = append(batch, s.fetchHealthChecksCmd(false))
-		}
-		batch = append(batch, s.tick())
-		return s, tea.Batch(batch...)
+		return s, tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.tick())
 
 	case backendServicesMsg:
 		s.spinner.Stop()
@@ -246,68 +402,176 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
+	case urlMapsMsg:
+		s.spinner.Stop()
+		s.urlMaps = msg
+		s.updateUrlMapTable()
+		if s.selectedUrlMap != nil {
+			for i := range s.urlMaps {
+				if s.urlMaps[i].Name == s.selectedUrlMap.Name && s.urlMaps[i].Region == s.selectedUrlMap.Region {
+					s.selectedUrlMap = &s.urlMaps[i]
+					break
+				}
+			}
+		}
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
+	case forwardingRulesMsg:
+		s.spinner.Stop()
+		s.forwardingRules = msg
+		s.updateFwdRuleTable()
+		if s.selectedFwdRule != nil {
+			for i := range s.forwardingRules {
+				if s.forwardingRules[i].Name == s.selectedFwdRule.Name && s.forwardingRules[i].Region == s.selectedFwdRule.Region {
+					s.selectedFwdRule = &s.forwardingRules[i]
+					break
+				}
+			}
+		}
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
+	case sslCertificatesMsg:
+		s.spinner.Stop()
+		s.sslCertificates = msg
+		s.updateSslCertTable()
+		if s.selectedSslCert != nil {
+			for i := range s.sslCertificates {
+				if s.sslCertificates[i].Name == s.selectedSslCert.Name && s.sslCertificates[i].Region == s.selectedSslCert.Region {
+					s.selectedSslCert = &s.sslCertificates[i]
+					break
+				}
+			}
+		}
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
 	case errMsg:
 		s.spinner.Stop()
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedBackend = nil
+			s.selectedHealth = nil
+			s.viewState = ViewList
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.backendTable.HandleWindowSizeDefault(msg)
 		s.healthTable.HandleWindowSizeDefault(msg)
+		s.urlMapTable.HandleWindowSizeDefault(msg)
+		s.fwdRuleTable.HandleWindowSizeDefault(msg)
+		s.sslCertTable.HandleWindowSizeDefault(msg)
 
 	case tea.MouseMsg:
 		if s.viewState == ViewList {
 			var updatedTable *components.StandardTable
-			if s.activeTab == TabBackendServices {
-				updatedTable, cmd = s.backendTable.Update(msg)
-				s.backendTable = updatedTable
-			} else {
-				updatedTable, cmd = s.healthTable.Update(msg)
-				s.healthTable = updatedTable
-			}
+			updatedTable, cmd = s.activeTable().Update(msg)
+			s.setActiveTable(updatedTable)
 			return s, cmd
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = s.createReturnTo
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createHealthCheckCmd()
+			}
+			return s, formCmd
+		}
+
 		switch s.viewState {
 		case ViewList:
 			switch msg.String() {
-			case "[", "]":
-				if s.activeTab == TabBackendServices {
-					s.activeTab = TabHealthChecks
-					if s.healthChecks == nil {
-						return s, tea.Batch(s.fetchHealthChecksCmd(false), s.spinner.Start(""))
-					}
-				} else {
-					s.activeTab = TabBackendServices
-					if s.backendServices == nil {
-						return s, tea.Batch(s.fetchBackendServicesCmd(false), s.spinner.Start(""))
-					}
+			case "n":
+				if s.activeTab == TabHealthChecks {
+					s.createForm = components.NewForm("New Health Check", []components.FormField{
+						{Label: "Name", Required: true},
+						{Label: "Protocol", Default: "HTTP", Required: true},
+						{Label: "Port", Default: "80", Required: true},
+						{Label: "Check Interval Sec", Default: "5", Required: true},
+					})
+					s.createReturnTo = ViewList
+					s.viewState = ViewCreate
+				}
+				return s, nil
+			case "[":
+				s.activeTab = Tab((int(s.activeTab) - 1 + int(tabCount)) % int(tabCount))
+				if !s.tabHasData(s.activeTab) {
+					return s, tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.spinner.Start(""))
+				}
+				return s, nil
+			case "]":
+				s.activeTab = Tab((int(s.activeTab) + 1) % int(tabCount))
+				if !s.tabHasData(s.activeTab) {
+					return s, tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.spinner.Start(""))
 				}
 				return s, nil
 			case "r":
 				return s, s.Refresh()
 			case "enter":
-				if s.activeTab == TabBackendServices {
-					if idx := s.backendTable.Cursor(); idx >= 0 && idx < len(s.backendServices) {
+				idx := s.activeTable().Cursor()
+				switch s.activeTab {
+				case TabBackendServices:
+					if idx >= 0 && idx < len(s.backendServices) {
 						s.selectedBackend = &s.backendServices[idx]
 						s.viewState = ViewDetail
 					}
-				} else {
-					if idx := s.healthTable.Cursor(); idx >= 0 && idx < len(s.healthChecks) {
+				case TabHealthChecks:
+					if idx >= 0 && idx < len(s.healthChecks) {
 						s.selectedHealth = &s.healthChecks[idx]
+						s.viewState = ViewDetail
+					}
+				case TabUrlMaps:
+					if idx >= 0 && idx < len(s.urlMaps) {
+						s.selectedUrlMap = &s.urlMaps[idx]
+						s.viewState = ViewDetail
+					}
+				case TabForwardingRules:
+					if idx >= 0 && idx < len(s.forwardingRules) {
+						s.selectedFwdRule = &s.forwardingRules[idx]
+						s.viewState = ViewDetail
+					}
+				case TabSslCertificates:
+					if idx >= 0 && idx < len(s.sslCertificates) {
+						s.selectedSslCert = &s.sslCertificates[idx]
 						s.viewState = ViewDetail
 					}
 				}
 			}
 			var updatedTable *components.StandardTable
-			if s.activeTab == TabBackendServices {
-				updatedTable, cmd = s.backendTable.Update(msg)
-				s.backendTable = updatedTable
-			} else {
-				updatedTable, cmd = s.healthTable.Update(msg)
-				s.healthTable = updatedTable
-			}
+			updatedTable, cmd = s.activeTable().Update(msg)
+			s.setActiveTable(updatedTable)
 			return s, cmd
 		case ViewDetail:
 			switch msg.String() {
@@ -315,6 +579,38 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedBackend = nil
 				s.selectedHealth = nil
+				s.selectedUrlMap = nil
+				s.selectedFwdRule = nil
+				s.selectedSslCert = nil
+				return s, nil
+			case "d":
+				if (s.activeTab == TabBackendServices && s.selectedBackend != nil) ||
+					(s.activeTab == TabHealthChecks && s.selectedHealth != nil) {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+
+		case ViewConfirmation:
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" {
+					if s.activeTab == TabBackendServices && s.selectedBackend != nil {
+						actionCmd = s.deleteBackendCmd(*s.selectedBackend)
+					} else if s.activeTab == TabHealthChecks && s.selectedHealth != nil {
+						actionCmd = s.deleteHealthCheckCmd(*s.selectedHealth)
+					}
+				}
+				// Stay on actionSource (and keep pendingAction "delete")
+				// until actionResultMsg arrives.
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
 				return s, nil
 			}
 		}
@@ -340,51 +636,122 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
 	return s.renderWithTabs()
 }
 
-func (s *Service) renderWithTabs() string {
-	var tabs string
-	var tableView string
-	listLabel := "Backend Services"
-
+// renderConfirmation renders the backend-service/health-check delete
+// confirmation dialog.
+func (s *Service) renderConfirmation() string {
 	if s.activeTab == TabBackendServices {
-		tabs = lipgloss.JoinHorizontal(lipgloss.Top,
-			styles.ActiveTabStyle.Render(" Backend Services "),
-			styles.InactiveTabStyle.Render(" Health Checks "),
-		)
+		if s.selectedBackend == nil {
+			return "Error: No backend service selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedBackend.Name, "backend service")
+	}
+	if s.selectedHealth == nil {
+		return "Error: No health check selected"
+	}
+	return components.RenderConfirmation(s.pendingAction, s.selectedHealth.Name, "health check")
+}
+
+// createHealthCheckCmd fires the CreateHealthCheck API call using the
+// current createForm values.
+func (s *Service) createHealthCheckCmd() tea.Cmd {
+	v := s.createForm.Values()
+	opts := HealthCheckCreateOpts{
+		Name:             v["Name"],
+		Protocol:         v["Protocol"],
+		Port:             v["Port"],
+		CheckIntervalSec: v["Check Interval Sec"],
+	}
+	s.viewState = s.createReturnTo
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateHealthCheck(s.projectID, opts); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating health check %s...", opts.Name)}
+	}
+}
+
+func (s *Service) renderWithTabs() string {
+	segments := make([]string, 0, int(tabCount))
+	for t := Tab(0); t < tabCount; t++ {
+		label := " " + t.label() + " "
+		if t == s.activeTab {
+			segments = append(segments, styles.ActiveTabStyle.Render(label))
+		} else {
+			segments = append(segments, styles.InactiveTabStyle.Render(label))
+		}
+	}
+	tabs := lipgloss.JoinHorizontal(lipgloss.Top, segments...)
+
+	var tableView string
+	switch s.activeTab {
+	case TabBackendServices:
 		if len(s.backendServices) == 0 {
 			tableView = components.EmptyState("default")
 		} else {
 			tableView = s.backendTable.View()
 		}
-	} else {
-		listLabel = "Health Checks"
-		tabs = lipgloss.JoinHorizontal(lipgloss.Top,
-			styles.InactiveTabStyle.Render(" Backend Services "),
-			styles.ActiveTabStyle.Render(" Health Checks "),
-		)
+	case TabHealthChecks:
 		if len(s.healthChecks) == 0 {
 			tableView = components.EmptyState("default")
 		} else {
 			tableView = s.healthTable.View()
+		}
+	case TabUrlMaps:
+		if len(s.urlMaps) == 0 {
+			tableView = components.EmptyState("default")
+		} else {
+			tableView = s.urlMapTable.View()
+		}
+	case TabForwardingRules:
+		if len(s.forwardingRules) == 0 {
+			tableView = components.EmptyState("default")
+		} else {
+			tableView = s.fwdRuleTable.View()
+		}
+	case TabSslCertificates:
+		if len(s.sslCertificates) == 0 {
+			tableView = components.EmptyState("default")
+		} else {
+			tableView = s.sslCertTable.View()
 		}
 	}
 
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project %s", s.projectID),
 		s.Name(),
-		listLabel,
+		s.activeTab.label(),
 	)
 
 	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, tabs, tableView)
 }
 
 func (s *Service) renderDetailView() string {
-	if s.activeTab == TabHealthChecks {
+	switch s.activeTab {
+	case TabHealthChecks:
 		return s.renderHealthDetailView()
+	case TabUrlMaps:
+		return s.renderUrlMapDetailView()
+	case TabForwardingRules:
+		return s.renderForwardingRuleDetailView()
+	case TabSslCertificates:
+		return s.renderSslCertDetailView()
+	default:
+		return s.renderBackendDetailView()
 	}
-	return s.renderBackendDetailView()
 }
 
 func (s *Service) renderBackendDetailView() string {
@@ -405,16 +772,37 @@ func (s *Service) renderBackendDetailView() string {
 		healthCheck = "-"
 	}
 
+	rows := []components.KeyValue{
+		{Key: "Name", Value: bs.Name},
+		{Key: "Region", Value: bs.Region},
+		{Key: "Protocol", Value: bs.Protocol},
+		{Key: "Load Balancing Scheme", Value: bs.LoadBalancingScheme},
+		{Key: "Health Check", Value: healthCheck},
+		{Key: "Backend Count", Value: fmt.Sprintf("%d", bs.BackendCount)},
+	}
+	if bs.Description != "" {
+		rows = append(rows, components.KeyValue{Key: "Description", Value: bs.Description})
+	}
+	if bs.PortName != "" || bs.Port > 0 {
+		rows = append(rows, components.KeyValue{Key: "Port", Value: fmt.Sprintf("%d (%s)", bs.Port, bs.PortName)})
+	}
+	if bs.TimeoutSec > 0 {
+		rows = append(rows, components.KeyValue{Key: "Timeout", Value: fmt.Sprintf("%ds", bs.TimeoutSec)})
+	}
+	if bs.SessionAffinity != "" {
+		rows = append(rows, components.KeyValue{Key: "Session Affinity", Value: bs.SessionAffinity})
+	}
+	rows = append(rows, components.KeyValue{Key: "CDN Enabled", Value: fmt.Sprintf("%t", bs.EnableCDN)})
+	if bs.SecurityPolicy != "" {
+		rows = append(rows, components.KeyValue{Key: "Security Policy", Value: bs.SecurityPolicy})
+	}
+	if bs.CreationTimestamp != "" {
+		rows = append(rows, components.KeyValue{Key: "Created", Value: bs.CreationTimestamp})
+	}
+
 	card := components.DetailCard(components.DetailCardOpts{
-		Title: "Backend Service Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: bs.Name},
-			{Key: "Region", Value: bs.Region},
-			{Key: "Protocol", Value: bs.Protocol},
-			{Key: "Load Balancing Scheme", Value: bs.LoadBalancingScheme},
-			{Key: "Health Check", Value: healthCheck},
-			{Key: "Backend Count", Value: fmt.Sprintf("%d", bs.BackendCount)},
-		},
+		Title:      "Backend Service Details",
+		Rows:       rows,
 		FooterHint: "Press 'q' or 'esc' to return",
 	})
 
@@ -434,10 +822,16 @@ func (s *Service) renderHealthDetailView() string {
 		hc.Name,
 	)
 
+	description := hc.Description
+	if description == "" {
+		description = "-"
+	}
+
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Health Check Details",
 		Rows: []components.KeyValue{
 			{Key: "Name", Value: hc.Name},
+			{Key: "Description", Value: description},
 			{Key: "Region", Value: hc.Region},
 			{Key: "Type", Value: hc.Type},
 			{Key: "Port", Value: fmt.Sprintf("%d", hc.Port)},
@@ -445,11 +839,141 @@ func (s *Service) renderHealthDetailView() string {
 			{Key: "Timeout", Value: fmt.Sprintf("%ds", hc.TimeoutSec)},
 			{Key: "Healthy Threshold", Value: fmt.Sprintf("%d", hc.HealthyThreshold)},
 			{Key: "Unhealthy Threshold", Value: fmt.Sprintf("%d", hc.UnhealthyThreshold)},
+			{Key: "Logging Enabled", Value: fmt.Sprintf("%t", hc.LogEnabled)},
 		},
 		FooterHint: "Press 'q' or 'esc' to return",
 	})
 
 	return fmt.Sprintf("%s\n\n%s", title, card)
+}
+
+func (s *Service) renderUrlMapDetailView() string {
+	if s.selectedUrlMap == nil {
+		return "No URL map selected"
+	}
+	um := s.selectedUrlMap
+
+	title := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"URL Maps",
+		um.Name,
+	)
+
+	description := um.Description
+	if description == "" {
+		description = "-"
+	}
+	defaultService := um.DefaultService
+	if defaultService == "" {
+		defaultService = "-"
+	}
+
+	card := components.DetailCard(components.DetailCardOpts{
+		Title: "URL Map Details",
+		Rows: []components.KeyValue{
+			{Key: "Name", Value: um.Name},
+			{Key: "Region", Value: um.Region},
+			{Key: "Default Service", Value: defaultService},
+			{Key: "Description", Value: description},
+		},
+		FooterHint: "Press 'q' or 'esc' to return",
+	})
+
+	return fmt.Sprintf("%s\n\n%s", title, card)
+}
+
+func (s *Service) renderForwardingRuleDetailView() string {
+	if s.selectedFwdRule == nil {
+		return "No forwarding rule selected"
+	}
+	fr := s.selectedFwdRule
+
+	title := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Forwarding Rules",
+		fr.Name,
+	)
+
+	card := components.DetailCard(components.DetailCardOpts{
+		Title: "Forwarding Rule Details",
+		Rows: []components.KeyValue{
+			{Key: "Name", Value: fr.Name},
+			{Key: "Region", Value: fr.Region},
+			{Key: "IP Address", Value: fr.IPAddress},
+			{Key: "IP Protocol", Value: fr.IPProtocol},
+			{Key: "Port Range", Value: fr.PortRange},
+			{Key: "Target", Value: fr.Target},
+			{Key: "Load Balancing Scheme", Value: fr.LoadBalancingScheme},
+		},
+		FooterHint: "Press 'q' or 'esc' to return",
+	})
+
+	return fmt.Sprintf("%s\n\n%s", title, card)
+}
+
+func (s *Service) renderSslCertDetailView() string {
+	if s.selectedSslCert == nil {
+		return "No SSL certificate selected"
+	}
+	cert := s.selectedSslCert
+
+	title := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"SSL Certificates",
+		cert.Name,
+	)
+
+	domains := "-"
+	if len(cert.Domains) > 0 {
+		domains = strings.Join(cert.Domains, ", ")
+	}
+	expireTime := cert.ExpireTime
+	if expireTime == "" {
+		expireTime = "-"
+	}
+
+	card := components.DetailCard(components.DetailCardOpts{
+		Title: "SSL Certificate Details",
+		Rows: []components.KeyValue{
+			{Key: "Name", Value: cert.Name},
+			{Key: "Region", Value: cert.Region},
+			{Key: "Type", Value: cert.Type},
+			{Key: "Domains", Value: domains},
+			{Key: "Expires", Value: expireTime},
+		},
+		FooterHint: "Press 'q' or 'esc' to return",
+	})
+
+	return fmt.Sprintf("%s\n\n%s", title, card)
+}
+
+// deleteBackendCmd triggers deletion of the given backend service
+func (s *Service) deleteBackendCmd(bs BackendService) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteBackendService(s.projectID, bs.Region, bs.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting backend service %s...", bs.Name)}
+	}
+}
+
+// deleteHealthCheckCmd triggers deletion of the given health check
+func (s *Service) deleteHealthCheckCmd(hc HealthCheck) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteHealthCheck(s.projectID, hc.Region, hc.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting health check %s...", hc.Name)}
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -504,6 +1028,78 @@ func (s *Service) fetchHealthChecksCmd(force bool) tea.Cmd {
 	}
 }
 
+func (s *Service) fetchUrlMapsCmd(force bool) tea.Cmd {
+	return func() tea.Msg {
+		key := fmt.Sprintf("loadbalancing_urlmaps:%s", s.projectID)
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if items, ok := val.([]UrlMap); ok {
+					return urlMapsMsg(items)
+				}
+			}
+		}
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not init"))
+		}
+		items, err := s.client.ListUrlMaps(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
+		if s.cache != nil {
+			s.cache.Set(key, items, CacheTTL)
+		}
+		return urlMapsMsg(items)
+	}
+}
+
+func (s *Service) fetchForwardingRulesCmd(force bool) tea.Cmd {
+	return func() tea.Msg {
+		key := fmt.Sprintf("loadbalancing_fwdrules:%s", s.projectID)
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if items, ok := val.([]ForwardingRule); ok {
+					return forwardingRulesMsg(items)
+				}
+			}
+		}
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not init"))
+		}
+		items, err := s.client.ListForwardingRules(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
+		if s.cache != nil {
+			s.cache.Set(key, items, CacheTTL)
+		}
+		return forwardingRulesMsg(items)
+	}
+}
+
+func (s *Service) fetchSslCertificatesCmd(force bool) tea.Cmd {
+	return func() tea.Msg {
+		key := fmt.Sprintf("loadbalancing_sslcerts:%s", s.projectID)
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if items, ok := val.([]SslCertificate); ok {
+					return sslCertificatesMsg(items)
+				}
+			}
+		}
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not init"))
+		}
+		items, err := s.client.ListSslCertificates(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
+		if s.cache != nil {
+			s.cache.Set(key, items, CacheTTL)
+		}
+		return sslCertificatesMsg(items)
+	}
+}
+
 func (s *Service) updateBackendTable() {
 	rows := make([]table.Row, len(s.backendServices))
 	for i, bs := range s.backendServices {
@@ -532,4 +1128,44 @@ func (s *Service) updateHealthTable() {
 		}
 	}
 	s.healthTable.SetRows(rows)
+}
+
+func (s *Service) updateUrlMapTable() {
+	rows := make([]table.Row, len(s.urlMaps))
+	for i, um := range s.urlMaps {
+		rows[i] = table.Row{
+			um.Name,
+			um.Region,
+			um.DefaultService,
+		}
+	}
+	s.urlMapTable.SetRows(rows)
+}
+
+func (s *Service) updateFwdRuleTable() {
+	rows := make([]table.Row, len(s.forwardingRules))
+	for i, fr := range s.forwardingRules {
+		rows[i] = table.Row{
+			fr.Name,
+			fr.Region,
+			fr.IPAddress,
+			fr.IPProtocol,
+			fr.PortRange,
+			fr.Target,
+		}
+	}
+	s.fwdRuleTable.SetRows(rows)
+}
+
+func (s *Service) updateSslCertTable() {
+	rows := make([]table.Row, len(s.sslCertificates))
+	for i, cert := range s.sslCertificates {
+		rows[i] = table.Row{
+			cert.Name,
+			cert.Region,
+			cert.Type,
+			strings.Join(cert.Domains, ", "),
+		}
+	}
+	s.sslCertTable.SetRows(rows)
 }

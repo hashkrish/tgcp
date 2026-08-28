@@ -17,6 +17,18 @@ type Subnet struct {
 	Network     string // link to network
 }
 
+// FirewallCreateOpts holds the minimal set of fields needed to create a
+// firewall rule via the Create form.
+type FirewallCreateOpts struct {
+	Name         string
+	Network      string
+	Direction    string
+	Action       string // ALLOW or DENY
+	Protocol     string
+	Ports        string // comma-separated
+	SourceRanges string // comma-separated
+}
+
 type Firewall struct {
 	Name      string
 	Network   string

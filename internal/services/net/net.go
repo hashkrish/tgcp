@@ -3,6 +3,7 @@ package net
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -26,7 +27,24 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
 )
+
+// newFirewallUpdateForm builds the FormModel for updating a firewall
+// rule's priority, seeded with its current value. Action, ports,
+// source/target ranges, and expand-ip-range are out of scope.
+func newFirewallUpdateForm(fw Firewall) components.FormModel {
+	return components.NewForm("Update Firewall Rule: "+fw.Name, []components.FormField{
+		{Label: "Priority", Default: fmt.Sprintf("%d", fw.Priority), Required: true, Validate: func(v string) string {
+			if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+				return "must be an integer"
+			}
+			return ""
+		}},
+	})
+}
 
 type Tab int
 
@@ -39,6 +57,13 @@ type networksMsg []Network
 type subnetsMsg []Subnet
 type firewallsMsg []Firewall
 type errMsg error
+
+// actionResultMsg carries the result of an async mutating action (e.g.
+// firewall rule creation).
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -63,8 +88,18 @@ type Service struct {
 	spinner   components.SpinnerModel
 	err       error
 
-	viewState       ViewState
-	selectedNetwork *Network
+	viewState        ViewState
+	selectedNetwork  *Network
+	selectedFirewall *Firewall
+
+	createForm     components.FormModel
+	createReturnTo ViewState
+
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -118,7 +153,16 @@ func (s *Service) HelpText() string {
 		return "Ent:Detail  r:Refresh"
 	}
 	if s.viewState == ViewDetail {
-		return "[]:Switch Tab  Esc/q:Back"
+		if s.activeTab == TabFirewalls {
+			return "[]:Switch Tab  Esc/q:Back  n:New Firewall Rule  u:Update  d:Delete"
+		}
+		return "[]:Switch Tab  Esc/q:Back  n:New Firewall Rule"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	return ""
 }
@@ -228,6 +272,44 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedFirewall = nil
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if s.viewState == ViewUpdate {
+			s.viewState = ViewDetail
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.networksTable.HandleWindowSizeDefault(msg)
 		// Tab headers take extra space for detail view tables
@@ -244,6 +326,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = s.createReturnTo
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createFirewallCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedFirewall != nil {
+				return s, s.updateFirewallCmd(*s.selectedFirewall)
+			}
+			return s, formCmd
+		}
+
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
@@ -270,6 +376,23 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedNetwork = nil
 				return s, nil
+			case "n": // New firewall rule
+				network := "default"
+				if s.selectedNetwork != nil {
+					network = s.selectedNetwork.Name
+				}
+				s.createForm = components.NewForm("New Firewall Rule", []components.FormField{
+					{Label: "Name", Required: true},
+					{Label: "Network", Default: network, Required: true},
+					{Label: "Direction", Default: "INGRESS", Required: true},
+					{Label: "Action", Default: "ALLOW", Required: true},
+					{Label: "Protocol", Default: "tcp", Required: true},
+					{Label: "Ports", Default: "80,443"},
+					{Label: "Source Ranges", Default: "0.0.0.0/0"},
+				})
+				s.createReturnTo = ViewDetail
+				s.viewState = ViewCreate
+				return s, nil
 			case "[", "]", "tab": // Allow tab-like switching
 				if s.activeTab == TabSubnets {
 					s.activeTab = TabFirewalls
@@ -277,6 +400,25 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.activeTab = TabSubnets
 				}
 				return s, nil
+			case "u": // Update firewall rule priority (Firewalls tab only)
+				if s.activeTab == TabFirewalls {
+					if idx := s.firewallsTable.Cursor(); idx >= 0 && idx < len(s.firewalls) {
+						s.selectedFirewall = &s.firewalls[idx]
+						s.updateForm = newFirewallUpdateForm(*s.selectedFirewall)
+						s.viewState = ViewUpdate
+						return s, nil
+					}
+				}
+			case "d": // Delete firewall rule (Firewalls tab only, Confirm)
+				if s.activeTab == TabFirewalls {
+					if idx := s.firewallsTable.Cursor(); idx >= 0 && idx < len(s.firewalls) {
+						s.selectedFirewall = &s.firewalls[idx]
+						s.pendingAction = "delete"
+						s.actionSource = ViewDetail
+						s.viewState = ViewConfirmation
+						return s, nil
+					}
+				}
 			}
 
 			var updatedTable *components.StandardTable
@@ -288,6 +430,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.firewallsTable = updatedTable
 			}
 			return s, cmd
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" && s.selectedFirewall != nil {
+					actionCmd = s.deleteFirewallCmd(*s.selectedFirewall)
+				}
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
+			}
 		}
 	}
 	return s, nil
@@ -320,8 +478,68 @@ func (s *Service) View() string {
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, s.networksTable.View())
 	case ViewDetail:
 		return s.renderDetailView()
+	case ViewCreate:
+		return s.createForm.View()
+	case ViewUpdate:
+		return s.updateForm.View()
+	case ViewConfirmation:
+		return s.renderConfirmation()
 	}
 	return ""
+}
+
+// renderConfirmation renders the firewall-rule-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedFirewall == nil {
+		return "Error: No firewall rule selected"
+	}
+	return components.RenderConfirmation(s.pendingAction, s.selectedFirewall.Name, "firewall rule")
+}
+
+// createFirewallCmd fires the CreateFirewallRule API call using the current
+// createForm values.
+func (s *Service) createFirewallCmd() tea.Cmd {
+	v := s.createForm.Values()
+	opts := FirewallCreateOpts{
+		Name:         v["Name"],
+		Network:      v["Network"],
+		Direction:    v["Direction"],
+		Action:       v["Action"],
+		Protocol:     v["Protocol"],
+		Ports:        v["Ports"],
+		SourceRanges: v["Source Ranges"],
+	}
+	returnTo := s.createReturnTo
+	s.viewState = returnTo
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateFirewallRule(s.projectID, opts); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating firewall rule %s...", opts.Name)}
+	}
+}
+
+// updateFirewallCmd fires the UpdateFirewallPriority API call using the
+// current update-form value.
+func (s *Service) updateFirewallCmd(fw Firewall) tea.Cmd {
+	priority := fw.Priority
+	if v := s.updateForm.Value("Priority"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			priority = n
+		}
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateFirewallPriority(s.projectID, fw.Name, priority); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating firewall rule %s...", fw.Name)}
+	}
 }
 
 func (s *Service) renderDetailView() string {
@@ -363,6 +581,19 @@ func (s *Service) renderDetailView() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tabs, content)
+}
+
+// deleteFirewallCmd triggers deletion of the given firewall rule
+func (s *Service) deleteFirewallCmd(fw Firewall) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteFirewallRule(s.projectID, fw.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting firewall rule %s...", fw.Name)}
+	}
 }
 
 // -----------------------------------------------------------------------------

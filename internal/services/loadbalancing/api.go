@@ -1,8 +1,7 @@
 // Package loadbalancing provides a read-only view of Cloud Load Balancing
-// resources, scoped deliberately to the minimum useful slice: Backend
-// Services and Health Checks. URL maps, forwarding rules, and SSL
-// certificates are NOT covered here — see the package-level comment in
-// loadbalancing.go for the reasoning.
+// resources: Backend Services, Health Checks, URL Maps, Forwarding Rules,
+// and SSL Certificates — see the package-level comment in loadbalancing.go
+// for scope notes.
 //
 // All resources here live in the same `compute/v1` API surface already used
 // by internal/services/gce and internal/services/net, so this package
@@ -17,6 +16,7 @@ package loadbalancing
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/yogirk/tgcp/internal/demo"
@@ -60,6 +60,14 @@ func (c *Client) ListBackendServices(projectID string) ([]BackendService, error)
 					LoadBalancingScheme: bs.LoadBalancingScheme,
 					HealthCheckName:     firstHealthCheckName(bs.HealthChecks),
 					BackendCount:        len(bs.Backends),
+					Description:         bs.Description,
+					Port:                bs.Port,
+					PortName:            bs.PortName,
+					TimeoutSec:          bs.TimeoutSec,
+					SessionAffinity:     bs.SessionAffinity,
+					EnableCDN:           bs.EnableCDN,
+					SecurityPolicy:      shortName(bs.SecurityPolicy),
+					CreationTimestamp:   bs.CreationTimestamp,
 				})
 			}
 		}
@@ -96,6 +104,8 @@ func (c *Client) ListHealthChecks(projectID string) ([]HealthCheck, error) {
 					TimeoutSec:         hc.TimeoutSec,
 					HealthyThreshold:   hc.HealthyThreshold,
 					UnhealthyThreshold: hc.UnhealthyThreshold,
+					Description:        hc.Description,
+					LogEnabled:         hc.LogConfig != nil && hc.LogConfig.Enable,
 				})
 			}
 		}
@@ -107,8 +117,185 @@ func (c *Client) ListHealthChecks(projectID string) ([]HealthCheck, error) {
 	return result, nil
 }
 
+// DeleteHealthCheck deletes a health check, matching
+// `gcloud compute health-checks delete`. Health checks can be global or
+// regional; region is "global" for the former, else a region name.
+func (c *Client) DeleteHealthCheck(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if region == "global" || region == "" {
+		_, err := c.service.HealthChecks.Delete(projectID, name).Do()
+		return err
+	}
+	_, err := c.service.RegionHealthChecks.Delete(projectID, region, name).Do()
+	return err
+}
+
+// DeleteBackendService deletes a backend service, matching
+// `gcloud compute backend-services delete`. Backend services can be global
+// or regional; region is "global" for the former, else a region name.
+func (c *Client) DeleteBackendService(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if region == "global" || region == "" {
+		_, err := c.service.BackendServices.Delete(projectID, name).Do()
+		return err
+	}
+	_, err := c.service.RegionBackendServices.Delete(projectID, region, name).Do()
+	return err
+}
+
+// ListUrlMaps lists all URL maps (global and regional) in the project.
+func (c *Client) ListUrlMaps(projectID string) ([]UrlMap, error) {
+	if demo.Enabled {
+		return []UrlMap{}, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("client not initialized")
+	}
+
+	var result []UrlMap
+	req := c.service.UrlMaps.AggregatedList(projectID)
+	err := req.Pages(context.Background(), func(page *compute.UrlMapsAggregatedList) error {
+		for scope, scoped := range page.Items {
+			for _, um := range scoped.UrlMaps {
+				result = append(result, UrlMap{
+					Name:           um.Name,
+					Region:         scopeToRegion(scope),
+					DefaultService: shortName(um.DefaultService),
+					Description:    um.Description,
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list URL maps: %w", err)
+	}
+	return result, nil
+}
+
+// ListForwardingRules lists all forwarding rules (global and regional) in
+// the project.
+func (c *Client) ListForwardingRules(projectID string) ([]ForwardingRule, error) {
+	if demo.Enabled {
+		return []ForwardingRule{}, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("client not initialized")
+	}
+
+	var result []ForwardingRule
+	req := c.service.ForwardingRules.AggregatedList(projectID)
+	err := req.Pages(context.Background(), func(page *compute.ForwardingRuleAggregatedList) error {
+		for scope, scoped := range page.Items {
+			for _, fr := range scoped.ForwardingRules {
+				result = append(result, ForwardingRule{
+					Name:                fr.Name,
+					Region:              scopeToRegion(scope),
+					IPAddress:           fr.IPAddress,
+					IPProtocol:          fr.IPProtocol,
+					PortRange:           fr.PortRange,
+					Target:              shortName(fr.Target),
+					LoadBalancingScheme: fr.LoadBalancingScheme,
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list forwarding rules: %w", err)
+	}
+	return result, nil
+}
+
+// ListSslCertificates lists all SSL certificates (global and regional) in
+// the project. Certificate/private key material is never fetched.
+func (c *Client) ListSslCertificates(projectID string) ([]SslCertificate, error) {
+	if demo.Enabled {
+		return []SslCertificate{}, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("client not initialized")
+	}
+
+	var result []SslCertificate
+	req := c.service.SslCertificates.AggregatedList(projectID)
+	err := req.Pages(context.Background(), func(page *compute.SslCertificateAggregatedList) error {
+		for scope, scoped := range page.Items {
+			for _, cert := range scoped.SslCertificates {
+				var domains []string
+				if cert.Managed != nil {
+					domains = cert.Managed.Domains
+				}
+				result = append(result, SslCertificate{
+					Name:       cert.Name,
+					Region:     scopeToRegion(scope),
+					Type:       cert.Type,
+					Domains:    domains,
+					ExpireTime: cert.ExpireTime,
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list SSL certificates: %w", err)
+	}
+	return result, nil
+}
+
 // healthCheckPortAndType returns the port and protocol type for a health
 // check. hc.Type names which protocol-specific sub-struct is populated.
+// CreateHealthCheck creates a new global health check. Only HTTP, HTTPS, and
+// TCP protocols are supported here — this is a minimal-viable create form,
+// not full parity with `gcloud compute health-checks create`.
+func (c *Client) CreateHealthCheck(projectID string, opts HealthCheckCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+
+	port, err := strconv.ParseInt(opts.Port, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid port %q: %w", opts.Port, err)
+	}
+	interval, err := strconv.ParseInt(opts.CheckIntervalSec, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid check interval %q: %w", opts.CheckIntervalSec, err)
+	}
+
+	hc := &compute.HealthCheck{
+		Name:             opts.Name,
+		CheckIntervalSec: interval,
+	}
+
+	switch strings.ToUpper(opts.Protocol) {
+	case "HTTPS":
+		hc.Type = "HTTPS"
+		hc.HttpsHealthCheck = &compute.HTTPSHealthCheck{Port: port}
+	case "TCP":
+		hc.Type = "TCP"
+		hc.TcpHealthCheck = &compute.TCPHealthCheck{Port: port}
+	default:
+		hc.Type = "HTTP"
+		hc.HttpHealthCheck = &compute.HTTPHealthCheck{Port: port}
+	}
+
+	_, err = c.service.HealthChecks.Insert(projectID, hc).Do()
+	return err
+}
+
 func healthCheckPortAndType(hc *compute.HealthCheck) (port int64, checkType string) {
 	switch {
 	case hc.HttpHealthCheck != nil:

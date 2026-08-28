@@ -3,16 +3,17 @@ package filestore
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	gfilestore "cloud.google.com/go/filestore/apiv1"
 	"cloud.google.com/go/filestore/apiv1/filestorepb"
 	"github.com/yogirk/tgcp/internal/demo"
 	locationpb "google.golang.org/genproto/googleapis/cloud/location"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
-// Client wraps the Cloud Filestore Manager API client. Read-only: only List*
-// calls are ever made — no create/update/delete/restore operations.
+// Client wraps the Cloud Filestore Manager API client.
 type Client struct {
 	client *gfilestore.CloudFilestoreManagerClient
 }
@@ -66,6 +67,91 @@ func (c *Client) ListInstances(projectID string) ([]Instance, error) {
 	return instances, nil
 }
 
+// CreateInstance creates a new Filestore instance in the given zone/region
+// with a single file share and a single network attachment — this is a
+// minimal-viable create form, not full parity with `gcloud filestore
+// instances create`.
+func (c *Client) CreateInstance(projectID string, opts InstanceCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+
+	capacity, err := strconv.ParseInt(opts.CapacityGB, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid capacity %q: %w", opts.CapacityGB, err)
+	}
+
+	tier, ok := filestorepb.Instance_Tier_value[strings.ToUpper(opts.Tier)]
+	if !ok {
+		return fmt.Errorf("invalid tier %q", opts.Tier)
+	}
+
+	ctx := context.Background()
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, opts.Zone)
+
+	req := &filestorepb.CreateInstanceRequest{
+		Parent:     parent,
+		InstanceId: opts.InstanceID,
+		Instance: &filestorepb.Instance{
+			Tier: filestorepb.Instance_Tier(tier),
+			FileShares: []*filestorepb.FileShareConfig{
+				{Name: opts.ShareName, CapacityGb: capacity},
+			},
+			Networks: []*filestorepb.NetworkConfig{
+				{Network: opts.Network},
+			},
+		},
+	}
+
+	// Fire-and-forget: this is a long-running operation; don't block on it
+	// completing — the next list refresh will reflect it once done.
+	_, err = c.client.CreateInstance(ctx, req)
+	return err
+}
+
+// UpdateInstanceCapacity resizes an instance's first (and, for the create
+// flow this app offers, only) file share, matching `gcloud filestore
+// instances update --file-share=name=...,capacity=...`. Multi-share
+// instances only have their first share resized here; revert and
+// promote/pause/resume-replica are separate, higher-risk operations and are
+// out of scope for this minimal Update flow.
+func (c *Client) UpdateInstanceCapacity(fullName, shareName string, capacityGB int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+	req := &filestorepb.UpdateInstanceRequest{
+		Instance: &filestorepb.Instance{
+			Name: fullName,
+			FileShares: []*filestorepb.FileShareConfig{
+				{Name: shareName, CapacityGb: capacityGB},
+			},
+		},
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"file_shares"}},
+	}
+	_, err := c.client.UpdateInstance(context.Background(), req)
+	return err
+}
+
+// DeleteInstance deletes a Filestore instance, matching
+// `gcloud filestore instances delete`. This permanently destroys all file
+// shares (and their data) on the instance.
+func (c *Client) DeleteInstance(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+	_, err := c.client.DeleteInstance(context.Background(), &filestorepb.DeleteInstanceRequest{Name: fullName})
+	return err
+}
+
 // listLocationIDs returns the canonical location IDs (zones for BASIC tier
 // instances, regions for the rest) available to Filestore for this project.
 func (c *Client) listLocationIDs(ctx context.Context, projectID string) ([]string, error) {
@@ -108,6 +194,7 @@ func toInstance(i *filestorepb.Instance, location string) Instance {
 
 	return Instance{
 		Name:          shortName(i.GetName()),
+		FullName:      i.GetName(),
 		Location:      location,
 		Tier:          i.GetTier().String(),
 		State:         i.GetState().String(),

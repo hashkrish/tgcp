@@ -3,6 +3,7 @@ package filestore
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,10 +26,37 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCreate
+	ViewUpdate
+	ViewConfirmation
 )
+
+// newInstanceUpdateForm builds the FormModel for resizing an instance's
+// first file share, seeded with its current capacity. Multi-share
+// instances only have their first share resized here; revert and
+// promote/pause/resume-replica are out of scope.
+func newInstanceUpdateForm(inst Instance) components.FormModel {
+	shareName := "share1"
+	capacity := int64(0)
+	if len(inst.FileShares) > 0 {
+		shareName = inst.FileShares[0].Name
+		capacity = inst.FileShares[0].CapacityGB
+	}
+	return components.NewForm("Update Filestore Instance: "+inst.Name, []components.FormField{
+		{Label: "File Share Name", Default: shareName, Required: true},
+		{Label: "Capacity GB", Default: fmt.Sprintf("%d", capacity), Required: true},
+	})
+}
 
 type instancesMsg []Instance
 type errMsg error
+
+// actionResultMsg carries the result of an async mutating action (e.g.
+// instance creation).
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // -----------------------------------------------------------------------------
 // Service Definition
@@ -48,6 +76,13 @@ type Service struct {
 
 	viewState        ViewState
 	selectedInstance *Instance
+
+	createForm components.FormModel
+	updateForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "delete"
+	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
 }
@@ -85,10 +120,16 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail"
+		return "r:Refresh  /:Filter  Ent:Detail  n:New Instance"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back"
+		return "Esc/q:Back  u:Update  d:Delete"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
+	}
+	if s.viewState == ViewConfirmation {
+		return "y:Confirm  n:Cancel"
 	}
 	return ""
 }
@@ -188,6 +229,45 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if s.pendingAction == "delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.selectedInstance = nil
+			s.viewState = ViewList
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		if msg.err != nil {
+			if s.viewState == ViewUpdate {
+				s.updateForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if s.viewState == ViewUpdate {
+			s.viewState = ViewDetail
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -200,6 +280,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		if s.viewState == ViewCreate {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.createInstanceCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdate {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.updateInstanceCmd(*s.selectedInstance)
+			}
+			return s, formCmd
+		}
+
 		if s.viewState == ViewList {
 			result := s.filterSession.HandleKey(msg)
 
@@ -217,6 +321,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "r":
 				return s, s.Refresh()
+			case "n":
+				s.createForm = components.NewForm("New Filestore Instance", []components.FormField{
+					{Label: "Instance ID", Required: true},
+					{Label: "Zone", Required: true},
+					{Label: "Tier", Default: "BASIC_HDD", Required: true},
+					{Label: "Capacity GB", Default: "1024", Required: true},
+					{Label: "File Share Name", Default: "share1", Required: true},
+					{Label: "Network", Default: "default", Required: true},
+				})
+				s.viewState = ViewCreate
+				return s, nil
 			case "enter":
 				instances := s.getFilteredInstances(s.instances, s.filter.Value())
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
@@ -235,6 +350,35 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "esc", "q":
 				s.viewState = ViewList
 				s.selectedInstance = nil
+				return s, nil
+			case "u":
+				if s.selectedInstance != nil {
+					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter":
+				var actionCmd tea.Cmd
+				if s.pendingAction == "delete" && s.selectedInstance != nil {
+					actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
+				}
+				s.viewState = s.actionSource
+				return s, actionCmd
+			case "n", "esc", "q":
+				s.viewState = s.actionSource
+				s.pendingAction = ""
 				return s, nil
 			}
 		}
@@ -260,7 +404,90 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
+
+	if s.viewState == ViewUpdate {
+		return s.updateForm.View()
+	}
+
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
 	return s.renderListView()
+}
+
+// renderConfirmation renders the instance-delete confirmation dialog.
+func (s *Service) renderConfirmation() string {
+	if s.selectedInstance == nil {
+		return "Error: No instance selected"
+	}
+	return components.RenderConfirmationWithMessage(
+		s.pendingAction,
+		s.selectedInstance.Name,
+		"instance",
+		fmt.Sprintf("Are you sure you want to DELETE instance %s? This destroys all file shares and their data.", s.selectedInstance.Name),
+	)
+}
+
+// createInstanceCmd fires the CreateInstance API call using the current
+// createForm values.
+func (s *Service) createInstanceCmd() tea.Cmd {
+	v := s.createForm.Values()
+	opts := InstanceCreateOpts{
+		InstanceID: v["Instance ID"],
+		Zone:       v["Zone"],
+		Tier:       v["Tier"],
+		CapacityGB: v["Capacity GB"],
+		ShareName:  v["File Share Name"],
+		Network:    v["Network"],
+	}
+	s.viewState = ViewList
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateInstance(s.projectID, opts); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating instance %s...", opts.InstanceID)}
+	}
+}
+
+// updateInstanceCmd fires the UpdateInstanceCapacity API call using the
+// current update-form values.
+func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
+	shareName := s.updateForm.Value("File Share Name")
+	capacity, err := strconv.ParseInt(s.updateForm.Value("Capacity GB"), 10, 64)
+	if err != nil || capacity <= 0 {
+		if len(inst.FileShares) > 0 {
+			capacity = inst.FileShares[0].CapacityGB
+		}
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateInstanceCapacity(inst.FullName, shareName, capacity); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Resizing instance %s...", inst.Name)}
+	}
+}
+
+// deleteInstanceCmd triggers deletion of the given Filestore instance
+func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteInstance(inst.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name)}
+	}
 }
 
 func (s *Service) renderListView() string {

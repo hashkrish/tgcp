@@ -143,6 +143,84 @@ func (c *Client) ListFirewalls(projectID string, networkLink string) ([]Firewall
 	return firewalls, nil
 }
 
+// CreateFirewallRule creates a new firewall rule in the given network.
+// Only a single ALLOW/DENY rule with one protocol is supported here — this
+// is a minimal-viable create form, not full parity with `gcloud compute
+// firewall-rules create`.
+func (c *Client) CreateFirewallRule(projectID string, opts FirewallCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+
+	fw := &compute.Firewall{
+		Name:         opts.Name,
+		Network:      fmt.Sprintf("projects/%s/global/networks/%s", projectID, opts.Network),
+		Direction:    opts.Direction,
+		SourceRanges: splitAndTrim(opts.SourceRanges),
+	}
+
+	rule := &compute.FirewallAllowed{
+		IPProtocol: opts.Protocol,
+		Ports:      splitAndTrim(opts.Ports),
+	}
+	if strings.EqualFold(opts.Action, "DENY") {
+		fw.Denied = []*compute.FirewallDenied{{IPProtocol: opts.Protocol, Ports: rule.Ports}}
+	} else {
+		fw.Allowed = []*compute.FirewallAllowed{rule}
+	}
+
+	_, err := c.service.Firewalls.Insert(projectID, fw).Do()
+	return err
+}
+
+// UpdateFirewallPriority patches a firewall rule's priority, matching
+// `gcloud compute firewall-rules update --priority`. Rule action, ports,
+// source/target ranges, and expand-ip-range are out of scope for this
+// minimal Update flow.
+func (c *Client) UpdateFirewallPriority(projectID, name string, priority int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Firewalls.Patch(projectID, name, &compute.Firewall{
+		Priority: priority,
+	}).Do()
+	return err
+}
+
+// DeleteFirewallRule deletes a VPC firewall rule, matching
+// `gcloud compute firewall-rules delete`.
+func (c *Client) DeleteFirewallRule(projectID, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Firewalls.Delete(projectID, name).Do()
+	return err
+}
+
+func splitAndTrim(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Helpers
 
 func extractRegion(url string) string {
