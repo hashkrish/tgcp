@@ -3,6 +3,7 @@ package cloudbuild
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,16 +22,40 @@ const CacheTTL = 30 * time.Second
 
 // BuildItem represents a Cloud Build build
 type BuildItem struct {
-	ID           string
-	Status       string
-	StatusDetail string
-	TriggerID    string
-	CreateTime   time.Time
-	StartTime    time.Time
-	FinishTime   time.Time
-	Duration     time.Duration
-	LogURL       string
-	Images       []string
+	ID             string
+	Status         string
+	StatusDetail   string
+	TriggerID      string
+	CreateTime     time.Time
+	StartTime      time.Time
+	FinishTime     time.Time
+	Duration       time.Duration
+	LogURL         string
+	Images         []string
+	Source         string
+	ServiceAccount string
+	LogsBucket     string
+	Tags           []string
+	Substitutions  map[string]string
+}
+
+// formatSubstitutions renders a build's substitution variables as "key=value" pairs.
+func formatSubstitutions(m map[string]string) string {
+	parts := make([]string, 0, len(m))
+	for k, v := range m {
+		parts = append(parts, k+"="+v)
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// BuildCreateOpts holds the minimal set of fields needed to submit a new
+// build via the Create form.
+type BuildCreateOpts struct {
+	StepImage     string // build step's container image, e.g. gcr.io/cloud-builders/docker
+	StepArgs      string // comma-separated args passed to the step
+	ImageName     string // optional image to record as produced by the build
+	Substitutions string // optional "KEY=value,KEY2=value2"
 }
 
 // Tick message for background refresh
@@ -42,11 +67,19 @@ type ViewState int
 const (
 	ViewList ViewState = iota
 	ViewDetail
+	ViewCreate
+	ViewConfirmation
 )
 
 // Message types for async operations
 type dataMsg []BuildItem
 type errMsg error
+// actionResultMsg carries the result of an async mutating action (e.g.
+// build submission).
+type actionResultMsg struct {
+	err error
+	msg string
+}
 
 // =============================================================================
 // Service Definition
@@ -75,6 +108,12 @@ type Service struct {
 	// View State
 	viewState    ViewState
 	selectedItem *BuildItem
+
+	createForm components.FormModel
+
+	// Confirmation State
+	pendingAction string    // "retry" or "cancel"
+	actionSource  ViewState // Where to return after confirmation
 
 	// Cache
 	cache *core.Cache
@@ -118,9 +157,13 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewList:
-		return "r:Refresh  /:Filter  Enter:Detail"
+		return "r:Refresh  /:Filter  Enter:Detail  s:Submit Build"
 	case ViewDetail:
-		return "Esc/q:Back"
+		return "Esc/q:Back  t:Retry  c:Cancel"
+	case ViewCreate:
+		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
+	case ViewConfirmation:
+		return "y:Confirm  n:Cancel"
 	default:
 		return ""
 	}
@@ -219,6 +262,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case actionResultMsg:
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if msg.msg != "" {
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.Refresh(),
+			)
+		}
+		return s, s.Refresh()
+
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
 		s.height = msg.Height
@@ -243,6 +302,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if s.viewState == ViewCreate {
+		result, formCmd := s.createForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewList
+			return s, nil
+		}
+		if result.Submitted {
+			return s, s.submitBuildCmd()
+		}
+		return s, formCmd
+	}
+
 	if s.viewState == ViewList {
 		result := s.filterSession.HandleKey(msg)
 		if result.Handled {
@@ -257,6 +328,15 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "s":
+			s.createForm = components.NewForm("Submit Build", []components.FormField{
+				{Label: "Step Image", Default: "gcr.io/cloud-builders/docker", Required: true},
+				{Label: "Step Args", Default: "build,-t,gcr.io/PROJECT/IMAGE,.", Required: true},
+				{Label: "Image Name"},
+				{Label: "Substitutions"},
+			})
+			s.viewState = ViewCreate
+			return s, nil
 		case "enter":
 			items := s.getCurrentItems()
 			if idx := s.table.Cursor(); idx >= 0 && idx < len(items) {
@@ -277,6 +357,39 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			s.viewState = ViewList
 			s.selectedItem = nil
+			return s, nil
+		case "t":
+			if s.selectedItem != nil {
+				s.pendingAction = "retry"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+			}
+		case "c":
+			if s.selectedItem != nil {
+				s.pendingAction = "cancel"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+			}
+		}
+	}
+
+	if s.viewState == ViewConfirmation {
+		switch msg.String() {
+		case "y", "enter":
+			var actionCmd tea.Cmd
+			switch s.pendingAction {
+			case "retry":
+				actionCmd = s.retryBuildCmd(*s.selectedItem)
+			case "cancel":
+				actionCmd = s.cancelBuildCmd(*s.selectedItem)
+			}
+			s.viewState = s.actionSource
+			s.pendingAction = ""
+			return s, actionCmd
+
+		case "n", "esc", "q":
+			s.viewState = s.actionSource
+			s.pendingAction = ""
 			return s, nil
 		}
 	}
@@ -300,8 +413,44 @@ func (s *Service) View() string {
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
 	}
+	if s.viewState == ViewConfirmation {
+		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewCreate {
+		return s.createForm.View()
+	}
 
 	return s.renderListView()
+}
+
+// submitBuildCmd fires the CreateBuild API call using the current
+// createForm values.
+func (s *Service) submitBuildCmd() tea.Cmd {
+	v := s.createForm.Values()
+	opts := BuildCreateOpts{
+		StepImage:     v["Step Image"],
+		StepArgs:      v["Step Args"],
+		ImageName:     v["Image Name"],
+		Substitutions: v["Substitutions"],
+	}
+	s.viewState = ViewList
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateBuild(s.projectID, opts); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: "Submitting build..."}
+	}
+}
+
+func (s *Service) renderConfirmation() string {
+	if s.selectedItem == nil {
+		return "Error: No build selected"
+	}
+	return components.RenderConfirmation(s.pendingAction, shortID(s.selectedItem.ID), "build")
 }
 
 func (s *Service) renderListView() string {
@@ -357,6 +506,21 @@ func (s *Service) renderDetailView() string {
 	}
 	if len(s.selectedItem.Images) > 0 {
 		rows = append(rows, components.KeyValue{Key: "Images", Value: strings.Join(s.selectedItem.Images, ", ")})
+	}
+	if s.selectedItem.Source != "" {
+		rows = append(rows, components.KeyValue{Key: "Source", Value: s.selectedItem.Source})
+	}
+	if s.selectedItem.ServiceAccount != "" {
+		rows = append(rows, components.KeyValue{Key: "Service Account", Value: s.selectedItem.ServiceAccount})
+	}
+	if s.selectedItem.LogsBucket != "" {
+		rows = append(rows, components.KeyValue{Key: "Logs Bucket", Value: s.selectedItem.LogsBucket})
+	}
+	if len(s.selectedItem.Tags) > 0 {
+		rows = append(rows, components.KeyValue{Key: "Tags", Value: strings.Join(s.selectedItem.Tags, ", ")})
+	}
+	if len(s.selectedItem.Substitutions) > 0 {
+		rows = append(rows, components.KeyValue{Key: "Substitutions", Value: formatSubstitutions(s.selectedItem.Substitutions)})
 	}
 	if s.selectedItem.LogURL != "" {
 		rows = append(rows, components.KeyValue{Key: "Log URL", Value: s.selectedItem.LogURL})
@@ -458,4 +622,24 @@ func (s *Service) getFilteredItems(items []BuildItem, query string) []BuildItem 
 	return components.FilterSlice(items, query, func(item BuildItem, q string) bool {
 		return components.ContainsMatch(item.ID, item.Status, item.TriggerID, item.StatusDetail)(q)
 	})
+}
+
+func (s *Service) retryBuildCmd(item BuildItem) tea.Cmd {
+	return func() tea.Msg {
+		err := s.client.RetryBuild(s.projectID, item.ID)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Retrying build %s...", shortID(item.ID))}
+	}
+}
+
+func (s *Service) cancelBuildCmd(item BuildItem) tea.Cmd {
+	return func() tea.Msg {
+		err := s.client.CancelBuild(s.projectID, item.ID)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Cancelling build %s...", shortID(item.ID))}
+	}
 }
