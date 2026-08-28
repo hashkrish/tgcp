@@ -159,16 +159,17 @@ func (m ConfirmationModel) View() string {
 	// Combine content
 	content := lipgloss.JoinVertical(lipgloss.Center, parts...)
 
-	// Wrap in styled box with action-specific border color
+	// Wrap in styled box with action-specific border color, clamped to the
+	// current terminal size so it doesn't overflow narrow windows.
 	dialog := styles.OverlayBoxStyle.
 		BorderForeground(style.borderColor).
 		Padding(styles.SpaceS, styles.SpaceL).
-		Width(70).
+		Width(clampDialogWidth(70, 4)).
 		Render(content)
 
 	// Center the dialog
 	return lipgloss.Place(
-		80, 20, // Approximate dimensions
+		globalWidth, globalHeight,
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 	)

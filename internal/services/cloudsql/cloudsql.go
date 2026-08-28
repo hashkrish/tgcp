@@ -145,7 +145,7 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  s:Start  x:Stop  t:Restart  l:Logs  Ent:Detail  c:Create  u:Update  e:Execute SQL  d:Delete"
+		return "r:Refresh  /:Filter  s:Start  x:Stop  t:Restart  l:Logs  Ent:Detail  n:Create  u:Update  e:Execute SQL  d:Delete"
 	}
 	if s.viewState == ViewDetail {
 		return "Esc/q:Back  s:Start  x:Stop  t:Restart  u:Update  e:Execute SQL  d:Delete"
@@ -335,7 +335,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					heading := fmt.Sprintf("Database: %s", inst.Name)
 					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "sql", Heading: heading} }
 				}
-			case "c": // Create
+			case "n": // Create
 				s.createForm = newInstanceCreateForm()
 				s.viewState = ViewCreate
 				return s, nil

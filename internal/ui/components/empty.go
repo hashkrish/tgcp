@@ -65,6 +65,49 @@ var emptyMessages = map[string][]string{
 	"builds": {
 		"No builds running. All quiet.",
 	},
+	"results": {
+		"No rows returned.",
+		"Query ran clean — nothing to show.",
+	},
+	"filestore instances": {
+		"No filestore instances. Nothing to mount yet.",
+	},
+	"networks": {
+		"No networks here. A blank map.",
+	},
+	"subnets": {
+		"No subnets carved out yet.",
+	},
+	"firewalls": {
+		"No firewall rules. Wide open, or not set up yet.",
+	},
+	"instance groups": {
+		"No instance groups. Nothing managed here.",
+	},
+	"messages": {
+		"No messages waiting. Quiet queue.",
+	},
+	"queues": {
+		"No queues configured.",
+	},
+	"repositories": {
+		"No repositories yet. A fresh registry.",
+	},
+	"functions": {
+		"No functions deployed. Nothing to call.",
+	},
+	"IAM bindings": {
+		"No IAM bindings on this resource.",
+	},
+	"tables": {
+		"No tables in this instance.",
+	},
+	"uptime checks": {
+		"No uptime checks configured.",
+	},
+	"alert policies": {
+		"No alert policies configured.",
+	},
 	"default": {
 		"Nothing here yet.",
 		"Quiet in this corner.",

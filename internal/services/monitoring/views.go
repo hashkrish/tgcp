@@ -75,13 +75,13 @@ func (s *Service) renderListView() string {
 	var content string
 	if s.activeTab == TabUptimeChecks {
 		if len(s.uptimeChecks) == 0 {
-			content = components.EmptyState("No Uptime checks configured")
+			content = components.EmptyState("uptime checks")
 		} else {
 			content = s.uptimeTable.View()
 		}
 	} else {
 		if len(s.alertPolicys) == 0 {
-			content = components.EmptyState("No alert policies configured")
+			content = components.EmptyState("alert policies")
 		} else {
 			content = s.alertTable.View()
 		}

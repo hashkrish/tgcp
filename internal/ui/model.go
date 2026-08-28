@@ -706,6 +706,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width
 		m.Height = msg.Height
+		components.SetGlobalSize(msg.Width, msg.Height)
 
 		availableHeight := msg.Height - 1
 		m.Sidebar.Height = availableHeight

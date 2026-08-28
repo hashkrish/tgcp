@@ -175,7 +175,7 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		if s.activeTab == TabServices {
-			return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail  c:Create  u:Update  d:Delete"
+			return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail  n:Create  u:Update  d:Delete"
 		}
 		return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail"
 	}
@@ -444,7 +444,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "run", Heading: heading} }
 					}
 				}
-			case "c": // Create (Services tab only)
+			case "n": // Create (Services tab only)
 				if s.activeTab == TabServices {
 					s.createForm = newServiceCreateForm()
 					s.viewState = ViewCreate

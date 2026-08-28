@@ -121,7 +121,7 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  Ent:Detail  c:Create  u:Update  d:Delete"
+		return "r:Refresh  /:Filter  Ent:Detail  n:Create  u:Update  d:Delete"
 	}
 	if s.viewState == ViewDetail {
 		return "Esc/q:Back  s:Snapshot  u:Update  d:Delete"
@@ -288,7 +288,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.selectedDisk = &disks[idx]
 					s.viewState = ViewDetail
 				}
-			case "c": // Create
+			case "n": // Create
 				s.createForm = newDiskCreateForm()
 				s.viewState = ViewCreate
 				return s, nil

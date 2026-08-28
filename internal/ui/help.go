@@ -42,9 +42,19 @@ func HelpView(width, height int) string {
 				{"l", "Log Tailing"},
 				{"K", "k9s Shell (GKE)"},
 				{"[ ]", "Switch Tab"},
+				{"n", "Create (where supported)"},
+				{"u", "Update (where supported)"},
+				{"d", "Delete (where supported)"},
+				{"i", "IAM Bindings (where supported)"},
 			},
 		},
 	}
+
+	// Actions vary a lot per service (Lifecycle keys especially — reset,
+	// suspend, failover, pause, etc. differ by resource type), so this
+	// screen only covers the keys that are consistent across services; the
+	// status bar in each view shows the exact keys available there.
+	helpFooterNote := "Per-view keys (Lifecycle actions, etc.) are shown in the status bar at the bottom of each screen."
 
 	// Calculate column widths adaptively
 	var columns []string
@@ -113,6 +123,7 @@ func HelpView(width, height int) string {
 	// Get Banner
 	banner := GetBanner()
 
+	note := styles.SubtleStyle.Width(contentWidth).Align(lipgloss.Center).Render(helpFooterNote)
 	footer := styles.SubtleStyle.Render("Press ? or Esc to close")
 
 	dialog := styles.PrimaryBoxStyle.
@@ -125,6 +136,7 @@ func HelpView(width, height int) string {
 			"",
 			content,
 			"",
+			note,
 			footer,
 		))
 

@@ -148,7 +148,7 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  K:k9s  l:Logs  Ent:Detail  c:Create"
+		return "r:Refresh  /:Filter  K:k9s  l:Logs  Ent:Detail  n:Create"
 	}
 	if s.viewState == ViewDetail {
 		return "Esc/q:Back  K:k9s  u:Update (resize node pool)  d:Delete"
@@ -332,7 +332,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					heading := fmt.Sprintf("Cluster: %s", c.Name)
 					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "gke", Heading: heading} }
 				}
-			case "c": // Create
+			case "n": // Create
 				s.createForm = newClusterCreateForm()
 				s.viewState = ViewCreate
 				return s, nil

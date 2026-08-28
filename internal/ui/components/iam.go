@@ -49,9 +49,40 @@ func RenderIAMBindings(breadcrumb string, resourceName string, rows []IAMBinding
 // and set the merged result rather than replacing the whole policy.
 func NewIAMAddBindingForm(resourceName string) FormModel {
 	return NewForm("Add IAM Binding: "+resourceName, []FormField{
-		{Label: "Role", Placeholder: "roles/viewer", Required: true},
-		{Label: "Member", Placeholder: "user:name@example.com", Required: true},
+		{Label: "Role", Placeholder: "roles/viewer", Required: true, Validate: validateIAMRole},
+		{Label: "Member", Placeholder: "user:name@example.com", Required: true, Validate: validateIAMMember},
 	})
+}
+
+// validateIAMRole catches the most common typo before it reaches the API: a
+// missing `roles/` (predefined) or `.../roles/` (custom role) prefix. It
+// deliberately doesn't check the role name itself exists, since that would
+// require an API call this form has no way to make.
+func validateIAMRole(value string) string {
+	if strings.HasPrefix(value, "roles/") ||
+		strings.Contains(value, "/roles/") {
+		return ""
+	}
+	return "must start with roles/ (or a custom role path ending in /roles/<name>)"
+}
+
+// validateIAMMember catches a missing member-type prefix, the most common
+// mistake when hand-typing `gcloud ... --member=` values (e.g. pasting a
+// bare email instead of `user:email` or `serviceAccount:email`).
+func validateIAMMember(value string) string {
+	switch {
+	case value == "allUsers", value == "allAuthenticatedUsers":
+		return ""
+	case strings.HasPrefix(value, "user:"),
+		strings.HasPrefix(value, "serviceAccount:"),
+		strings.HasPrefix(value, "group:"),
+		strings.HasPrefix(value, "domain:"),
+		strings.HasPrefix(value, "principal:"),
+		strings.HasPrefix(value, "principalSet:"):
+		return ""
+	default:
+		return "must start with user:, serviceAccount:, group:, or domain: (or be allUsers/allAuthenticatedUsers)"
+	}
 }
 
 // IAMConfirmMessage builds the standard confirmation text for an

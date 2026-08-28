@@ -210,7 +210,7 @@ func (s *Service) HelpText() string {
 	case ViewList:
 		return "r:Refresh  /:Filter  Enter:Detail  n:New Repository"
 	case ViewDetail:
-		return "Esc/q:Back  u:Update  d:Delete  i:Images  g:IAM"
+		return "Esc/q:Back  u:Update  d:Delete  m:Images  i:IAM"
 	case ViewImages:
 		return "Esc/q:Back  /:Filter  d:Delete"
 	case ViewConfirmation:
@@ -541,12 +541,12 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewConfirmation
 			}
 			return s, nil
-		case "i":
+		case "m":
 			if s.selectedItem != nil {
 				s.viewState = ViewImages
 				return s, tea.Batch(s.spinner.Start(""), s.fetchImagesCmd(*s.selectedItem, false))
 			}
-		case "g":
+		case "i":
 			if s.selectedItem != nil {
 				return s, tea.Batch(s.fetchIAMCmd(*s.selectedItem), s.spinner.Start(""))
 			}

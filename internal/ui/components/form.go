@@ -236,11 +236,11 @@ func (m FormModel) View() string {
 	dialog := styles.OverlayBoxStyle.
 		BorderForeground(styles.ColorInfo).
 		Padding(styles.SpaceS, styles.SpaceL).
-		Width(60).
+		Width(clampDialogWidth(60, 4)).
 		Render(content)
 
 	return lipgloss.Place(
-		80, 24,
+		globalWidth, globalHeight,
 		lipgloss.Center, lipgloss.Center,
 		dialog,
 	)

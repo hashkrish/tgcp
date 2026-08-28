@@ -91,10 +91,24 @@ func (m StatusBarModel) View() string {
 	// Layout: ┃ MODE ┃ Message ............... │ Help Hints
 	mode := modeStyle.Render(modeLabel)
 
-	// Right side: Help hints only (removed timestamp)
+	// Right side: Help hints only (removed timestamp). Reserve a minimum
+	// width for the message so a long HelpText can't push it to zero and
+	// wrap the whole status bar off-screen on a narrow terminal.
+	const minInfoWidth = 12
+	sepWidth := lipgloss.Width(sep)
+	helpText := m.HelpText
+	if helpText != "" {
+		maxHelpWidth := m.Width - lipgloss.Width(mode) - 1 - sepWidth - minInfoWidth
+		if maxHelpWidth < 0 {
+			maxHelpWidth = 0
+		}
+		if lipgloss.Width(helpText) > maxHelpWidth {
+			helpText = truncateToWidth(helpText, maxHelpWidth)
+		}
+	}
 	rightSide := ""
-	if m.HelpText != "" {
-		rightSide = sep + helpStyle.Render(m.HelpText)
+	if helpText != "" {
+		rightSide = sep + helpStyle.Render(helpText)
 	}
 
 	// Calculate available width for message

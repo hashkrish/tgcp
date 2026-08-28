@@ -163,7 +163,7 @@ func (s *Service) HelpText() string {
 		if s.activeTab == TabInstanceGroups {
 			return "[]:Tabs  r:Refresh  u:Update (resize)  d:Delete"
 		}
-		return "[]:Tabs  r:Refresh  /:Filter  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  h:SSH  l:Logs  Ent:Detail  c:Create  u:Update  d:Delete"
+		return "[]:Tabs  r:Refresh  /:Filter  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  h:SSH  l:Logs  Ent:Detail  n:Create  u:Update  d:Delete"
 	}
 	if s.viewState == ViewDetail {
 		return "Esc/q:Back  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  h:SSH  u:Update  d:Delete"
@@ -432,7 +432,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					heading := fmt.Sprintf("VM Instance: %s (ID: %s)", inst.Name, inst.ID)
 					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "gce", Heading: heading} }
 				}
-			case "c": // Create
+			case "n": // Create
 				s.createForm = newInstanceCreateForm()
 				s.viewState = ViewCreate
 				return s, nil
