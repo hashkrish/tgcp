@@ -9,6 +9,7 @@ import (
 	"cloud.google.com/go/cloudtasks/apiv2/cloudtaskspb"
 	"github.com/yogirk/tgcp/internal/demo"
 	locationpb "google.golang.org/genproto/googleapis/cloud/location"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 )
 
 type Client struct {
@@ -113,4 +114,101 @@ func toQueue(q *cloudtaskspb.Queue, location string) Queue {
 func shortName(longName string) string {
 	parts := strings.Split(longName, "/")
 	return parts[len(parts)-1]
+}
+
+// CreateQueue creates a new Cloud Tasks queue with the given short queue ID
+// in the given location.
+func (c *Client) CreateQueue(projectID, location, queueID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("cloudtasks client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)
+	name := fmt.Sprintf("%s/queues/%s", parent, queueID)
+	_, err := c.client.CreateQueue(context.Background(), &cloudtaskspb.CreateQueueRequest{
+		Parent: parent,
+		Queue:  &cloudtaskspb.Queue{Name: name},
+	})
+	return err
+}
+
+// DeleteQueue deletes a Cloud Tasks queue, matching
+// `gcloud tasks queues delete`.
+func (c *Client) DeleteQueue(projectID, location, queueID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("cloudtasks client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/queues/%s", projectID, location, queueID)
+	return c.client.DeleteQueue(context.Background(), &cloudtaskspb.DeleteQueueRequest{Name: name})
+}
+
+// PauseQueue pauses a queue, matching `gcloud tasks queues pause`. A paused
+// queue stops dispatching tasks but continues to accept new ones.
+func (c *Client) PauseQueue(projectID, location, queueID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("cloudtasks client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/queues/%s", projectID, location, queueID)
+	_, err := c.client.PauseQueue(context.Background(), &cloudtaskspb.PauseQueueRequest{Name: name})
+	return err
+}
+
+// ResumeQueue resumes a paused (or disabled) queue, matching
+// `gcloud tasks queues resume`.
+func (c *Client) ResumeQueue(projectID, location, queueID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("cloudtasks client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/queues/%s", projectID, location, queueID)
+	_, err := c.client.ResumeQueue(context.Background(), &cloudtaskspb.ResumeQueueRequest{Name: name})
+	return err
+}
+
+// PurgeQueue deletes every task currently queued in a queue without
+// deleting the queue itself, matching `gcloud tasks queues purge`.
+func (c *Client) PurgeQueue(projectID, location, queueID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("cloudtasks client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/queues/%s", projectID, location, queueID)
+	_, err := c.client.PurgeQueue(context.Background(), &cloudtaskspb.PurgeQueueRequest{Name: name})
+	return err
+}
+
+// UpdateQueueMaxDispatchRate patches a queue's max dispatches-per-second
+// rate limit, matching `gcloud tasks queues update --max-dispatches-per-second`.
+// Max concurrent dispatches, retry config, and app-engine routing overrides
+// are out of scope for this minimal Update flow.
+func (c *Client) UpdateQueueMaxDispatchRate(projectID, location, queueID string, maxDispatchRate float64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("cloudtasks client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/queues/%s", projectID, location, queueID)
+	_, err := c.client.UpdateQueue(context.Background(), &cloudtaskspb.UpdateQueueRequest{
+		Queue: &cloudtaskspb.Queue{
+			Name: name,
+			RateLimits: &cloudtaskspb.RateLimits{
+				MaxDispatchesPerSecond: maxDispatchRate,
+			},
+		},
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"rate_limits.max_dispatches_per_second"}},
+	})
+	return err
 }

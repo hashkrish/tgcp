@@ -8,6 +8,12 @@ type Topic struct {
 	MessageStorage string // Config info
 }
 
+// IAMBinding is a single role -> members pair from a topic's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}
+
 type Subscription struct {
 	Name              string
 	Topic             string
