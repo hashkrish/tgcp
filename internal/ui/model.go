@@ -93,6 +93,11 @@ type MainModel struct {
 	ServiceRegistry *core.ServiceRegistry
 	Cache           *core.Cache
 
+	// Config is the loaded ~/.tgcprc, kept around (rather than only consulted
+	// at startup) so runtime features like the configured-projects quick
+	// switcher (Ctrl+g) can read it.
+	Config *config.Config
+
 	// Version Info
 	Version    core.VersionInfo
 	UpdateInfo *core.UpdateInfo // nil until checked
@@ -141,6 +146,7 @@ func InitialModel(authState core.AuthState, cfg *config.Config, version core.Ver
 		ProjectManager:  core.NewProjectManager(cache),
 		ServiceRegistry: registry,
 		Cache:           cache,
+		Config:          cfg,
 		Version:         version,
 	}
 }
@@ -225,6 +231,39 @@ func (m *MainModel) getOrInitializeService(ctx context.Context, serviceName stri
 	}
 
 	return nil, nil // Service not found
+}
+
+// showConfiguredProjectSwitcher populates the palette with the projects
+// listed under `projects:` in ~/.tgcprc, so the user can jump straight to one
+// of their known projects without waiting on a Cloud Resource Manager API
+// call. Selecting an entry routes through the same "SWITCH_PROJECT:<id>"
+// mechanism as the API-backed switcher.
+func (m *MainModel) showConfiguredProjectSwitcher() {
+	var cmds []core.Command
+	if m.Config != nil {
+		for _, p := range m.Config.Projects {
+			p := p // capture
+			label := p.Name
+			if label == "" {
+				label = p.ID
+			}
+			cmds = append(cmds, core.Command{
+				Name:        p.ID,
+				Description: label,
+				Action: func() core.Route {
+					return core.Route{View: core.ViewHome, ID: "SWITCH_PROJECT:" + p.ID}
+				},
+			})
+		}
+	}
+
+	if len(cmds) == 0 {
+		m.StatusBar.Message = "No projects configured — add a `projects:` list to ~/.tgcprc"
+		return
+	}
+
+	m.Navigation.SetCommands(cmds)
+	m.StatusBar.Message = "Switch to configured project..."
 }
 
 // Update handles messages and updates the model
@@ -346,6 +385,20 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break // let filter input receive "?"
 				}
 				m.ShowHelp = !m.ShowHelp
+				return m, nil
+			case "ctrl+g":
+				// Quick-switch between projects defined in ~/.tgcprc --
+				// distinct from the ":" command palette's API-backed "GCP:
+				// Switch Project", which lists every project the account can
+				// see and requires a network round-trip.
+				if m.ViewMode == ViewHome && m.HomeMenu.FilterActive() {
+					break // let filter input receive it, consistent with ":" and "?"
+				}
+				m.showConfiguredProjectSwitcher()
+				m.LastFocus = m.Focus
+				m.setFocus(FocusPalette)
+				m.Navigation.PaletteActive = true
+				m.StatusBar.Mode = "COMMAND"
 				return m, nil
 			case "ctrl+b":
 				// Sidebar show/hide -- moved off Tab (see below) since Tab
@@ -500,6 +553,11 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.StatusBar.Message = "Fetching projects..."
 						m.setFocus(FocusPalette)
 						return m, tea.Batch(cmds...)
+					case core.ViewQuickProjectSwitcher:
+						// No API call needed -- list is synchronous, from config.
+						m.showConfiguredProjectSwitcher()
+						m.setFocus(FocusPalette)
+						return m, nil
 					}
 					// Close Palette. Which focus to restore depends on where we
 					// just navigated to -- NOT always m.LastFocus (the focus

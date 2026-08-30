@@ -105,6 +105,15 @@ The left-side sidebar is hidden by default (toggle it anytime with `Ctrl+b`); se
 project: "my-default-project"
 ui:
   sidebar_visible: true
+
+# Optional: a fixed list of projects to jump between with Ctrl+g (the quick
+# project switcher), instead of paging through every project your account
+# can see.
+projects:
+  - id: "my-default-project"
+    name: "Prod"
+  - id: "my-dev-project"
+    name: "Dev"
 ```
 
 ### CLI Options
@@ -127,6 +136,7 @@ ui:
 | `/` | Filter current list |
 | `Ctrl+c` | Force Quit |
 | `Ctrl+b` | Toggle Sidebar visibility |
+| `Ctrl+g` | Quick-switch to a project from `~/.tgcprc`'s `projects:` list |
 
 #### Navigation
 | Key | Action |

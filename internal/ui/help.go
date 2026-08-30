@@ -18,6 +18,7 @@ func HelpView(width, height int) string {
 			"Global",
 			[][]string{
 				{":", "Command Palette"},
+				{"Ctrl+g", "Quick-switch Configured Project"},
 				{"?", "Toggle Help"},
 				{"Tab / Shift+Tab", "Next / Prev Tab (where supported)"},
 				{"Ctrl+b", "Toggle Sidebar"},

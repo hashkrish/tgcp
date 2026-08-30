@@ -8,11 +8,21 @@ import (
 )
 
 type Config struct {
-	Project  string         `yaml:"project"`
-	Region   string         `yaml:"region"`
-	Zone     string         `yaml:"zone"`
-	UI       UIConfig       `yaml:"ui"`
-	Features FeaturesConfig `yaml:"features"`
+	Project  string              `yaml:"project"`
+	Region   string              `yaml:"region"`
+	Zone     string              `yaml:"zone"`
+	UI       UIConfig            `yaml:"ui"`
+	Features FeaturesConfig      `yaml:"features"`
+	Projects []ConfiguredProject `yaml:"projects"`
+}
+
+// ConfiguredProject is one entry in the `projects:` list in ~/.tgcprc,
+// letting a user define a fixed set of GCP projects to jump between with the
+// quick project switcher (Ctrl+g) instead of paging through every project
+// their account can see via the Cloud Resource Manager API.
+type ConfiguredProject struct {
+	ID   string `yaml:"id"`
+	Name string `yaml:"name"`
 }
 
 type UIConfig struct {

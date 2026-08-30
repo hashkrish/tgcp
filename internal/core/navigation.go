@@ -15,6 +15,10 @@ const (
 	ViewResourceDetail
 	ViewHelp
 	ViewProjectSwitcher
+	// ViewQuickProjectSwitcher lists only the projects defined in the
+	// `projects:` section of ~/.tgcprc -- unlike ViewProjectSwitcher, it
+	// never calls the Cloud Resource Manager API, so it resolves instantly.
+	ViewQuickProjectSwitcher
 )
 
 // Route represents a navigational destination
@@ -91,6 +95,7 @@ func NewNavigation() NavigationModel {
 func defaultCommands() []Command {
 	return []Command{
 		{Name: "GCP: Switch Project", Description: "Switch active Google Cloud Project", Action: func() Route { return Route{View: ViewProjectSwitcher} }},
+		{Name: "GCP: Switch Project (Configured)", Description: "Quick-switch between projects defined in ~/.tgcprc (Ctrl+g)", Action: func() Route { return Route{View: ViewQuickProjectSwitcher} }},
 		{Name: "Home", Description: "Go to Home Screen", Action: func() Route { return Route{View: ViewHome} }},
 		{Name: "Help", Description: "Show Help Screen", Action: func() Route { return Route{View: ViewHelp} }},
 	}
