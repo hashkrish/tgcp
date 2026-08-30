@@ -87,9 +87,9 @@
 - [x] KMS: no crypto-key-level IAM — add-only `GetCryptoKeyIAMPolicy`/`AddCryptoKeyIAMBinding` (`i` in Keys view); remove/set declined.
 - [x] KMS: no remove/set-iam-policy (raw) — **Declined** (lockout-risk repo policy); add already existed at both key-ring and crypto-key level.
 - [x] KMS: no import/export-trusted-key-wrapped — **Declined**: this is a multi-step interactive key-wrapping ceremony (generate a wrapping key, wrap the external key material with OpenSSL/a tool outside this app, then submit the wrapped blob) rather than a single form submission; doesn't fit this app's one-shot mutating-action pattern.
-- [ ] Cloud DNS: no zone/record update
-- [ ] Cloud DNS: no IAM
-- [ ] Cloud DNS: no record-sets transaction/export/import
+- [x] Cloud DNS: no zone/record update — zone description update (`u` in zones list) and record-set TTL/data update (`u` in records view) added.
+- [x] Cloud DNS: no IAM — add-only `GetZoneIAMPolicy`/`AddZoneIAMBinding` (`i` in zones list, verified real via `go doc dns/v1 ManagedZonesService`); remove/set declined (lockout risk).
+- [x] Cloud DNS: no record-sets transaction/export/import — **Declined**: the transaction API (start/add/remove/execute as a batch) and BIND-zone-file export/import are a different interaction model (multi-step staged edits, file I/O) than this codebase's direct record CRUD (list/update; create/delete were never in scope here and remain a separate follow-up).
 
 ### Networking
 - [x] VPC: networks/subnets not covered at all (firewall rules only) — Create/Delete for networks (list view) and subnets (network detail, Subnets tab).

@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,10 @@ const (
 	ViewRecords
 	ViewCreate
 	ViewConfirmation
+	ViewUpdateZone
+	ViewIAM
+	ViewIAMForm
+	ViewUpdateRecord
 )
 
 type zonesMsg []Zone
@@ -37,6 +42,30 @@ type errMsg error
 type actionResultMsg struct {
 	err error
 	msg string
+}
+
+// iamPolicyMsg carries the result of a GetZoneIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
+}
+
+// newZoneUpdateForm builds the FormModel for updating a zone's
+// description, seeded with its current value. DNSSEC config and other zone
+// fields are out of scope for this minimal Update flow.
+func newZoneUpdateForm(z Zone) components.FormModel {
+	return components.NewForm("Update Zone: "+z.Name, []components.FormField{
+		{Label: "Description", Default: z.Description},
+	})
+}
+
+// newRecordUpdateForm builds the FormModel for updating an existing record
+// set's TTL and data, seeded with its current values.
+func newRecordUpdateForm(r RecordSet) components.FormModel {
+	return components.NewForm("Update Record: "+r.Name+" ("+r.Type+")", []components.FormField{
+		{Label: "TTL", Default: fmt.Sprintf("%d", r.TTL), Required: true},
+		{Label: "Data (comma-separated)", Default: strings.Join(r.Rrdatas, ","), Required: true},
+	})
 }
 
 // -----------------------------------------------------------------------------
@@ -58,13 +87,23 @@ type Service struct {
 	spinner components.SpinnerModel
 	err     error
 
-	viewState    ViewState
-	selectedZone *Zone
+	viewState      ViewState
+	selectedZone   *Zone
+	selectedRecord *RecordSet
 
-	createForm components.FormModel
+	createForm       components.FormModel
+	updateZoneForm   components.FormModel
+	updateRecordForm components.FormModel
+	iamForm          components.FormModel
+
+	// IAM State: current bindings for the selected zone, and the
+	// add-binding form.
+	iamBindings      []IAMBinding
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "grant"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -110,12 +149,14 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewZones:
-		return "r:Refresh  /:Filter  n:New Zone  Ent:Records  d:Delete"
+		return "r:Refresh  /:Filter  n:New Zone  Ent:Records  u:Update  i:IAM  d:Delete"
 	case ViewRecords:
-		return "Esc/q:Back"
+		return "Esc/q:Back  u:Update Record"
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
-	case ViewCreate:
+	case ViewIAM:
+		return "a:Add Binding  q/Esc:Back"
+	case ViewCreate, ViewUpdateZone, ViewIAMForm, ViewUpdateRecord:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
@@ -168,7 +209,10 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewZones
 	s.selectedZone = nil
+	s.selectedRecord = nil
 	s.records = nil
+	s.iamBindings = nil
+	s.pendingAction = ""
 	s.err = nil
 	s.zoneTable.SetCursor(0)
 	s.recordTable.SetCursor(0)
@@ -222,6 +266,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
@@ -238,6 +293,44 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				},
 				s.Refresh(),
 			)
+		}
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedZone != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedZone),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.viewState == ViewUpdateZone {
+			if msg.err != nil {
+				s.updateZoneForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			s.viewState = ViewZones
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.Refresh(),
+			)
+		}
+		if s.viewState == ViewUpdateRecord {
+			if msg.err != nil {
+				s.updateRecordForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			s.viewState = ViewRecords
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			if s.selectedZone != nil {
+				return s, tea.Batch(toast, s.fetchRecordsCmd(s.selectedZone.Name))
+			}
+			return s, toast
 		}
 		if msg.err != nil {
 			s.createForm.SubmitErr = msg.err.Error()
@@ -336,6 +429,20 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewConfirmation
 				return s, nil
 			}
+		case "u":
+			zones := s.getFilteredZones(s.zones, s.filter.Value())
+			if idx := s.zoneTable.Cursor(); idx >= 0 && idx < len(zones) {
+				s.selectedZone = &zones[idx]
+				s.updateZoneForm = newZoneUpdateForm(*s.selectedZone)
+				s.viewState = ViewUpdateZone
+				return s, nil
+			}
+		case "i":
+			zones := s.getFilteredZones(s.zones, s.filter.Value())
+			if idx := s.zoneTable.Cursor(); idx >= 0 && idx < len(zones) {
+				s.selectedZone = &zones[idx]
+				return s, tea.Batch(s.fetchIAMCmd(*s.selectedZone), s.spinner.Start(""))
+			}
 		}
 
 		var updatedTable *components.StandardTable
@@ -344,12 +451,57 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return s, cmd
 	}
 
+	if s.viewState == ViewUpdateZone {
+		result, formCmd := s.updateZoneForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewZones
+			return s, nil
+		}
+		if result.Submitted && s.selectedZone != nil {
+			return s, s.updateZoneCmd(*s.selectedZone, s.updateZoneForm.Value("Description"))
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewIAM {
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewZones
+			return s, nil
+		case "a":
+			if s.selectedZone != nil {
+				s.iamForm = components.NewIAMAddBindingForm(s.selectedZone.Name)
+				s.viewState = ViewIAMForm
+			}
+			return s, nil
+		}
+	}
+
+	if s.viewState == ViewIAMForm {
+		result, formCmd := s.iamForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewIAM
+			return s, nil
+		}
+		if result.Submitted && s.selectedZone != nil {
+			s.pendingIAMRole = s.iamForm.Value("Role")
+			s.pendingIAMMember = s.iamForm.Value("Member")
+			s.pendingAction = "grant"
+			s.actionSource = ViewIAM
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+	}
+
 	if s.viewState == ViewConfirmation {
 		switch msg.String() {
 		case "y", "enter":
 			var actionCmd tea.Cmd
 			if s.pendingAction == "delete" && s.selectedZone != nil {
 				actionCmd = s.deleteZoneCmd(*s.selectedZone)
+			} else if s.pendingAction == "grant" && s.selectedZone != nil {
+				actionCmd = s.addIAMBindingCmd(*s.selectedZone, s.pendingIAMRole, s.pendingIAMMember)
 			}
 			s.viewState = s.actionSource
 			return s, actionCmd
@@ -369,12 +521,40 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.selectedZone = nil
 			s.records = nil
 			return s, nil
+		case "u":
+			if idx := s.recordTable.Cursor(); idx >= 0 && idx < len(s.records) {
+				s.selectedRecord = &s.records[idx]
+				s.updateRecordForm = newRecordUpdateForm(*s.selectedRecord)
+				s.viewState = ViewUpdateRecord
+				return s, nil
+			}
 		}
 
 		var updatedTable *components.StandardTable
 		updatedTable, cmd = s.recordTable.Update(msg)
 		s.recordTable = updatedTable
 		return s, cmd
+	}
+
+	if s.viewState == ViewUpdateRecord {
+		result, formCmd := s.updateRecordForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewRecords
+			return s, nil
+		}
+		if result.Submitted && s.selectedZone != nil && s.selectedRecord != nil {
+			ttl, err := strconv.ParseInt(s.updateRecordForm.Value("TTL"), 10, 64)
+			if err != nil {
+				s.updateRecordForm.SubmitErr = "TTL must be a whole number of seconds"
+				return s, nil
+			}
+			rrdatas := strings.Split(s.updateRecordForm.Value("Data (comma-separated)"), ",")
+			for i := range rrdatas {
+				rrdatas[i] = strings.TrimSpace(rrdatas[i])
+			}
+			return s, s.updateRecordCmd(*s.selectedZone, *s.selectedRecord, ttl, rrdatas)
+		}
+		return s, formCmd
 	}
 
 	return s, nil
@@ -405,7 +585,43 @@ func (s *Service) View() string {
 		return s.renderConfirmation()
 	}
 
+	if s.viewState == ViewUpdateZone {
+		return s.updateZoneForm.View()
+	}
+
+	if s.viewState == ViewUpdateRecord {
+		return s.updateRecordForm.View()
+	}
+
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
 	return s.renderListView()
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// zone, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedZone == nil {
+		return "Error: No zone selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Zones",
+		s.selectedZone.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedZone.Name, rows)
 }
 
 // renderConfirmation renders the zone-delete confirmation dialog.
@@ -465,6 +681,59 @@ func (s *Service) deleteZoneCmd(zone Zone) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting zone %s...", zone.Name)}
+	}
+}
+
+// updateZoneCmd patches zone's description.
+func (s *Service) updateZoneCmd(zone Zone, description string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateZoneDescription(s.projectID, zone.Name, description); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updated zone %s", zone.Name)}
+	}
+}
+
+// updateRecordCmd replaces record's TTL and rrdata.
+func (s *Service) updateRecordCmd(zone Zone, record RecordSet, ttl int64, rrdatas []string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateRecordSet(s.projectID, zone.Name, record.Name, record.Type, ttl, rrdatas); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updated record %s", record.Name)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a zone.
+func (s *Service) fetchIAMCmd(zone Zone) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetZoneIAMPolicy(s.projectID, zone.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given zone.
+func (s *Service) addIAMBindingCmd(zone Zone, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddZoneIAMBinding(s.projectID, zone.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on zone %s", role, member, zone.Name)}
 	}
 }
 

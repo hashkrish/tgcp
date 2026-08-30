@@ -16,3 +16,9 @@ type RecordSet struct {
 	TTL     int64
 	Rrdatas []string
 }
+
+// IAMBinding is one role -> members grant from a zone's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}

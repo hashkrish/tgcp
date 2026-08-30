@@ -121,6 +121,104 @@ func (c *Client) DeleteZone(projectID, zoneName string) error {
 	return c.service.ManagedZones.Delete(projectID, zoneName).Do()
 }
 
+// UpdateZoneDescription patches a zone's description, matching
+// `gcloud dns managed-zones update --description`. DNSSEC config and other
+// zone fields are out of scope for this minimal Update flow.
+func (c *Client) UpdateZoneDescription(projectID, zoneName, description string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	_, err := c.service.ManagedZones.Patch(projectID, zoneName, &gdns.ManagedZone{Description: description}).Do()
+	return err
+}
+
+// GetZoneIAMPolicy reads a zone's current IAM policy, matching
+// `gcloud dns managed-zones get-iam-policy`. Used as the "look before you
+// grant" read step before AddZoneIAMBinding.
+func (c *Client) GetZoneIAMPolicy(projectID, zoneName string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("dns client not initialized")
+	}
+	policy, err := c.service.ManagedZones.GetIamPolicy(zoneName, &gdns.GoogleIamV1GetIamPolicyRequest{}).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get zone IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddZoneIAMBinding grants a role to a member on a zone, matching
+// `gcloud dns managed-zones add-iam-policy-binding`. It fetches the
+// current policy, merges the new binding into it, and writes the whole
+// policy back -- this never drops any existing binding, unlike a raw
+// set-iam-policy.
+func (c *Client) AddZoneIAMBinding(projectID, zoneName, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	policy, err := c.service.ManagedZones.GetIamPolicy(zoneName, &gdns.GoogleIamV1GetIamPolicyRequest{}).Do()
+	if err != nil {
+		return fmt.Errorf("get zone IAM policy: %w", err)
+	}
+	found := false
+	for _, b := range policy.Bindings {
+		if b.Role != role {
+			continue
+		}
+		found = true
+		alreadyMember := false
+		for _, m := range b.Members {
+			if m == member {
+				alreadyMember = true
+				break
+			}
+		}
+		if !alreadyMember {
+			b.Members = append(b.Members, member)
+		}
+		break
+	}
+	if !found {
+		policy.Bindings = append(policy.Bindings, &gdns.GoogleIamV1Binding{Role: role, Members: []string{member}})
+	}
+	_, err = c.service.ManagedZones.SetIamPolicy(zoneName, &gdns.GoogleIamV1SetIamPolicyRequest{Policy: policy}).Do()
+	return err
+}
+
+// UpdateRecordSet replaces an existing record set's TTL and rrdata,
+// matching `gcloud dns record-sets update`. name/recordType identify the
+// existing record; the API requires the full replacement record shape
+// (there's no partial-field patch), so both TTL and rrdatas must be
+// supplied.
+func (c *Client) UpdateRecordSet(projectID, zoneName, name, recordType string, ttl int64, rrdatas []string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	rrset := &gdns.ResourceRecordSet{
+		Name:    name,
+		Type:    recordType,
+		Ttl:     ttl,
+		Rrdatas: rrdatas,
+	}
+	_, err := c.service.ResourceRecordSets.Patch(projectID, zoneName, name, recordType, rrset).Do()
+	return err
+}
+
 func toZone(z *gdns.ManagedZone) Zone {
 	visibility := strings.ToUpper(z.Visibility)
 	if visibility == "" {
