@@ -69,11 +69,18 @@ const (
 	ViewDetail
 	ViewCreate
 	ViewConfirmation
+	ViewTriggers
+	ViewTriggerCreate
+	ViewWorkerPools
+	ViewWorkerPoolCreate
+	ViewConnections
+	ViewCBRepositories
 )
 
 // Message types for async operations
 type dataMsg []BuildItem
 type errMsg error
+
 // actionResultMsg carries the result of an async mutating action (e.g.
 // build submission).
 type actionResultMsg struct {
@@ -112,8 +119,31 @@ type Service struct {
 	createForm components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "retry" or "cancel"
+	pendingAction string    // "retry", "cancel", "run-trigger", "delete-trigger", "delete-worker-pool", "delete-connection", "delete-repository"
 	actionSource  ViewState // Where to return after confirmation
+
+	// Triggers sub-view state
+	triggers        []TriggerItem
+	triggersTable   *components.StandardTable
+	selectedTrigger *TriggerItem
+	triggerForm     components.FormModel
+
+	// Worker Pools sub-view state (regional; wpRegion is set by the Create
+	// form and reused for subsequent list refreshes)
+	workerPools        []WorkerPoolItem
+	workerPoolsTable   *components.StandardTable
+	selectedWorkerPool *WorkerPoolItem
+	workerPoolForm     components.FormModel
+	wpRegion           string
+
+	// Connections/Repositories (2nd-gen) sub-view state
+	connections          []ConnectionItem
+	connectionsTable     *components.StandardTable
+	selectedConnection   *ConnectionItem
+	connRegion           string
+	cbRepositories       []CBRepositoryItem
+	cbRepositoriesTable  *components.StandardTable
+	selectedCBRepository *CBRepositoryItem
 
 	// Cache
 	cache *core.Cache
@@ -132,12 +162,18 @@ func NewService(cache *core.Cache) *Service {
 	t := components.NewStandardTable(columns)
 
 	svc := &Service{
-		table:     t,
-		filter:    components.NewFilterWithPlaceholder("Filter items..."),
-		spinner:   components.NewSpinner(),
-		viewState: ViewList,
-		cache:     cache,
-		loaded:    false,
+		table:               t,
+		filter:              components.NewFilterWithPlaceholder("Filter items..."),
+		spinner:             components.NewSpinner(),
+		viewState:           ViewList,
+		cache:               cache,
+		loaded:              false,
+		triggersTable:       newTriggersTable(),
+		workerPoolsTable:    newWorkerPoolsTable(),
+		connectionsTable:    newConnectionsTable(),
+		cbRepositoriesTable: newCBRepositoriesTable(),
+		wpRegion:            "us-central1",
+		connRegion:          "us-central1",
 	}
 	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredItems, svc.updateTable)
 	return svc
@@ -157,13 +193,21 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	switch s.viewState {
 	case ViewList:
-		return "r:Refresh  /:Filter  Enter:Detail  s:Submit Build"
+		return "r:Refresh  /:Filter  Enter:Detail  s:Submit Build  g:Triggers  p:Worker Pools  x:Connections"
 	case ViewDetail:
-		return "Esc/q:Back  t:Retry  c:Cancel"
-	case ViewCreate:
+		return "Esc/q:Back  t:Retry  c:Cancel  l:Logs"
+	case ViewCreate, ViewTriggerCreate, ViewWorkerPoolCreate:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
+	case ViewTriggers:
+		return "Esc/q:Back  n:New  R:Run  d:Delete"
+	case ViewWorkerPools:
+		return "Esc/q:Back  n:New  d:Delete"
+	case ViewConnections:
+		return "Esc/q:Back  Enter:Repositories  d:Delete"
+	case ViewCBRepositories:
+		return "Esc/q:Back  d:Delete"
 	default:
 		return ""
 	}
@@ -278,6 +322,24 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return s, s.Refresh()
 
+	case triggersMsg, workerPoolsMsg, connectionsMsg, cbRepositoriesMsg:
+		model, rcmd, _ := s.handleResourceMsg(msg)
+		return model, rcmd
+
+	case resourceActionResultMsg:
+		model, rcmd, _ := s.handleResourceMsg(msg)
+		if msg.err != nil {
+			return model, tea.Batch(rcmd, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			})
+		}
+		if msg.msg != "" {
+			return model, tea.Batch(rcmd, func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			})
+		}
+		return model, rcmd
+
 	case tea.WindowSizeMsg:
 		s.width = msg.Width
 		s.height = msg.Height
@@ -301,6 +363,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKeyMsg processes keyboard input based on current view state
 func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
+	if model, rcmd, handled := s.handleResourceKeyMsg(msg); handled {
+		return model, rcmd
+	}
 
 	if s.viewState == ViewCreate {
 		result, formCmd := s.createForm.Update(msg)
@@ -337,6 +403,15 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			})
 			s.viewState = ViewCreate
 			return s, nil
+		case "g": // Triggers
+			s.viewState = ViewTriggers
+			return s, s.fetchTriggersCmd()
+		case "p": // Worker Pools
+			s.viewState = ViewWorkerPools
+			return s, s.fetchWorkerPoolsCmd()
+		case "x": // Connections (2nd-gen)
+			s.viewState = ViewConnections
+			return s, s.fetchConnectionsCmd()
 		case "enter":
 			items := s.getCurrentItems()
 			if idx := s.table.Cursor(); idx >= 0 && idx < len(items) {
@@ -370,12 +445,26 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.actionSource = ViewDetail
 				s.viewState = ViewConfirmation
 			}
+		case "l":
+			// Cloud Build has no dedicated log-streaming API for v1 builds; this
+			// reuses the shared Cloud Logging view (see core.SwitchToLogsMsg)
+			// filtered to this build's ID, matching how Cloud Run's "l" key
+			// works. It's a one-shot fetch-and-display, not a live tail.
+			if s.selectedItem != nil {
+				filter := fmt.Sprintf(`resource.type="build" AND resource.labels.build_id="%s"`, s.selectedItem.ID)
+				heading := fmt.Sprintf("Build: %s", s.selectedItem.ID)
+				return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "cloudbuild", Heading: heading} }
+			}
 		}
 	}
 
 	if s.viewState == ViewConfirmation {
 		switch msg.String() {
 		case "y", "enter":
+			if rcmd, handled := s.runResourceConfirmedAction(); handled {
+				s.pendingAction = ""
+				return s, rcmd
+			}
 			var actionCmd tea.Cmd
 			switch s.pendingAction {
 			case "retry":
@@ -421,6 +510,10 @@ func (s *Service) View() string {
 		return s.createForm.View()
 	}
 
+	if resourceView := s.renderResourceView(); resourceView != "" {
+		return resourceView
+	}
+
 	return s.renderListView()
 }
 
@@ -447,6 +540,9 @@ func (s *Service) submitBuildCmd() tea.Cmd {
 }
 
 func (s *Service) renderConfirmation() string {
+	if view, handled := s.renderResourceConfirmation(); handled {
+		return view
+	}
 	if s.selectedItem == nil {
 		return "Error: No build selected"
 	}

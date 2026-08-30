@@ -8,6 +8,9 @@ import (
 
 	cloudbuild "cloud.google.com/go/cloudbuild/apiv1/v2"
 	"cloud.google.com/go/cloudbuild/apiv1/v2/cloudbuildpb"
+	cloudbuildv2 "cloud.google.com/go/cloudbuild/apiv2"
+	cloudbuildpbv2 "cloud.google.com/go/cloudbuild/apiv2/cloudbuildpb"
+	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	"github.com/yogirk/tgcp/internal/demo"
 	"google.golang.org/api/iterator"
 )
@@ -16,9 +19,13 @@ import (
 // and avoid pulling a project's entire build history.
 const maxBuilds = 100
 
-// Client wraps the real Cloud Build API client.
+// Client wraps the real Cloud Build API client(s). repoMgr is the 2nd-gen
+// "Repository Manager" client (Connections/Repositories, GitHub App-backed
+// source integrations) -- a separate API surface from the 1st-gen client
+// used for builds/triggers/worker-pools.
 type Client struct {
-	client *cloudbuild.Client
+	client  *cloudbuild.Client
+	repoMgr *cloudbuildv2.RepositoryManagerClient
 }
 
 // NewClient constructs a Client using Application Default Credentials, the
@@ -28,7 +35,11 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud build client: %w", err)
 	}
-	return &Client{client: c}, nil
+	repoMgr, err := cloudbuildv2.NewRepositoryManagerClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cloud build repository manager client: %w", err)
+	}
+	return &Client{client: c, repoMgr: repoMgr}, nil
 }
 
 // ListBuilds lists the most recent Cloud Build builds for the given project
@@ -117,6 +128,372 @@ func (c *Client) CancelBuild(projectID, buildID string) error {
 		Id:        buildID,
 	})
 	return err
+}
+
+// -----------------------------------------------------------------------------
+// Build Triggers
+// -----------------------------------------------------------------------------
+
+// ListBuildTriggers lists the build triggers configured for the project.
+func (c *Client) ListBuildTriggers(projectID string) ([]TriggerItem, error) {
+	ctx := context.Background()
+	req := &cloudbuildpb.ListBuildTriggersRequest{ProjectId: projectID}
+
+	var items []TriggerItem
+	it := c.client.ListBuildTriggers(ctx, req)
+	for {
+		t, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, toTriggerItem(t))
+	}
+	return items, nil
+}
+
+// TriggerCreateOpts holds the minimal set of fields needed to create a
+// repo-based build trigger: a branch-name regex on a Cloud Source
+// Repository, building from a cloudbuild.yaml file in the matched source.
+// GitHub-App-backed and Pub/Sub/webhook trigger types are out of scope for
+// this minimal Create flow.
+type TriggerCreateOpts struct {
+	Name            string
+	RepoName        string // Cloud Source Repository name
+	BranchPattern   string // regex, e.g. "^main$"
+	BuildConfigPath string // path to the build config file, e.g. "cloudbuild.yaml"
+}
+
+// CreateBuildTrigger creates a repo-based build trigger, matching
+// `gcloud builds triggers create cloud-source-repositories`.
+func (c *Client) CreateBuildTrigger(projectID string, opts TriggerCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	_, err := c.client.CreateBuildTrigger(ctx, &cloudbuildpb.CreateBuildTriggerRequest{
+		ProjectId: projectID,
+		Trigger: &cloudbuildpb.BuildTrigger{
+			Name: opts.Name,
+			TriggerTemplate: &cloudbuildpb.RepoSource{
+				RepoName: opts.RepoName,
+				Revision: &cloudbuildpb.RepoSource_BranchName{BranchName: opts.BranchPattern},
+			},
+			BuildTemplate: &cloudbuildpb.BuildTrigger_Filename{Filename: opts.BuildConfigPath},
+		},
+	})
+	return err
+}
+
+// RunBuildTrigger manually invokes a trigger against its configured branch,
+// matching `gcloud builds triggers run`.
+func (c *Client) RunBuildTrigger(projectID, triggerID, branchName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	_, err := c.client.RunBuildTrigger(ctx, &cloudbuildpb.RunBuildTriggerRequest{
+		ProjectId: projectID,
+		TriggerId: triggerID,
+		Source: &cloudbuildpb.RepoSource{
+			Revision: &cloudbuildpb.RepoSource_BranchName{BranchName: branchName},
+		},
+	})
+	return err
+}
+
+// DeleteBuildTrigger deletes a build trigger, matching `gcloud builds triggers delete`.
+func (c *Client) DeleteBuildTrigger(projectID, triggerID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	err := c.client.DeleteBuildTrigger(ctx, &cloudbuildpb.DeleteBuildTriggerRequest{
+		ProjectId: projectID,
+		TriggerId: triggerID,
+	})
+	return err
+}
+
+// toTriggerItem maps a BuildTrigger proto into the UI-facing TriggerItem.
+func toTriggerItem(t *cloudbuildpb.BuildTrigger) TriggerItem {
+	var created time.Time
+	if ct := t.GetCreateTime(); ct != nil {
+		created = ct.AsTime()
+	}
+	repoName := ""
+	branch := ""
+	if tpl := t.GetTriggerTemplate(); tpl != nil {
+		repoName = tpl.GetRepoName()
+		branch = tpl.GetBranchName()
+	}
+	return TriggerItem{
+		ID:          t.GetId(),
+		Name:        t.GetName(),
+		Description: t.GetDescription(),
+		RepoName:    repoName,
+		BranchName:  branch,
+		Disabled:    t.GetDisabled(),
+		CreateTime:  created,
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Worker Pools (private pools; regional resources)
+// -----------------------------------------------------------------------------
+
+// ListWorkerPools lists the private worker pools in the given region.
+func (c *Client) ListWorkerPools(projectID, region string) ([]WorkerPoolItem, error) {
+	ctx := context.Background()
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+	req := &cloudbuildpb.ListWorkerPoolsRequest{Parent: parent}
+
+	var items []WorkerPoolItem
+	it := c.client.ListWorkerPools(ctx, req)
+	for {
+		wp, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, toWorkerPoolItem(wp))
+	}
+	return items, nil
+}
+
+// CreateWorkerPool creates a private worker pool with default machine/network
+// configuration, matching a bare `gcloud builds worker-pools create`
+// (no --peered-network / custom machine type — those are left at the
+// service's defaults for this minimal Create flow).
+func (c *Client) CreateWorkerPool(projectID, region, poolID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+	op, err := c.client.CreateWorkerPool(ctx, &cloudbuildpb.CreateWorkerPoolRequest{
+		Parent:       parent,
+		WorkerPoolId: poolID,
+		WorkerPool: &cloudbuildpb.WorkerPool{
+			Config: &cloudbuildpb.WorkerPool_PrivatePoolV1Config{
+				PrivatePoolV1Config: &cloudbuildpb.PrivatePoolV1Config{},
+			},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	// Fire-and-forget: don't block on the long-running create completing --
+	// the next list refresh will reflect it once done.
+	_ = op
+	return nil
+}
+
+// DeleteWorkerPool deletes a private worker pool, matching
+// `gcloud builds worker-pools delete`.
+func (c *Client) DeleteWorkerPool(projectID, region, poolID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	name := fmt.Sprintf("projects/%s/locations/%s/workerPools/%s", projectID, region, poolID)
+	_, err := c.client.DeleteWorkerPool(ctx, &cloudbuildpb.DeleteWorkerPoolRequest{Name: name})
+	return err
+}
+
+// toWorkerPoolItem maps a WorkerPool proto into the UI-facing WorkerPoolItem.
+func toWorkerPoolItem(wp *cloudbuildpb.WorkerPool) WorkerPoolItem {
+	var created time.Time
+	if ct := wp.GetCreateTime(); ct != nil {
+		created = ct.AsTime()
+	}
+	return WorkerPoolItem{
+		Name:        wp.GetName(),
+		DisplayName: wp.GetDisplayName(),
+		State:       wp.GetState().String(),
+		CreateTime:  created,
+	}
+}
+
+// -----------------------------------------------------------------------------
+// Connections & Repositories (2nd-gen source integrations)
+// -----------------------------------------------------------------------------
+
+// ListConnections lists the 2nd-gen source repository connections
+// (GitHub/GitLab/Bitbucket App installations) in the given region.
+func (c *Client) ListConnections(projectID, region string) ([]ConnectionItem, error) {
+	ctx := context.Background()
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+	req := &cloudbuildpbv2.ListConnectionsRequest{Parent: parent}
+
+	var items []ConnectionItem
+	it := c.repoMgr.ListConnections(ctx, req)
+	for {
+		conn, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, toConnectionItem(conn))
+	}
+	return items, nil
+}
+
+// DeleteConnection deletes a 2nd-gen connection, matching
+// `gcloud builds connections delete`. Creating a connection is deliberately
+// not supported: it requires completing an interactive GitHub/GitLab/
+// Bitbucket App installation OAuth flow in a browser, which this TUI has no
+// way to drive -- connections must be created via the Cloud Console or
+// `gcloud builds connections create` first.
+func (c *Client) DeleteConnection(projectID, region, connectionID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.repoMgr == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	name := fmt.Sprintf("projects/%s/locations/%s/connections/%s", projectID, region, connectionID)
+	_, err := c.repoMgr.DeleteConnection(ctx, &cloudbuildpbv2.DeleteConnectionRequest{Name: name})
+	return err
+}
+
+// AddConnectionIAMBinding grants a role to a member on a connection,
+// matching `gcloud builds connections add-iam-policy-binding`. It fetches
+// the current policy, merges the new binding into it, and writes the whole
+// policy back -- this never drops any existing binding, unlike a raw
+// set-iam-policy.
+func (c *Client) AddConnectionIAMBinding(connFullName, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.repoMgr == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	policy, err := c.repoMgr.GetIamPolicy(ctx, &iampb.GetIamPolicyRequest{Resource: connFullName})
+	if err != nil {
+		return fmt.Errorf("get connection IAM policy: %w", err)
+	}
+	policy.Bindings = mergeConnectionIAMBinding(policy.GetBindings(), role, member)
+	_, err = c.repoMgr.SetIamPolicy(ctx, &iampb.SetIamPolicyRequest{Resource: connFullName, Policy: policy})
+	return err
+}
+
+// mergeConnectionIAMBinding appends member to the existing binding for role
+// if one exists (skipping if already granted), or appends a brand-new role
+// binding otherwise. It never removes or replaces any other binding.
+func mergeConnectionIAMBinding(bindings []*iampb.Binding, role, member string) []*iampb.Binding {
+	for _, b := range bindings {
+		if b.GetRole() != role {
+			continue
+		}
+		for _, m := range b.GetMembers() {
+			if m == member {
+				return bindings
+			}
+		}
+		b.Members = append(b.Members, member)
+		return bindings
+	}
+	return append(bindings, &iampb.Binding{Role: role, Members: []string{member}})
+}
+
+// toConnectionItem maps a Connection proto into the UI-facing ConnectionItem.
+func toConnectionItem(conn *cloudbuildpbv2.Connection) ConnectionItem {
+	var created time.Time
+	if ct := conn.GetCreateTime(); ct != nil {
+		created = ct.AsTime()
+	}
+	provider := "unknown"
+	switch {
+	case conn.GetGithubConfig() != nil:
+		provider = "GitHub"
+	case conn.GetGithubEnterpriseConfig() != nil:
+		provider = "GitHub Enterprise"
+	case conn.GetGitlabConfig() != nil:
+		provider = "GitLab"
+	case conn.GetBitbucketCloudConfig() != nil:
+		provider = "Bitbucket Cloud"
+	case conn.GetBitbucketDataCenterConfig() != nil:
+		provider = "Bitbucket Data Center"
+	}
+	return ConnectionItem{
+		Name:       conn.GetName(),
+		Provider:   provider,
+		Disabled:   conn.GetDisabled(),
+		CreateTime: created,
+	}
+}
+
+// ListCBRepositories lists the repositories linked to a 2nd-gen connection.
+func (c *Client) ListCBRepositories(connFullName string) ([]CBRepositoryItem, error) {
+	ctx := context.Background()
+	req := &cloudbuildpbv2.ListRepositoriesRequest{Parent: connFullName}
+
+	var items []CBRepositoryItem
+	it := c.repoMgr.ListRepositories(ctx, req)
+	for {
+		repo, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, toCBRepositoryItem(repo))
+	}
+	return items, nil
+}
+
+// DeleteCBRepository deletes a linked repository, matching
+// `gcloud builds repositories delete`. Creating a repository link is
+// deliberately not supported here for the same reason as connection
+// creation -- see DeleteConnection's doc comment.
+func (c *Client) DeleteCBRepository(repoFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.repoMgr == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	_, err := c.repoMgr.DeleteRepository(ctx, &cloudbuildpbv2.DeleteRepositoryRequest{Name: repoFullName})
+	return err
+}
+
+// toCBRepositoryItem maps a Repository proto into the UI-facing CBRepositoryItem.
+func toCBRepositoryItem(repo *cloudbuildpbv2.Repository) CBRepositoryItem {
+	var created time.Time
+	if ct := repo.GetCreateTime(); ct != nil {
+		created = ct.AsTime()
+	}
+	return CBRepositoryItem{
+		Name:       repo.GetName(),
+		RemoteURI:  repo.GetRemoteUri(),
+		CreateTime: created,
+	}
 }
 
 // splitAndTrim splits a comma-separated string into trimmed, non-empty parts.

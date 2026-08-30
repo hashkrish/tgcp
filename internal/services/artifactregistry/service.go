@@ -54,6 +54,38 @@ type DockerImage struct {
 	MediaType      string
 }
 
+// TagItem is a single URL tag on a Docker image.
+type TagItem struct {
+	Name    string // full tag resource name, used for delete
+	Version string // full version resource name this tag points to
+}
+
+// PackageItem represents a package in a non-Docker (Maven/npm/Python/APT/
+// YUM/Go/generic) repository -- the equivalent of a DockerImage's grouping,
+// but for formats that use the generic packages/versions collections.
+type PackageItem struct {
+	Name        string // full resource name, used for delete/listing versions
+	DisplayName string
+	CreateTime  time.Time
+	UpdateTime  time.Time
+}
+
+// VersionItem represents a single version of a non-Docker package.
+type VersionItem struct {
+	Name        string // full resource name, used for delete
+	Description string
+	CreateTime  time.Time
+	RelatedTags []string
+}
+
+// VulnerabilityCount is a fixable/total vulnerability tally for one severity
+// level, as returned by the Container Analysis vulnerability summary.
+type VulnerabilityCount struct {
+	Severity     string
+	FixableCount int64
+	TotalCount   int64
+}
+
 // RepositoryCreateOpts holds the minimal set of fields needed to create an
 // Artifact Registry repository via the Create form.
 type RepositoryCreateOpts struct {
@@ -78,6 +110,10 @@ const (
 	ViewConfirmation
 	ViewIAM
 	ViewIAMForm
+	ViewTagRemove
+	ViewVulnerabilities
+	ViewPackages
+	ViewVersions
 )
 
 // newRepoUpdateForm builds the FormModel for updating a repository's
@@ -156,6 +192,21 @@ type Service struct {
 	pendingIAMRole   string
 	pendingIAMMember string
 
+	// Docker tag removal
+	tagRemoveForm components.FormModel
+	pendingTag    string
+
+	// Vulnerability summary for the selected Docker image
+	vulnCounts []VulnerabilityCount
+
+	// Packages/Versions (non-Docker repositories)
+	packages        []PackageItem
+	packagesTable   *components.StandardTable
+	selectedPackage *PackageItem
+	versions        []VersionItem
+	versionsTable   *components.StandardTable
+	selectedVersion *VersionItem
+
 	// Cache
 	cache *core.Cache
 }
@@ -179,15 +230,28 @@ func NewService(cache *core.Cache) *Service {
 	}
 	imgTable := components.NewStandardTable(imageColumns)
 
+	packagesTable := components.NewStandardTable([]table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Created", Width: 19},
+		{Title: "Updated", Width: 19},
+	})
+	versionsTable := components.NewStandardTable([]table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Description", Width: 30},
+		{Title: "Created", Width: 19},
+	})
+
 	svc := &Service{
-		table:       t,
-		filter:      components.NewFilterWithPlaceholder("Filter items..."),
-		imageTable:  imgTable,
-		imageFilter: components.NewFilterWithPlaceholder("Filter images..."),
-		spinner:     components.NewSpinner(),
-		viewState:   ViewList,
-		cache:       cache,
-		loaded:      false,
+		table:         t,
+		filter:        components.NewFilterWithPlaceholder("Filter items..."),
+		imageTable:    imgTable,
+		imageFilter:   components.NewFilterWithPlaceholder("Filter images..."),
+		packagesTable: packagesTable,
+		versionsTable: versionsTable,
+		spinner:       components.NewSpinner(),
+		viewState:     ViewList,
+		cache:         cache,
+		loaded:        false,
 	}
 	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredItems, svc.updateTable)
 	svc.imageFilterSession = components.NewFilterSession(&svc.imageFilter, svc.getFilteredImages, svc.updateImageTable)
@@ -331,6 +395,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case packagesMsg, versionsMsg, vulnMsg, resourceActionResultMsg:
+		model, rcmd, _ := s.handleResourceMsg(msg)
+		return model, rcmd
+
 	case iamPolicyMsg:
 		s.spinner.Stop()
 		if msg.err != nil {
@@ -428,6 +496,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // handleKeyMsg processes keyboard input based on current view state
 func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
+
+	if model, rcmd, handled := s.handleResourceKeyMsg(msg); handled {
+		return model, rcmd
+	}
 
 	if s.viewState == ViewCreate {
 		result, formCmd := s.createForm.Update(msg)
@@ -543,8 +615,12 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return s, nil
 		case "m":
 			if s.selectedItem != nil {
-				s.viewState = ViewImages
-				return s, tea.Batch(s.spinner.Start(""), s.fetchImagesCmd(*s.selectedItem, false))
+				if s.selectedItem.Format == "DOCKER" {
+					s.viewState = ViewImages
+					return s, tea.Batch(s.spinner.Start(""), s.fetchImagesCmd(*s.selectedItem, false))
+				}
+				s.viewState = ViewPackages
+				return s, s.fetchPackagesCmd(*s.selectedItem)
 			}
 		case "i":
 			if s.selectedItem != nil {
@@ -578,6 +654,21 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewConfirmation
 			}
 			return s, nil
+		case "T":
+			images := s.getFilteredImages(s.images, s.imageFilter.Value())
+			if idx := s.imageTable.Cursor(); idx >= 0 && idx < len(images) && len(images[idx].Tags) > 0 {
+				s.selectedImage = &images[idx]
+				s.tagRemoveForm = newTagRemoveForm(*s.selectedImage)
+				s.viewState = ViewTagRemove
+			}
+			return s, nil
+		case "v":
+			images := s.getFilteredImages(s.images, s.imageFilter.Value())
+			if idx := s.imageTable.Cursor(); idx >= 0 && idx < len(images) {
+				s.selectedImage = &images[idx]
+				return s, tea.Batch(s.spinner.Start(""), s.fetchVulnCmd(*s.selectedImage))
+			}
+			return s, nil
 		}
 
 		var updatedTable *components.StandardTable
@@ -589,6 +680,10 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s.viewState == ViewConfirmation {
 		switch msg.String() {
 		case "y", "enter":
+			if rcmd, handled := s.runResourceConfirmedAction(); handled {
+				s.pendingAction = ""
+				return s, rcmd
+			}
 			var actionCmd tea.Cmd
 			if s.pendingAction == "delete" {
 				if s.actionSource == ViewImages && s.selectedImage != nil {
@@ -638,6 +733,10 @@ func (s *Service) View() string {
 		return s.iamForm.View()
 	}
 
+	if resourceView := s.renderResourceView(); resourceView != "" {
+		return resourceView
+	}
+
 	if s.viewState == ViewCreate {
 		return s.createForm.View()
 	}
@@ -657,6 +756,9 @@ func (s *Service) View() string {
 // delete (destructive: wipes every image/package/version inside it) or an
 // image delete, depending on which drill-down level triggered it.
 func (s *Service) renderConfirmation() string {
+	if view, handled := s.renderResourceConfirmation(); handled {
+		return view
+	}
 	if s.pendingAction == "grant" {
 		if s.selectedItem == nil {
 			return "Error: No repository selected"

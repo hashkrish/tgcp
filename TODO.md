@@ -111,11 +111,11 @@
 - [x] Cloud Logging: `sinks`/`metrics`/`buckets`/`views` not covered at all — full list/create/delete for sinks, log-based metrics, and log buckets, added as a new "Resources" mode (`R`); views list/create/delete scoped to the project's default bucket (`_Default`/`global`) to avoid a full bucket-picker UI.
 
 ### Developer / CI
-- [ ] Cloud Build: no IAM (connections)
-- [ ] Cloud Build: no log streaming
-- [ ] Cloud Build: `triggers`/`connections`/`repositories`/`worker-pools` not covered
-- [ ] Artifact Registry: no image/package/version-level delete
-- [ ] Artifact Registry: no vulnerability scan/list
-- [ ] Artifact Registry: no remove/set-iam-policy (raw)
-- [ ] Artifact Registry: no docker tags ops
-- [ ] Artifact Registry: packages/non-docker versions not covered
+- [x] Cloud Build: no IAM (connections) — add-only `AddConnectionIAMBinding` on the 2nd-gen RepositoryManagerClient; remove/set declined (lockout risk).
+- [x] Cloud Build: no log streaming — **Scoped**: `l` on a build's detail view routes to the shared Cloud Logging view filtered by build ID; this is a one-shot fetch-and-display, not a live tail (Cloud Build v1 has no streaming-log API).
+- [x] Cloud Build: `triggers`/`connections`/`repositories`/`worker-pools` not covered — **Partial**: triggers (list/create-minimal/run/delete) and worker pools (list/create-minimal/delete) done. Connections/repositories: list/delete + connection IAM done; **create declined** for both — creating a connection requires completing an interactive GitHub/GitLab/Bitbucket App OAuth install flow in a browser, which this TUI has no way to drive.
+- [x] Artifact Registry: no image/package/version-level delete — package-level (`DeletePackage`) and generic version-level (`DeleteVersion`) delete added alongside the existing image-level delete.
+- [x] Artifact Registry: no vulnerability scan/list — `GetVulnerabilitySummary` via Container Analysis, shown as fixable/total-by-severity (`v` on an image).
+- [x] Artifact Registry: no remove/set-iam-policy (raw) — **Declined** (lockout-risk repo policy); add-iam-policy-binding already existed.
+- [x] Artifact Registry: no docker tags ops — `ListTags`/`DeleteTag` (`T` removes a single tag, preserving the version and other tags).
+- [x] Artifact Registry: packages/non-docker versions not covered — Packages → Versions browse views added.

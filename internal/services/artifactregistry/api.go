@@ -3,15 +3,18 @@ package artifactregistry
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	artifactregistry "cloud.google.com/go/artifactregistry/apiv1"
 	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
+	containeranalysis "cloud.google.com/go/containeranalysis/apiv1"
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
 	"github.com/yogirk/tgcp/internal/demo"
 	locationpb "google.golang.org/genproto/googleapis/cloud/location"
+	containeranalysispb "google.golang.org/genproto/googleapis/devtools/containeranalysis/v1"
 
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/api/iterator"
@@ -22,9 +25,13 @@ import (
 // calls run in parallel when fanning out across a project's regions.
 const maxConcurrentLocationFetches = 10
 
-// Client wraps the real Artifact Registry API client.
+// Client wraps the real Artifact Registry API client(s). analysis is a
+// separate Container Analysis (Grafeas) client used only for the
+// vulnerability-summary lookup -- a distinct API surface from Artifact
+// Registry itself.
 type Client struct {
-	client *artifactregistry.Client
+	client   *artifactregistry.Client
+	analysis *containeranalysis.Client
 }
 
 // NewClient constructs a Client using Application Default Credentials, the
@@ -34,7 +41,11 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("artifact registry client: %w", err)
 	}
-	return &Client{client: c}, nil
+	analysis, err := containeranalysis.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("container analysis client: %w", err)
+	}
+	return &Client{client: c, analysis: analysis}, nil
 }
 
 // ListRepositories lists Artifact Registry repositories across all regions
@@ -281,6 +292,210 @@ func (c *Client) DeleteImage(imageFullName string) error {
 		Force: true,
 	})
 	return err
+}
+
+// imagePackageParent derives a Docker image's package resource name
+// ("projects/{p}/locations/{l}/repositories/{r}/packages/{escapedImagePath}")
+// from the repository's full name and the image's URI
+// ("{location}-docker.pkg.dev/{project}/{repo}/{imagePath}@sha256:...").
+// Docker images are addressed by "dockerImages/{digest}" everywhere else in
+// this API, but tags live under the packages/ collection, which needs the
+// (possibly multi-segment, slash-containing) image path instead.
+func imagePackageParent(repoFullName, imageURI string) (string, error) {
+	uri := imageURI
+	if at := strings.LastIndex(uri, "@"); at != -1 {
+		uri = uri[:at]
+	}
+	parts := strings.SplitN(uri, "/", 4)
+	if len(parts) != 4 {
+		return "", fmt.Errorf("unrecognized image URI %q", imageURI)
+	}
+	imagePath := parts[3]
+	return fmt.Sprintf("%s/packages/%s", repoFullName, url.PathEscape(imagePath)), nil
+}
+
+// ListTags lists the URL tags on a Docker image, matching
+// `gcloud artifacts docker tags list`.
+func (c *Client) ListTags(repoFullName string, img DockerImage) ([]TagItem, error) {
+	ctx := context.Background()
+	parent, err := imagePackageParent(repoFullName, img.URI)
+	if err != nil {
+		return nil, err
+	}
+	req := &artifactregistrypb.ListTagsRequest{Parent: parent}
+	var tags []TagItem
+	it := c.client.ListTags(ctx, req)
+	for {
+		t, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list tags: %w", err)
+		}
+		tags = append(tags, TagItem{Name: t.GetName(), Version: t.GetVersion()})
+	}
+	return tags, nil
+}
+
+// DeleteTag removes a single URL tag from a Docker image (the underlying
+// image version and its other tags are untouched), matching
+// `gcloud artifacts docker tags delete`.
+func (c *Client) DeleteTag(repoFullName string, img DockerImage, tagValue string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	parent, err := imagePackageParent(repoFullName, img.URI)
+	if err != nil {
+		return err
+	}
+	tagName := fmt.Sprintf("%s/tags/%s", parent, url.PathEscape(tagValue))
+	ctx := context.Background()
+	return c.client.DeleteTag(ctx, &artifactregistrypb.DeleteTagRequest{Name: tagName})
+}
+
+// ListPackages lists the packages in a repository (the non-Docker
+// equivalent of ListDockerImages -- Maven/npm/Python/APT/YUM/Go/generic
+// repositories organize their artifacts as packages/versions rather than
+// the Docker-specific dockerImages view).
+func (c *Client) ListPackages(repoFullName string) ([]PackageItem, error) {
+	ctx := context.Background()
+	req := &artifactregistrypb.ListPackagesRequest{Parent: repoFullName}
+	var items []PackageItem
+	it := c.client.ListPackages(ctx, req)
+	for {
+		p, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list packages: %w", err)
+		}
+		items = append(items, toPackageItem(p))
+	}
+	return items, nil
+}
+
+// DeletePackage deletes a package and all of its versions, matching
+// `gcloud artifacts packages delete`.
+func (c *Client) DeletePackage(packageFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	_, err := c.client.DeletePackage(ctx, &artifactregistrypb.DeletePackageRequest{Name: packageFullName})
+	return err
+}
+
+// ListVersions lists the versions of a single package, matching
+// `gcloud artifacts versions list`.
+func (c *Client) ListVersions(packageFullName string) ([]VersionItem, error) {
+	ctx := context.Background()
+	req := &artifactregistrypb.ListVersionsRequest{Parent: packageFullName}
+	var items []VersionItem
+	it := c.client.ListVersions(ctx, req)
+	for {
+		v, err := it.Next()
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("list versions: %w", err)
+		}
+		items = append(items, toVersionItem(v))
+	}
+	return items, nil
+}
+
+// DeleteVersion deletes a single package version, matching
+// `gcloud artifacts versions delete`. Force is set for the same reason as
+// DeleteImage: a version referenced by a tag would otherwise be rejected.
+func (c *Client) DeleteVersion(versionFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	_, err := c.client.DeleteVersion(ctx, &artifactregistrypb.DeleteVersionRequest{
+		Name:  versionFullName,
+		Force: true,
+	})
+	return err
+}
+
+// GetVulnerabilitySummary fetches a fixable/total vulnerability count
+// summary for a single Docker image, matching the "occurrences" shown by
+// `gcloud artifacts docker images list --show-occurrences`. Requires the
+// Container Analysis (Container Scanning) API to be enabled on the
+// project and the image to have already been scanned.
+func (c *Client) GetVulnerabilitySummary(projectID, imageURI string) ([]VulnerabilityCount, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.analysis == nil {
+		return nil, fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	req := &containeranalysispb.GetVulnerabilityOccurrencesSummaryRequest{
+		Parent: fmt.Sprintf("projects/%s", projectID),
+		Filter: fmt.Sprintf("resource_url=%q", "https://"+imageURI),
+	}
+	summary, err := c.analysis.GetVulnerabilityOccurrencesSummary(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("get vulnerability summary: %w", err)
+	}
+	counts := make([]VulnerabilityCount, 0, len(summary.GetCounts()))
+	for _, c := range summary.GetCounts() {
+		counts = append(counts, VulnerabilityCount{
+			Severity:     c.GetSeverity().String(),
+			FixableCount: c.GetFixableCount(),
+			TotalCount:   c.GetTotalCount(),
+		})
+	}
+	return counts, nil
+}
+
+// toPackageItem maps a Package proto into the UI-facing PackageItem.
+func toPackageItem(p *artifactregistrypb.Package) PackageItem {
+	var created, updated time.Time
+	if ct := p.GetCreateTime(); ct != nil {
+		created = ct.AsTime()
+	}
+	if ut := p.GetUpdateTime(); ut != nil {
+		updated = ut.AsTime()
+	}
+	return PackageItem{
+		Name:        p.GetName(),
+		DisplayName: p.GetDisplayName(),
+		CreateTime:  created,
+		UpdateTime:  updated,
+	}
+}
+
+// toVersionItem maps a Version proto into the UI-facing VersionItem.
+func toVersionItem(v *artifactregistrypb.Version) VersionItem {
+	var created time.Time
+	if ct := v.GetCreateTime(); ct != nil {
+		created = ct.AsTime()
+	}
+	tags := make([]string, 0, len(v.GetRelatedTags()))
+	for _, t := range v.GetRelatedTags() {
+		tags = append(tags, t.GetName())
+	}
+	return VersionItem{
+		Name:        v.GetName(),
+		Description: v.GetDescription(),
+		CreateTime:  created,
+		RelatedTags: tags,
+	}
 }
 
 // toDockerImage maps a DockerImage proto into the UI-facing DockerImage.
