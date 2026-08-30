@@ -300,7 +300,7 @@ func (s *Service) HelpText() string {
 		return "Esc/q:Back"
 	}
 	if s.viewState == ViewRevisions {
-		return "Esc/q:Back  Ent:Detail  p:Promote  s:Split  t:Tag  T:Untag  d:Delete"
+		return "Esc/q:Back  Ent:Detail  p:Promote  s:Split  t:Tag  T:Untag  d:Delete  r:Refresh  l:Logs"
 	}
 	if s.viewState == ViewRevisionDetail {
 		return "Esc/q:Back  p:Promote  t:Tag  T:Untag  d:Delete"
@@ -522,7 +522,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		}
 		if s.selectedService != nil {
-			cmds = append(cmds, s.fetchRevisionsCmd(*s.selectedService))
+			cmds = append(cmds, s.fetchRevisionsCmd(*s.selectedService, true))
 		}
 		return s, tea.Batch(cmds...)
 
@@ -605,7 +605,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if idx := s.table.Cursor(); idx >= 0 && idx < len(svcs) {
 							s.selectedService = &svcs[idx]
 							s.viewState = ViewDetail
-							return s, s.fetchRevisionsCmd(*s.selectedService)
+							return s, s.fetchRevisionsCmd(*s.selectedService, false)
 						}
 					}
 				} else {
@@ -706,6 +706,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewDetail
 				s.selectedRevision = nil
 				return s, nil
+			case "r": // Force-refresh, bypassing the cached revision list
+				if s.selectedService != nil {
+					return s, s.fetchRevisionsCmd(*s.selectedService, true)
+				}
+				return s, nil
+			case "l": // Logs scoped to the selected revision
+				if s.selectedService != nil {
+					revs := s.selectedService.Revisions
+					if idx := s.revTable.Cursor(); idx >= 0 && idx < len(revs) {
+						rev := revs[idx]
+						filter := fmt.Sprintf(`resource.type="cloud_run_revision" AND resource.labels.revision_name="%s"`, rev.Name)
+						heading := fmt.Sprintf("Revision: %s", rev.Name)
+						return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "run", Heading: heading} }
+					}
+				}
+				return s, nil
 			case "enter":
 				if s.selectedService != nil {
 					revs := s.selectedService.Revisions
@@ -797,6 +813,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.pendingAction = "untag"
 					s.actionSource = ViewRevisionDetail
 					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "l":
+				if s.selectedRevision != nil {
+					rev := *s.selectedRevision
+					filter := fmt.Sprintf(`resource.type="cloud_run_revision" AND resource.labels.revision_name="%s"`, rev.Name)
+					heading := fmt.Sprintf("Revision: %s", rev.Name)
+					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "run", Heading: heading} }
 				}
 				return s, nil
 			case "d":
@@ -1087,7 +1111,7 @@ func (s *Service) renderRevisionsView() string {
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("revisions"))
 	}
 
-	hint := "p Promote  |  s Split Traffic  |  t Tag  |  T Remove Tag  |  d Delete  |  enter Details  |  q Back"
+	hint := "p Promote  |  s Split Traffic  |  t Tag  |  T Remove Tag  |  d Delete  |  r Refresh  |  l Logs  |  enter Details  |  q Back"
 	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.revTable.View(), "", styles.HelpStyle.Render(hint))
 }
 
@@ -1116,17 +1140,59 @@ func (s *Service) renderRevisionDetailView() string {
 		tag = "(none)"
 	}
 
+	orDash := func(v string) string {
+		if v == "" {
+			return "-"
+		}
+		return v
+	}
+	resources := orDash(rev.CPULimit)
+	if rev.MemoryLimit != "" {
+		if resources == "-" {
+			resources = rev.MemoryLimit
+		} else {
+			resources = fmt.Sprintf("%s CPU / %s", rev.CPULimit, rev.MemoryLimit)
+		}
+	}
+	concurrency := "-"
+	if rev.Concurrency > 0 {
+		concurrency = fmt.Sprintf("%d", rev.Concurrency)
+	}
+	timeout := "-"
+	if rev.TimeoutSeconds > 0 {
+		timeout = fmt.Sprintf("%ds", rev.TimeoutSeconds)
+	}
+	scale := fmt.Sprintf("min %s / max %s", orDash(rev.MinScale), orDash(rev.MaxScale))
+	env := "(none)"
+	if len(rev.EnvVars) > 0 {
+		env = strings.Join(rev.EnvVars, ", ")
+	}
+	conditions := "-"
+	if len(rev.Conditions) > 0 {
+		conditions = strings.Join(rev.Conditions, ", ")
+	}
+
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Revision Details",
 		Rows: []components.KeyValue{
 			{Key: "Name", Value: rev.Name},
 			{Key: "Image", Value: rev.Image},
+			{Key: "Image Digest", Value: orDash(rev.ImageDigest)},
 			{Key: "Traffic", Value: fmt.Sprintf("%d%%", rev.Percent)},
 			{Key: "Latest", Value: fmt.Sprintf("%t", rev.Latest)},
 			{Key: "Tag", Value: tag},
 			{Key: "Created", Value: created},
+			{Key: "Resources", Value: resources},
+			{Key: "Concurrency", Value: concurrency},
+			{Key: "Timeout", Value: timeout},
+			{Key: "Scale", Value: scale},
+			{Key: "VPC Connector", Value: orDash(rev.VPCConnector)},
+			{Key: "Service Account", Value: orDash(rev.ServiceAccount)},
+			{Key: "Env Vars", Value: env},
+			{Key: "Volumes", Value: fmt.Sprintf("%d", rev.VolumeCount)},
+			{Key: "Conditions", Value: conditions},
 		},
-		FooterHint: "p Promote  |  t Tag  |  T Remove Tag  |  d Delete  |  q Back",
+		FooterHint: "p Promote  |  t Tag  |  T Remove Tag  |  d Delete  |  l Logs  |  q Back",
 	})
 
 	return lipgloss.JoinVertical(lipgloss.Left, title, "", card)
@@ -1340,15 +1406,28 @@ func (s *Service) DeleteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 
 // fetchRevisionsCmd fetches the full revision history for svc, merging in
 // the traffic-split info (Percent/Latest/Tag) already parsed from
-// ListServices onto the matching revisions by name.
-func (s *Service) fetchRevisionsCmd(svc RunService) tea.Cmd {
+// ListServices onto the matching revisions by name. Cached per-service for
+// CacheTTL unless force is set (used after a mutating revision action, so
+// the view reflects the change immediately instead of a stale cache entry).
+func (s *Service) fetchRevisionsCmd(svc RunService, force bool) tea.Cmd {
 	return func() tea.Msg {
+		key := "cloudrun_revisions_" + svc.Name
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if revs, ok := val.([]Revision); ok {
+					return revisionsMsg{service: svc.Name, revisions: revs}
+				}
+			}
+		}
 		if s.client == nil {
 			return core.ToastMsg{Message: "client not initialized", Type: core.ToastError}
 		}
 		revs, err := s.client.ListRevisions(s.projectID, svc.Region, svc.Name, svc.Revisions)
 		if err != nil {
 			return core.ToastMsg{Message: fmt.Sprintf("failed to load revisions: %v", err), Type: core.ToastError}
+		}
+		if s.cache != nil {
+			s.cache.Set(key, revs, CacheTTL)
 		}
 		return revisionsMsg{service: svc.Name, revisions: revs}
 	}

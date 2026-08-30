@@ -122,6 +122,9 @@ func (c *Client) ListServices(projectID string) ([]RunService, error) {
 // covers revisions currently receiving traffic or holding a URL tag).
 // trafficInfo carries the Percent/Latest/Tag data already parsed from the
 // service's Status.Traffic; it's merged onto the matching revisions by name.
+// Pages through the full result set internally (see ListMeta.Continue) --
+// a service with more revisions than fit in one API page previously had its
+// history silently truncated to just the first page.
 func (c *Client) ListRevisions(projectID, region, serviceName string, trafficInfo []Revision) ([]Revision, error) {
 	if demo.Enabled {
 		return loadDemoRevisions(serviceName), nil
@@ -133,35 +136,63 @@ func (c *Client) ListRevisions(projectID, region, serviceName string, trafficInf
 	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
 	labelSelector := fmt.Sprintf("serving.knative.dev/service=%s", serviceName)
 
-	resp, err := c.service.Projects.Locations.Revisions.List(parent).LabelSelector(labelSelector).Do()
-	if err != nil {
-		return nil, err
-	}
-
 	trafficByName := make(map[string]Revision, len(trafficInfo))
 	for _, t := range trafficInfo {
 		trafficByName[t.Name] = t
 	}
 
-	revisions := make([]Revision, 0, len(resp.Items))
-	for _, item := range resp.Items {
-		rev := Revision{Name: item.Metadata.Name}
-		if item.Spec != nil {
-			if containers := item.Spec.Containers; len(containers) > 0 {
-				rev.Image = containers[0].Image
+	var revisions []Revision
+	continueToken := ""
+	for {
+		call := c.service.Projects.Locations.Revisions.List(parent).LabelSelector(labelSelector)
+		if continueToken != "" {
+			call = call.Continue(continueToken)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, item := range resp.Items {
+			rev := Revision{Name: item.Metadata.Name}
+			if item.Spec != nil {
+				if containers := item.Spec.Containers; len(containers) > 0 {
+					rev.Image = containers[0].Image
+					rev.populateFromContainer(containers[0])
+				}
+				rev.Concurrency = item.Spec.ContainerConcurrency
+				rev.TimeoutSeconds = item.Spec.TimeoutSeconds
+				rev.ServiceAccount = item.Spec.ServiceAccountName
+				rev.VolumeCount = len(item.Spec.Volumes)
 			}
-		}
-		if item.Metadata.CreationTimestamp != "" {
-			if created, err := time.Parse(time.RFC3339, item.Metadata.CreationTimestamp); err == nil {
-				rev.Created = created
+			if item.Metadata != nil {
+				if item.Metadata.CreationTimestamp != "" {
+					if created, err := time.Parse(time.RFC3339, item.Metadata.CreationTimestamp); err == nil {
+						rev.Created = created
+					}
+				}
+				rev.MinScale = item.Metadata.Annotations["autoscaling.knative.dev/minScale"]
+				rev.MaxScale = item.Metadata.Annotations["autoscaling.knative.dev/maxScale"]
+				rev.VPCConnector = item.Metadata.Annotations["run.googleapis.com/vpc-access-connector"]
 			}
+			if item.Status != nil {
+				rev.ImageDigest = item.Status.ImageDigest
+				for _, cond := range item.Status.Conditions {
+					rev.Conditions = append(rev.Conditions, fmt.Sprintf("%s: %s", cond.Type, cond.Status))
+				}
+			}
+			if t, ok := trafficByName[rev.Name]; ok {
+				rev.Percent = t.Percent
+				rev.Latest = t.Latest
+				rev.Tag = t.Tag
+			}
+			revisions = append(revisions, rev)
 		}
-		if t, ok := trafficByName[rev.Name]; ok {
-			rev.Percent = t.Percent
-			rev.Latest = t.Latest
-			rev.Tag = t.Tag
+
+		if resp.Metadata == nil || resp.Metadata.Continue == "" {
+			break
 		}
-		revisions = append(revisions, rev)
+		continueToken = resp.Metadata.Continue
 	}
 
 	sort.Slice(revisions, func(i, j int) bool {
@@ -169,6 +200,19 @@ func (c *Client) ListRevisions(projectID, region, serviceName string, trafficInf
 	})
 
 	return revisions, nil
+}
+
+// populateFromContainer fills in the container-scoped detail fields
+// (resources, env, timeout is spec-level so handled by the caller) from the
+// revision's first container.
+func (r *Revision) populateFromContainer(c *run.Container) {
+	if c.Resources != nil {
+		r.CPULimit = c.Resources.Limits["cpu"]
+		r.MemoryLimit = c.Resources.Limits["memory"]
+	}
+	for _, env := range c.Env {
+		r.EnvVars = append(r.EnvVars, env.Name)
+	}
 }
 
 // CreateService creates a new Cloud Run service running a single container

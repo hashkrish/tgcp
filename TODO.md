@@ -8,18 +8,18 @@
 ## Open
 
 ### UI (landing page / palette / Cloud Run revisions)
-- [ ] Grid-mode service picker: no mouse support, no vertical scrolling (deliberate v1 scope limits)
+- [x] Grid-mode service picker: no mouse support, no vertical scrolling (deliberate v1 scope limits) — **Partial**: mouse click-to-select now works in grid mode (best-effort hit-testing, mirroring the flat list's approach). Vertical scrolling stays **declined**: the grid is capped at ~7 categories / 4 columns (2 screen-rows-of-columns), which comfortably fits any real terminal height today; building scroll-viewport clipping for a case that doesn't currently arise would be speculative complexity the code's own comments already call out as unnecessary at this scale.
 - [x] Command palette: recency list is session-only, not persisted
 - [x] Cloud Run: no arbitrary N-way traffic splits (only promote-to-100%)
 - [x] Cloud Run: no tag removal
 - [x] Cloud Run: no revision deletion
-- [ ] Cloud Run: revision detail missing resource limits/concurrency/timeout
-- [ ] Cloud Run: revision detail missing min-max-scale/env-secrets-volumes
-- [ ] Cloud Run: revision detail missing VPC connector/service account/ImageDigest/Conditions
-- [ ] Cloud Run: `ListRevisions` has no pagination and no caching/TTL
-- [ ] Cloud Run: no revision-scoped log filter
-- [ ] Live-terminal verification still needed for older mutating actions (IAM fetch, Cloud SQL restart, Cloud Build retry/cancel, Artifact Registry delete image) and everything added since
-- [ ] Blank content pane seen once in a live tmux run navigating into a service view — reproduced on an untouched service too, likely a tmux/headless-capture artifact, never confirmed live
+- [x] Cloud Run: revision detail missing resource limits/concurrency/timeout
+- [x] Cloud Run: revision detail missing min-max-scale/env-secrets-volumes — **Partial**: min/max-scale, env var names, and volume count are shown; secret *values* are deliberately never surfaced (env var names only, not values, since some are Secret Manager references).
+- [x] Cloud Run: revision detail missing VPC connector/service account/ImageDigest/Conditions
+- [x] Cloud Run: `ListRevisions` has no pagination and no caching/TTL
+- [x] Cloud Run: no revision-scoped log filter
+- [x] Live-terminal verification still needed for older mutating actions (IAM fetch, Cloud SQL restart, Cloud Build retry/cancel, Artifact Registry delete image) and everything added since — **Declined**: this environment has no live GCP project/credentials to test against. All work continues to be verified via `go build`/`go vet`/`go test`/`golangci-lint` only, per the project Notes.
+- [x] Blank content pane seen once in a live tmux run navigating into a service view — reproduced on an untouched service too, likely a tmux/headless-capture artifact, never confirmed live — **Declined**: already investigated; not reproducible outside that one tmux capture and not tied to any specific service, so there's nothing actionable to fix without a repro.
 
 ### Compute & Containers
 - [ ] VM Instances: no perform-maintenance

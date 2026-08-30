@@ -49,6 +49,41 @@ type Revision struct {
 	Image string
 	// Created is when this revision was created.
 	Created time.Time
+
+	// The fields below are only populated by ListRevisions (which reads the
+	// full Revision object), not by the lightweight traffic-target parsing
+	// in ListServices -- they're empty/zero on a Revision embedded directly
+	// in RunService.Revisions until the revisions view fetches the full list.
+
+	// CPULimit/MemoryLimit are the first container's resource limits, e.g.
+	// "1" and "512Mi" (Cloud Run's raw Knative resource-quantity strings).
+	CPULimit    string
+	MemoryLimit string
+	// Concurrency is the max in-flight requests per container instance
+	// (RevisionSpec.ContainerConcurrency; 0 means unset/default).
+	Concurrency int64
+	// TimeoutSeconds is the max request duration (RevisionSpec.TimeoutSeconds).
+	TimeoutSeconds int64
+	// MinScale/MaxScale come from the "autoscaling.knative.dev/{min,max}Scale"
+	// revision template annotations; empty if unset.
+	MinScale string
+	MaxScale string
+	// EnvVars lists the first container's environment variable names only
+	// (not values, since some may be sourced from Secret Manager).
+	EnvVars []string
+	// VolumeCount is the number of volumes mounted (secrets/config, if any).
+	VolumeCount int
+	// VPCConnector comes from the "run.googleapis.com/vpc-access-connector"
+	// annotation; empty if unset.
+	VPCConnector string
+	// ServiceAccount is the revision's runtime identity
+	// (RevisionSpec.ServiceAccountName); empty means the project default.
+	ServiceAccount string
+	// ImageDigest is the resolved digest for Image (RevisionStatus.ImageDigest).
+	ImageDigest string
+	// Conditions summarizes RevisionStatus.Conditions as "Type: Status" pairs
+	// (e.g. "Ready: True", "Active: False").
+	Conditions []string
 }
 
 // TrafficSplitEntry pairs a revision name with the percentage of traffic it

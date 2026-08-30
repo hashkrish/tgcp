@@ -725,20 +725,26 @@ func (m HomeMenuModel) Update(msg tea.Msg) (HomeMenuModel, tea.Cmd) {
 		}
 
 	case tea.MouseMsg:
-		// Mouse click-to-select only works in the flat-list fallback for
-		// now -- the grid's per-cell bounding boxes aren't tracked during
-		// render (unlike the flat list's approximate single-column
-		// getItemFromClickY), so grid mode is keyboard-only in this pass.
-		if m.narrowMode && msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			// Map click Y to a filtered list entry
-			if idx := m.getItemFromClickY(msg.Y); idx >= 0 {
-				// Find which selectable index this corresponds to
-				selectable := m.selectableItems()
-				for si, fi := range selectable {
-					if fi == idx {
-						m.cursor = si
-						break
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if m.narrowMode {
+				// Map click Y to a filtered list entry
+				if idx := m.getItemFromClickY(msg.Y); idx >= 0 {
+					// Find which selectable index this corresponds to
+					selectable := m.selectableItems()
+					for si, fi := range selectable {
+						if fi == idx {
+							m.cursor = si
+							break
+						}
 					}
+				}
+			} else if colIdx, rowIdx, isTopItem, ok := m.gridClickTarget(msg.X, msg.Y); ok {
+				if isTopItem {
+					m.onTopItem = true
+				} else {
+					m.onTopItem = false
+					m.cursorCol = colIdx
+					m.cursorRow = rowIdx
 				}
 			}
 		}
@@ -771,6 +777,119 @@ func (m HomeMenuModel) getItemFromClickY(screenY int) int {
 		return targetRow
 	}
 	return -1
+}
+
+// gridBoxWidth recomputes the same boxWidth renderGrid derives from the
+// rendered content, without a full render, so hit-testing can locate column
+// X-ranges without re-rendering. Mirrors renderGrid's screen-row packing
+// loop exactly (see the comment there) using the same gridColumnWidth
+// helper renderColumn itself uses, so the two can't drift apart on width.
+func (m HomeMenuModel) gridBoxWidth() int {
+	const colGap = 4 // len("    ")
+	maxLineWidth := lipgloss.Width(styles.HeaderStyle.Render("Services"))
+	if fw := lipgloss.Width(m.filter.View()); fw > maxLineWidth {
+		maxLineWidth = fw
+	}
+	if m.TopItem != nil {
+		iconGlyph := serviceIcons[m.TopItem.ShortName]
+		if iconGlyph == "" {
+			iconGlyph = "·"
+		}
+		display := iconGlyph + "  " + m.TopItem.Name
+		if w := lipgloss.Width(styles.SelectedActive.Render(display)); w > maxLineWidth {
+			maxLineWidth = w
+		}
+	}
+	for start := 0; start < len(m.columns); start += m.numCols {
+		end := start + m.numCols
+		if end > len(m.columns) {
+			end = len(m.columns)
+		}
+		rowWidth := 0
+		for i := start; i < end; i++ {
+			if i > start {
+				rowWidth += colGap
+			}
+			rowWidth += gridColumnWidth(m.columns[i])
+		}
+		if rowWidth > maxLineWidth {
+			maxLineWidth = rowWidth
+		}
+	}
+	return maxLineWidth + 2*styles.SpaceM
+}
+
+// gridClickTarget maps a screen (X,Y) to a grid-mode selection: either the
+// Overview strip (isTopItem) or a specific (colIdx, rowIdx) into m.columns.
+// Best-effort, mirroring getItemFromClickY's approach and caveats: the
+// landing page's exact pixel placement isn't tracked, so both axes are
+// estimated from ScreenWidth/ScreenHeight -- X by exploiting the fact that
+// centering the menu box within a body that's itself centered in the screen
+// is algebraically equivalent to centering the box directly in ScreenWidth
+// (see the two Place/JoinVertical(Center) layers in home.go), Y by the same
+// "~40% down" heuristic getItemFromClickY already uses since both live on
+// the same landing page above/below the same chrome.
+func (m HomeMenuModel) gridClickTarget(screenX, screenY int) (colIdx, rowIdx int, isTopItem, ok bool) {
+	if len(m.columns) == 0 && m.TopItem == nil {
+		return 0, 0, false, false
+	}
+
+	const filterBarRows = 2          // filter bar + blank line
+	const boxPaddingY = 1            // top padding of box
+	boxPaddingX := 1 + styles.SpaceM // border(1) + left padding (SpaceM)
+	const titleRows = 2              // "Services" + blank line
+	const topItemRows = 2            // Overview strip + blank line
+
+	menuStartY := m.ScreenHeight * 2 / 5
+	boxWidth := m.gridBoxWidth()
+	menuStartX := (m.ScreenWidth - boxWidth) / 2
+
+	relY := screenY - menuStartY - boxPaddingY - titleRows - filterBarRows
+	relX := screenX - menuStartX - boxPaddingX
+	if relY < 0 || relX < 0 {
+		return 0, 0, false, false
+	}
+
+	if relY == 0 {
+		return 0, 0, true, m.TopItem != nil
+	}
+
+	bodyY := relY - topItemRows
+	if bodyY < 0 || len(m.columns) == 0 {
+		return 0, 0, false, false
+	}
+
+	const colGap = 4
+	for start := 0; start < len(m.columns); start += m.numCols {
+		end := start + m.numCols
+		if end > len(m.columns) {
+			end = len(m.columns)
+		}
+		rowHeight := 0
+		for i := start; i < end; i++ {
+			if h := 1 + len(m.columns[i].rows); h > rowHeight {
+				rowHeight = h
+			}
+		}
+		if bodyY < rowHeight {
+			// Click lands within this screen-row-of-columns; find the column via X.
+			x := 0
+			for i := start; i < end; i++ {
+				w := gridColumnWidth(m.columns[i])
+				if relX >= x && relX < x+w {
+					ri := bodyY - 1 // header occupies line 0
+					if ri >= 0 && ri < len(m.columns[i].rows) {
+						return i, ri, false, true
+					}
+					return 0, 0, false, false
+				}
+				x += w + colGap
+			}
+			return 0, 0, false, false
+		}
+		bodyY -= rowHeight
+	}
+	return 0, 0, false, false
 }
 
 func (m HomeMenuModel) View() string {
@@ -932,16 +1051,20 @@ func measureServiceRowWidth(e listEntry) int {
 // wider than this are truncated with an ellipsis (see truncateToWidth).
 const maxGridColWidth = 32
 
-// renderColumn renders one category's header + service rows as a single
-// fixed-width block, used by renderGrid.
-func (m HomeMenuModel) renderColumn(col gridColumn, colIdx int) string {
+// gridColumnWidth returns the fixed rendered width renderColumn uses for
+// col, factored out so hit-testing (computeGridHitRegions) can compute the
+// exact same column boundaries without duplicating (and risking drifting
+// out of sync with) the render logic.
+func gridColumnHeader(col gridColumn) string {
 	catHeaderStyle := lipgloss.NewStyle().
 		Foreground(CategoryColor(col.categoryName)).
 		Bold(true).
 		PaddingLeft(styles.SpaceS)
-	header := catHeaderStyle.Render(strings.ToUpper(col.categoryName))
+	return catHeaderStyle.Render(strings.ToUpper(col.categoryName))
+}
 
-	width := lipgloss.Width(header)
+func gridColumnWidth(col gridColumn) int {
+	width := lipgloss.Width(gridColumnHeader(col))
 	for _, e := range col.rows {
 		if w := measureServiceRowWidth(e); w > width {
 			width = w
@@ -950,6 +1073,14 @@ func (m HomeMenuModel) renderColumn(col gridColumn, colIdx int) string {
 	if width > maxGridColWidth {
 		width = maxGridColWidth
 	}
+	return width
+}
+
+// renderColumn renders one category's header + service rows as a single
+// fixed-width block, used by renderGrid.
+func (m HomeMenuModel) renderColumn(col gridColumn, colIdx int) string {
+	header := gridColumnHeader(col)
+	width := gridColumnWidth(col)
 
 	lines := []string{header}
 	for ri, e := range col.rows {
@@ -1132,8 +1263,8 @@ func (m *HomeMenuModel) UpdateViewportRows() {
 // menu falls back to the flat list entirely -- there's no "1-column grid"
 // mode, since at that point a grid is just a list with extra header rows.
 func (m *HomeMenuModel) UpdateViewportCols() {
-	const colGap = 4       // spacing rendered between adjacent columns
-	const minColWidth = 20 // shortest a category column can render legibly
+	const colGap = 4                      // spacing rendered between adjacent columns
+	const minColWidth = 20                // shortest a category column can render legibly
 	const boxChrome = 2*styles.SpaceM + 2 // box padding + border, same budget convention as boxWidth below
 
 	numCols := 1
