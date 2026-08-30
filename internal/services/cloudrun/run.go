@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -43,6 +44,7 @@ const (
 	ViewRevisions
 	ViewRevisionDetail
 	ViewTagRevision
+	ViewSplitTraffic
 )
 
 // newServiceCreateForm builds the FormModel for creating a new Cloud Run service.
@@ -88,6 +90,59 @@ func validateRevisionTag(v string) string {
 func newRevisionTagForm(rev Revision) components.FormModel {
 	return components.NewForm("Tag Revision: "+rev.Name, []components.FormField{
 		{Label: "Tag", Default: rev.Tag, Placeholder: "canary", Required: true, Validate: validateRevisionTag},
+	})
+}
+
+// trafficSplitPattern matches one "revision=percent" pair within a
+// comma-separated traffic split spec.
+var trafficSplitPattern = regexp.MustCompile(`^\s*([^\s=]+)\s*=\s*(\d{1,3})\s*$`)
+
+// parseTrafficSplit parses a comma-separated "rev1=50,rev2=50" spec into
+// TrafficSplitEntry values, validating that percentages are 0-100 and sum
+// to exactly 100 (matching gcloud's --to-revisions requirement).
+func parseTrafficSplit(v string) ([]TrafficSplitEntry, string) {
+	parts := strings.Split(v, ",")
+	entries := make([]TrafficSplitEntry, 0, len(parts))
+	total := int64(0)
+	for _, part := range parts {
+		m := trafficSplitPattern.FindStringSubmatch(part)
+		if m == nil {
+			return nil, fmt.Sprintf("invalid entry %q, expected revision=percent", strings.TrimSpace(part))
+		}
+		pct, err := strconv.ParseInt(m[2], 10, 64)
+		if err != nil || pct < 0 || pct > 100 {
+			return nil, fmt.Sprintf("invalid percent in %q", strings.TrimSpace(part))
+		}
+		entries = append(entries, TrafficSplitEntry{RevisionName: m[1], Percent: pct})
+		total += pct
+	}
+	if total != 100 {
+		return nil, fmt.Sprintf("percentages must sum to 100, got %d", total)
+	}
+	return entries, ""
+}
+
+// newTrafficSplitForm builds the FormModel for an N-way traffic split
+// across the service's revisions, matching `gcloud run services
+// update-traffic --to-revisions=REV1=P1,REV2=P2,...`.
+func newTrafficSplitForm(revisions []Revision) components.FormModel {
+	current := make([]string, 0, len(revisions))
+	for _, r := range revisions {
+		if r.Percent > 0 {
+			current = append(current, fmt.Sprintf("%s=%d", r.Name, r.Percent))
+		}
+	}
+	return components.NewForm("Split Traffic", []components.FormField{
+		{
+			Label:       "Revisions",
+			Default:     strings.Join(current, ","),
+			Placeholder: "rev1=50,rev2=50",
+			Required:    true,
+			Validate: func(v string) string {
+				_, errMsg := parseTrafficSplit(v)
+				return errMsg
+			},
+		},
 	})
 }
 
@@ -154,9 +209,10 @@ type Service struct {
 	selectedRevision *Revision
 
 	// Confirmation State
-	pendingAction   string    // "delete", "promote", "tag"
-	pendingTagValue string    // tag value staged by the tag form, for the "tag" pendingAction
-	actionSource    ViewState // Where to return after confirmation/cancel
+	pendingAction   string              // "delete", "promote", "tag", "untag", "delete-revision", "split-traffic"
+	pendingTagValue string              // tag value staged by the tag form, for the "tag" pendingAction
+	pendingSplit    []TrafficSplitEntry // traffic split staged by the split form, for the "split-traffic" pendingAction
+	actionSource    ViewState           // Where to return after confirmation/cancel
 
 	// Create State
 	createForm components.FormModel
@@ -166,6 +222,9 @@ type Service struct {
 
 	// Tag Revision State
 	tagForm components.FormModel
+
+	// Traffic Split State
+	splitForm components.FormModel
 
 	// Cache
 	cache *core.Cache
@@ -241,15 +300,15 @@ func (s *Service) HelpText() string {
 		return "Esc/q:Back"
 	}
 	if s.viewState == ViewRevisions {
-		return "Esc/q:Back  Ent:Detail  p:Promote  t:Tag"
+		return "Esc/q:Back  Ent:Detail  p:Promote  s:Split  t:Tag  T:Untag  d:Delete"
 	}
 	if s.viewState == ViewRevisionDetail {
-		return "Esc/q:Back  p:Promote  t:Tag"
+		return "Esc/q:Back  p:Promote  t:Tag  T:Untag  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewTagRevision {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewTagRevision || s.viewState == ViewSplitTraffic {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
 	return ""
@@ -309,6 +368,7 @@ func (s *Service) Reset() {
 	s.selectedRevision = nil
 	s.pendingAction = ""
 	s.pendingTagValue = ""
+	s.pendingSplit = nil
 	s.err = nil          // CRITICAL: Always clear errors on reset
 	s.table.SetCursor(0) // Reset table position
 	s.funcTable.SetCursor(0)
@@ -677,6 +737,35 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return s, nil
+			case "s": // Split traffic across revisions
+				if s.selectedService != nil {
+					s.splitForm = newTrafficSplitForm(s.selectedService.Revisions)
+					s.actionSource = ViewRevisions
+					s.viewState = ViewSplitTraffic
+				}
+				return s, nil
+			case "T": // Remove tag from selected revision
+				if s.selectedService != nil {
+					revs := s.selectedService.Revisions
+					if idx := s.revTable.Cursor(); idx >= 0 && idx < len(revs) && revs[idx].Tag != "" {
+						s.selectedRevision = &revs[idx]
+						s.pendingAction = "untag"
+						s.actionSource = ViewRevisions
+						s.viewState = ViewConfirmation
+					}
+				}
+				return s, nil
+			case "d": // Delete selected revision
+				if s.selectedService != nil {
+					revs := s.selectedService.Revisions
+					if idx := s.revTable.Cursor(); idx >= 0 && idx < len(revs) {
+						s.selectedRevision = &revs[idx]
+						s.pendingAction = "delete-revision"
+						s.actionSource = ViewRevisions
+						s.viewState = ViewConfirmation
+					}
+				}
+				return s, nil
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.revTable.Update(msg)
@@ -703,6 +792,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewTagRevision
 				}
 				return s, nil
+			case "T":
+				if s.selectedService != nil && s.selectedRevision != nil && s.selectedRevision.Tag != "" {
+					s.pendingAction = "untag"
+					s.actionSource = ViewRevisionDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "d":
+				if s.selectedService != nil && s.selectedRevision != nil {
+					s.pendingAction = "delete-revision"
+					s.actionSource = ViewRevisionDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
 			}
 
 		case ViewTagRevision:
@@ -715,6 +818,25 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				vals := s.tagForm.Values()
 				s.pendingTagValue = vals["Tag"]
 				s.pendingAction = "tag"
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+
+		case ViewSplitTraffic:
+			result, fcmd := s.splitForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = s.actionSource
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.splitForm.Values()
+				split, errMsg := parseTrafficSplit(vals["Revisions"])
+				if errMsg != "" {
+					return s, nil
+				}
+				s.pendingSplit = split
+				s.pendingAction = "split-traffic"
 				s.viewState = ViewConfirmation
 				return s, nil
 			}
@@ -741,14 +863,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						actionCmd = s.TagRevisionCmd(*s.selectedService, *s.selectedRevision, s.pendingTagValue)
 					}
 					s.viewState = ViewRevisions
+				case "untag":
+					if s.selectedService != nil && s.selectedRevision != nil {
+						actionCmd = s.UntagRevisionCmd(*s.selectedService, *s.selectedRevision)
+					}
+					s.viewState = s.actionSource
+				case "delete-revision":
+					if s.selectedService != nil && s.selectedRevision != nil {
+						actionCmd = s.DeleteRevisionCmd(*s.selectedService, *s.selectedRevision)
+					}
+					s.viewState = ViewRevisions
+					s.selectedRevision = nil
+				case "split-traffic":
+					if s.selectedService != nil {
+						actionCmd = s.SetTrafficSplitCmd(*s.selectedService, s.pendingSplit)
+					}
+					s.viewState = ViewRevisions
 				}
 				s.pendingAction = ""
 				s.pendingTagValue = ""
+				s.pendingSplit = nil
 				return s, actionCmd
 			case "n", "esc", "q":
 				s.viewState = s.actionSource
 				s.pendingAction = ""
 				s.pendingTagValue = ""
+				s.pendingSplit = nil
 				return s, nil
 			}
 
@@ -825,6 +965,10 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewTagRevision {
 		return s.tagForm.View()
+	}
+
+	if s.viewState == ViewSplitTraffic {
+		return s.splitForm.View()
 	}
 
 	// Default: List View
@@ -943,7 +1087,8 @@ func (s *Service) renderRevisionsView() string {
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("revisions"))
 	}
 
-	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.revTable.View())
+	hint := "p Promote  |  s Split Traffic  |  t Tag  |  T Remove Tag  |  d Delete  |  enter Details  |  q Back"
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.revTable.View(), "", styles.HelpStyle.Render(hint))
 }
 
 // renderRevisionDetailView renders full details for a single revision.
@@ -981,14 +1126,14 @@ func (s *Service) renderRevisionDetailView() string {
 			{Key: "Tag", Value: tag},
 			{Key: "Created", Value: created},
 		},
-		FooterHint: "Press 'q' or 'esc' to return",
+		FooterHint: "p Promote  |  t Tag  |  T Remove Tag  |  d Delete  |  q Back",
 	})
 
 	return lipgloss.JoinVertical(lipgloss.Left, title, "", card)
 }
 
 // renderConfirmation renders the confirmation dialog for the pending action:
-// service deletion, or a revision promote/tag.
+// service deletion/traffic-split, or a revision promote/tag/untag/delete.
 func (s *Service) renderConfirmation() string {
 	switch s.pendingAction {
 	case "promote":
@@ -1011,6 +1156,35 @@ func (s *Service) renderConfirmation() string {
 			s.pendingTagValue,
 		)
 		return components.RenderConfirmationWithMessage("tag", s.selectedRevision.Name, "revision", message)
+	case "untag":
+		if s.selectedService == nil || s.selectedRevision == nil {
+			return "Error: No revision selected"
+		}
+		message := fmt.Sprintf(
+			"Remove tag %q from revision %s?",
+			s.selectedRevision.Tag,
+			styles.TitleStyle.Render(s.selectedRevision.Name),
+		)
+		return components.RenderConfirmationWithMessage("untag", s.selectedRevision.Name, "revision", message)
+	case "delete-revision":
+		if s.selectedService == nil || s.selectedRevision == nil {
+			return "Error: No revision selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedRevision.Name, "revision")
+	case "split-traffic":
+		if s.selectedService == nil {
+			return "Error: No service selected"
+		}
+		parts := make([]string, 0, len(s.pendingSplit))
+		for _, e := range s.pendingSplit {
+			parts = append(parts, fmt.Sprintf("%s: %d%%", e.RevisionName, e.Percent))
+		}
+		message := fmt.Sprintf(
+			"Set traffic split on %s?\n\n%s",
+			styles.TitleStyle.Render(s.selectedService.Name),
+			strings.Join(parts, "\n"),
+		)
+		return components.RenderConfirmationWithMessage("split-traffic", s.selectedService.Name, "service", message)
 	default:
 		if s.selectedService == nil {
 			return "Error: No service selected"
@@ -1120,6 +1294,47 @@ func (s *Service) TagRevisionCmd(svc RunService, rev Revision, tag string) tea.C
 			return revisionActionResultMsg{err: err}
 		}
 		return revisionActionResultMsg{msg: fmt.Sprintf("Tagged revision %s as %q", rev.Name, tag)}
+	}
+}
+
+// UntagRevisionCmd removes rev's URL tag on svc, preserving every other traffic target.
+func (s *Service) UntagRevisionCmd(svc RunService, rev Revision) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UntagRevision(s.projectID, svc.Region, svc.Name, rev.Name); err != nil {
+			return revisionActionResultMsg{err: err}
+		}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Removed tag from revision %s", rev.Name)}
+	}
+}
+
+// SetTrafficSplitCmd replaces svc's entire traffic split with an arbitrary
+// N-way distribution across named revisions.
+func (s *Service) SetTrafficSplitCmd(svc RunService, split []TrafficSplitEntry) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.SetTrafficSplit(s.projectID, svc.Region, svc.Name, split); err != nil {
+			return revisionActionResultMsg{err: err}
+		}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Updated traffic split for %s", svc.Name)}
+	}
+}
+
+// DeleteRevisionCmd deletes rev. Cloud Run rejects deletion of a revision
+// still receiving traffic, so the request simply surfaces that error.
+func (s *Service) DeleteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteRevision(s.projectID, svc.Region, rev.Name); err != nil {
+			return revisionActionResultMsg{err: err}
+		}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Deleting revision %s...", rev.Name)}
 	}
 }
 

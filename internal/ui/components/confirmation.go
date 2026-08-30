@@ -103,12 +103,32 @@ func getActionStyle(action string) actionStyle {
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
 			impactText:  "This replaces the current traffic split entirely.",
 		}
+	case "split-traffic":
+		// Replaces the entire traffic split across multiple revisions --
+		// same all-or-nothing-cutover risk profile as "promote".
+		return actionStyle{
+			icon:        "🚀",
+			title:       "Confirm Traffic Split",
+			borderColor: styles.ColorWarning,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
+			impactText:  "This replaces the current traffic split entirely.",
+		}
 	case "tag":
 		// Adds/updates a URL tag without touching the traffic split --
 		// low-risk, neutral styling.
 		return actionStyle{
 			icon:        "🏷",
 			title:       "Confirm Tag",
+			borderColor: styles.ColorBrandAccent,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true),
+			impactText:  "",
+		}
+	case "untag":
+		// Removes a URL tag without touching the traffic split -- same
+		// low-risk styling as "tag".
+		return actionStyle{
+			icon:        "🏷",
+			title:       "Confirm Remove Tag",
 			borderColor: styles.ColorBrandAccent,
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true),
 			impactText:  "",

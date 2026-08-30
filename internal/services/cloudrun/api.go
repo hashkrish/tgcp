@@ -320,6 +320,115 @@ func (c *Client) TagRevision(projectID, region, serviceName, revisionName, tag s
 	return err
 }
 
+// SetTrafficSplit replaces the entire traffic split with an arbitrary N-way
+// distribution across named revisions, matching `gcloud run services
+// update-traffic --to-revisions=REV1=P1,REV2=P2,...`. Any existing URL tags
+// on revisions kept in splits are preserved; revisions dropped from splits
+// lose their traffic (but keep their tag as a 0%-traffic target, matching
+// gcloud's behavior of only touching what --to-revisions names).
+func (c *Client) SetTrafficSplit(projectID, region, serviceName string, splits []TrafficSplitEntry) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
+
+	svc, err := c.service.Projects.Locations.Services.Get(fqName).Do()
+	if err != nil {
+		return err
+	}
+	if svc.Spec == nil {
+		return fmt.Errorf("service %s has no spec to update", serviceName)
+	}
+
+	existingTags := make(map[string]string, len(svc.Spec.Traffic))
+	for _, t := range svc.Spec.Traffic {
+		if t.Tag != "" {
+			existingTags[t.RevisionName] = t.Tag
+		}
+	}
+
+	targets := make([]*run.TrafficTarget, 0, len(splits))
+	seen := make(map[string]bool, len(splits))
+	for _, split := range splits {
+		targets = append(targets, &run.TrafficTarget{
+			RevisionName: split.RevisionName,
+			Percent:      split.Percent,
+			Tag:          existingTags[split.RevisionName],
+		})
+		seen[split.RevisionName] = true
+	}
+	// Preserve tag-only (0%-traffic) targets for revisions not named in the
+	// new split, matching gcloud's --to-revisions semantics.
+	for name, tag := range existingTags {
+		if !seen[name] {
+			targets = append(targets, &run.TrafficTarget{RevisionName: name, Percent: 0, Tag: tag})
+		}
+	}
+	svc.Spec.Traffic = targets
+
+	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
+	return err
+}
+
+// UntagRevision removes a URL tag from a revision, matching
+// `gcloud run services update-traffic --remove-tags=TAG`. If the tagged
+// revision is carrying 0% traffic (i.e. it only exists as a tagged target,
+// not part of the active split), its traffic target is dropped entirely
+// rather than left behind with an empty tag.
+func (c *Client) UntagRevision(projectID, region, serviceName, revisionName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
+
+	svc, err := c.service.Projects.Locations.Services.Get(fqName).Do()
+	if err != nil {
+		return err
+	}
+	if svc.Spec == nil {
+		return fmt.Errorf("service %s has no spec to update", serviceName)
+	}
+
+	targets := make([]*run.TrafficTarget, 0, len(svc.Spec.Traffic))
+	for _, t := range svc.Spec.Traffic {
+		if t.RevisionName == revisionName {
+			if t.Percent == 0 {
+				continue // drop the tag-only target entirely
+			}
+			t.Tag = ""
+		}
+		targets = append(targets, t)
+	}
+	svc.Spec.Traffic = targets
+
+	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
+	return err
+}
+
+// DeleteRevision deletes a single Cloud Run revision, matching
+// `gcloud run revisions delete`. Cloud Run refuses to delete a revision
+// still receiving traffic, so no client-side guard is needed here.
+func (c *Client) DeleteRevision(projectID, region, revisionName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	fqName := fmt.Sprintf("projects/%s/locations/%s/revisions/%s", projectID, region, revisionName)
+	_, err := c.service.Projects.Locations.Revisions.Delete(fqName).Do()
+	return err
+}
+
 // DeleteService deletes a Cloud Run service, matching `gcloud run services delete`.
 func (c *Client) DeleteService(projectID, region, name string) error {
 	if demo.Enabled {

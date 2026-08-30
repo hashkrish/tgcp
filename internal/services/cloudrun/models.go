@@ -50,3 +50,11 @@ type Revision struct {
 	// Created is when this revision was created.
 	Created time.Time
 }
+
+// TrafficSplitEntry pairs a revision name with the percentage of traffic it
+// should receive, for an N-way traffic split (`gcloud run services
+// update-traffic --to-revisions=REV1=P1,REV2=P2,...`).
+type TrafficSplitEntry struct {
+	RevisionName string
+	Percent      int64
+}

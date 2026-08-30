@@ -61,6 +61,7 @@ func TestFilterCommands_SubstringBeatsFuzzy(t *testing.T) {
 // anything -- the fix is that recency only reorders the top of the list,
 // it never hides commands from it.
 func TestFilterCommands_EmptyQueryShowsFullList(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // ExecuteSelection persists recent names to $HOME/.tgcp
 	m := NewNavigation()
 	cmds := fixtureCommands()
 	m.SetCommands(cmds)

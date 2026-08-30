@@ -59,8 +59,8 @@ type NavigationModel struct {
 	Selection     int
 
 	// RecentNames tracks the most-recently-executed command names,
-	// most-recent-first, deduped, capped at recentNamesCap. Session-only
-	// (not persisted) -- shown as the default suggestion list when the
+	// most-recent-first, deduped, capped at recentNamesCap. Persisted to
+	// ~/.tgcp/recent.json -- shown as the default suggestion list when the
 	// palette opens with an empty query, instead of showing nothing.
 	RecentNames []string
 }
@@ -77,6 +77,7 @@ func NewNavigation() NavigationModel {
 		BaseCommands:  defaults,
 		PaletteActive: false,
 		Suggestions:   []SuggestionMatch{},
+		RecentNames:   loadRecentNames(),
 	}
 }
 
@@ -289,4 +290,5 @@ func (m *NavigationModel) recordRecent(name string) {
 		}
 	}
 	m.RecentNames = recent
+	saveRecentNames(recent)
 }
