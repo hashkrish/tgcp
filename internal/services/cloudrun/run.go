@@ -1583,7 +1583,7 @@ func (s *Service) DeleteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 // the view reflects the change immediately instead of a stale cache entry).
 func (s *Service) fetchRevisionsCmd(svc RunService, force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "cloudrun_revisions_" + svc.Name
+		key := fmt.Sprintf("cloudrun_revisions_%s:%s", svc.Name, s.projectID)
 		if !force && s.cache != nil {
 			if val, found := s.cache.Get(key); found {
 				if revs, ok := val.([]Revision); ok {
@@ -1607,7 +1607,7 @@ func (s *Service) fetchRevisionsCmd(svc RunService, force bool) tea.Cmd {
 
 func (s *Service) fetchDataCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "cloudrun_services"
+		key := fmt.Sprintf("cloudrun_services:%s", s.projectID)
 
 		// 1. Check Cache
 		if !force && s.cache != nil {
@@ -1676,7 +1676,7 @@ func (s *Service) updateRevTable(revisions []Revision) {
 
 func (s *Service) fetchFunctionsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "cloudrun_functions"
+		key := fmt.Sprintf("cloudrun_functions:%s", s.projectID)
 		if !force && s.cache != nil {
 			if val, found := s.cache.Get(key); found {
 				if items, ok := val.([]Function); ok {

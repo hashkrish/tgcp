@@ -801,7 +801,7 @@ func (s *Service) renderConfirmation() string {
 // Cmd to fetch accounts
 func (s *Service) fetchAccountsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "iam_accounts"
+		key := fmt.Sprintf("iam_accounts:%s", s.projectID)
 
 		// 1. Check Cache
 		if !force && s.cache != nil {

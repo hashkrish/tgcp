@@ -897,7 +897,7 @@ func (s *Service) View() string {
 // Cmd to fetch instances
 func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "gce_instances"
+		key := fmt.Sprintf("gce_instances:%s", s.projectID)
 
 		// 1. Check Cache
 		if !force && s.cache != nil {
@@ -930,7 +930,7 @@ func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 // Cmd to fetch instance groups (MIGs)
 func (s *Service) fetchGroupsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "gce_instance_groups"
+		key := fmt.Sprintf("gce_instance_groups:%s", s.projectID)
 
 		if !force && s.cache != nil {
 			if val, found := s.cache.Get(key); found {

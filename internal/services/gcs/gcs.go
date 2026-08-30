@@ -1308,7 +1308,7 @@ func (s *Service) addIAMBindingCmd(b Bucket, role, member string) tea.Cmd {
 
 func (s *Service) fetchBucketsCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "gcs_buckets"
+		key := fmt.Sprintf("gcs_buckets:%s", s.projectID)
 
 		// 1. Check Cache
 		if !force && s.cache != nil {

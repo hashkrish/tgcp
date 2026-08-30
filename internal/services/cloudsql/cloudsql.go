@@ -1036,7 +1036,7 @@ func (s *Service) View() string {
 // Cmd to fetch instances
 func (s *Service) fetchInstancesCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
-		key := "sql_instances"
+		key := fmt.Sprintf("sql_instances:%s", s.projectID)
 
 		// 1. Check Cache
 		if !force && s.cache != nil {
