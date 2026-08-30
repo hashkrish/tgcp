@@ -67,9 +67,13 @@ func (s *Service) renderListView() string {
 		uStyle = styles.InactiveTabStyle
 		aStyle = styles.ActiveTabStyle
 	}
+	// Tab labels need explicit leading/trailing spaces now that
+	// ActiveTabStyle/InactiveTabStyle are plain text with no padding --
+	// without them adjacent labels render with zero separation between
+	// them (e.g. "Uptime ChecksAlert Policies").
 	tabs := lipgloss.JoinHorizontal(lipgloss.Top,
-		uStyle.Render("Uptime Checks"),
-		aStyle.Render("Alert Policies"),
+		uStyle.Render(" Uptime Checks "),
+		aStyle.Render(" Alert Policies "),
 	)
 
 	var content string

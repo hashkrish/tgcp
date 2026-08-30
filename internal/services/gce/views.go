@@ -5,9 +5,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/styles"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
+
+// renderTabBar renders the Instances/Instance Groups tab strip. Previously
+// there was no visible tab bar at all here -- only the status bar's
+// "[]:Tabs" hint and the breadcrumb's trailing segment ("Instances" vs.
+// "Instance Groups") indicated which tab was active, so switching tabs via
+// '['/']' was effectively invisible unless a user already knew to look for
+// it and blind-pressed the keys.
+func (s *Service) renderTabBar() string {
+	instancesStyle, groupsStyle := styles.InactiveTabStyle, styles.InactiveTabStyle
+	if s.activeTab == TabInstanceGroups {
+		groupsStyle = styles.ActiveTabStyle
+	} else {
+		instancesStyle = styles.ActiveTabStyle
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top,
+		instancesStyle.Render(" Instances "),
+		groupsStyle.Render(" Instance Groups "),
+	)
+}
 
 // renderDetailView renders the details of a single instance
 func (s *Service) renderDetailView() string {
@@ -99,12 +119,14 @@ func (s *Service) renderListView() string {
 func (s *Service) renderInstancesView() string {
 	doc := strings.Builder{}
 
-	// Breadcrumb + Filter Bar
+	// Breadcrumb + Tabs + Filter Bar
 	doc.WriteString(components.Breadcrumb(
 		fmt.Sprintf("Project %s", s.projectID),
 		s.Name(),
 		"Instances",
 	))
+	doc.WriteString("\n")
+	doc.WriteString(s.renderTabBar())
 	doc.WriteString("\n")
 	doc.WriteString(s.filter.View())
 	doc.WriteString("\n")
@@ -135,6 +157,8 @@ func (s *Service) renderGroupsView() string {
 		s.Name(),
 		"Instance Groups",
 	))
+	doc.WriteString("\n")
+	doc.WriteString(s.renderTabBar())
 	doc.WriteString("\n\n")
 
 	if len(s.groups) == 0 {
