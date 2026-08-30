@@ -21,6 +21,7 @@ package loadbalancing
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -204,7 +205,14 @@ func (s *Service) HelpText() string {
 		return "[]:Tabs  r:Refresh  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  d:Delete"
+		switch s.activeTab {
+		case TabBackendServices:
+			return "Esc/q:Back  d:Delete  u:Update Timeout  h:Health  g:Grant IAM"
+		case TabUrlMaps:
+			return "Esc/q:Back  d:Delete  i:Invalidate Cache"
+		default:
+			return "Esc/q:Back  d:Delete"
+		}
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
@@ -533,9 +541,26 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			result, formCmd := s.createForm.Update(msg)
 			if result.Cancelled {
 				s.viewState = s.createReturnTo
+				s.pendingAction = ""
 				return s, nil
 			}
 			if result.Submitted {
+				action := s.pendingAction
+				s.pendingAction = ""
+				switch action {
+				case "invalidate-cache":
+					if s.selectedUrlMap != nil {
+						return s, s.invalidateCacheCmd(*s.selectedUrlMap)
+					}
+				case "grant-iam":
+					if s.selectedBackend != nil {
+						return s, s.grantBackendIAMCmd(*s.selectedBackend)
+					}
+				case "update-timeout":
+					if s.selectedBackend != nil {
+						return s, s.updateBackendTimeoutCmd(*s.selectedBackend)
+					}
+				}
 				return s, s.createHealthCheckCmd()
 			}
 			return s, formCmd
@@ -616,10 +641,54 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			case "d":
 				if (s.activeTab == TabBackendServices && s.selectedBackend != nil) ||
-					(s.activeTab == TabHealthChecks && s.selectedHealth != nil) {
+					(s.activeTab == TabHealthChecks && s.selectedHealth != nil) ||
+					(s.activeTab == TabUrlMaps && s.selectedUrlMap != nil) ||
+					(s.activeTab == TabForwardingRules && s.selectedFwdRule != nil) ||
+					(s.activeTab == TabSslCertificates && s.selectedSslCert != nil) {
 					s.pendingAction = "delete"
 					s.actionSource = ViewDetail
 					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "u": // Update timeout (Backend Services tab only)
+				if s.activeTab == TabBackendServices && s.selectedBackend != nil {
+					s.createForm = components.NewForm("Update Timeout: "+s.selectedBackend.Name, []components.FormField{
+						{Label: "Timeout Sec", Default: fmt.Sprintf("%d", s.selectedBackend.TimeoutSec), Required: true, Validate: func(v string) string {
+							if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+								return "must be an integer"
+							}
+							return ""
+						}},
+					})
+					s.createReturnTo = ViewDetail
+					s.viewState = ViewCreate
+					s.pendingAction = "update-timeout"
+				}
+				return s, nil
+			case "h": // Get health (Backend Services tab only)
+				if s.activeTab == TabBackendServices && s.selectedBackend != nil {
+					return s, s.getBackendHealthCmd(*s.selectedBackend)
+				}
+				return s, nil
+			case "i": // Invalidate CDN cache (URL Maps tab only)
+				if s.activeTab == TabUrlMaps && s.selectedUrlMap != nil {
+					s.createForm = components.NewForm("Invalidate CDN Cache: "+s.selectedUrlMap.Name, []components.FormField{
+						{Label: "Path", Default: "/*", Required: true},
+					})
+					s.createReturnTo = ViewDetail
+					s.viewState = ViewCreate
+					s.pendingAction = "invalidate-cache"
+				}
+				return s, nil
+			case "g": // Grant IAM role (Backend Services tab only)
+				if s.activeTab == TabBackendServices && s.selectedBackend != nil {
+					s.createForm = components.NewForm("Grant IAM Role: "+s.selectedBackend.Name, []components.FormField{
+						{Label: "Member", Placeholder: "user:alice@example.com", Required: true},
+						{Label: "Role", Default: "roles/compute.loadBalancerServiceUser", Required: true},
+					})
+					s.createReturnTo = ViewDetail
+					s.viewState = ViewCreate
+					s.pendingAction = "grant-iam"
 				}
 				return s, nil
 			}
@@ -629,10 +698,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y", "enter":
 				var actionCmd tea.Cmd
 				if s.pendingAction == "delete" {
-					if s.activeTab == TabBackendServices && s.selectedBackend != nil {
+					switch {
+					case s.activeTab == TabBackendServices && s.selectedBackend != nil:
 						actionCmd = s.deleteBackendCmd(*s.selectedBackend)
-					} else if s.activeTab == TabHealthChecks && s.selectedHealth != nil {
+					case s.activeTab == TabHealthChecks && s.selectedHealth != nil:
 						actionCmd = s.deleteHealthCheckCmd(*s.selectedHealth)
+					case s.activeTab == TabUrlMaps && s.selectedUrlMap != nil:
+						actionCmd = s.deleteUrlMapCmd(*s.selectedUrlMap)
+					case s.activeTab == TabForwardingRules && s.selectedFwdRule != nil:
+						actionCmd = s.deleteForwardingRuleCmd(*s.selectedFwdRule)
+					case s.activeTab == TabSslCertificates && s.selectedSslCert != nil:
+						actionCmd = s.deleteSslCertificateCmd(*s.selectedSslCert)
 					}
 				}
 				// Stay on actionSource (and keep pendingAction "delete")
@@ -678,19 +754,37 @@ func (s *Service) View() string {
 	return s.renderWithTabs()
 }
 
-// renderConfirmation renders the backend-service/health-check delete
-// confirmation dialog.
+// renderConfirmation renders the resource-delete confirmation dialog for
+// whichever tab/resource is currently selected.
 func (s *Service) renderConfirmation() string {
-	if s.activeTab == TabBackendServices {
+	switch s.activeTab {
+	case TabBackendServices:
 		if s.selectedBackend == nil {
 			return "Error: No backend service selected"
 		}
 		return components.RenderConfirmation(s.pendingAction, s.selectedBackend.Name, "backend service")
+	case TabHealthChecks:
+		if s.selectedHealth == nil {
+			return "Error: No health check selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedHealth.Name, "health check")
+	case TabUrlMaps:
+		if s.selectedUrlMap == nil {
+			return "Error: No URL map selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedUrlMap.Name, "URL map")
+	case TabForwardingRules:
+		if s.selectedFwdRule == nil {
+			return "Error: No forwarding rule selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedFwdRule.Name, "forwarding rule")
+	case TabSslCertificates:
+		if s.selectedSslCert == nil {
+			return "Error: No SSL certificate selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedSslCert.Name, "SSL certificate")
 	}
-	if s.selectedHealth == nil {
-		return "Error: No health check selected"
-	}
-	return components.RenderConfirmation(s.pendingAction, s.selectedHealth.Name, "health check")
+	return "Error: No resource selected"
 }
 
 // createHealthCheckCmd fires the CreateHealthCheck API call using the
@@ -712,6 +806,70 @@ func (s *Service) createHealthCheckCmd() tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating health check %s...", opts.Name)}
+	}
+}
+
+// invalidateCacheCmd fires the InvalidateUrlMapCache API call using the
+// current createForm value.
+func (s *Service) invalidateCacheCmd(um UrlMap) tea.Cmd {
+	path := s.createForm.Value("Path")
+	s.viewState = s.createReturnTo
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.InvalidateUrlMapCache(s.projectID, um.Name, path); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Invalidating cache for %s at path %s...", um.Name, path)}
+	}
+}
+
+// grantBackendIAMCmd fires the AddBackendServiceIAMBinding API call using
+// the current createForm values.
+func (s *Service) grantBackendIAMCmd(bs BackendService) tea.Cmd {
+	member := s.createForm.Value("Member")
+	role := s.createForm.Value("Role")
+	s.viewState = s.createReturnTo
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddBackendServiceIAMBinding(s.projectID, bs.Region, bs.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on backend service %s", role, member, bs.Name)}
+	}
+}
+
+// updateBackendTimeoutCmd fires the UpdateBackendServiceTimeout API call
+// using the current createForm value.
+func (s *Service) updateBackendTimeoutCmd(bs BackendService) tea.Cmd {
+	timeout, _ := strconv.ParseInt(s.createForm.Value("Timeout Sec"), 10, 64)
+	s.viewState = s.createReturnTo
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateBackendServiceTimeout(s.projectID, bs.Region, bs.Name, timeout); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating timeout for %s...", bs.Name)}
+	}
+}
+
+// getBackendHealthCmd fires the GetBackendServiceHealth API call and
+// surfaces the result as a toast (there's no dedicated health-detail view).
+func (s *Service) getBackendHealthCmd(bs BackendService) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		status, err := s.client.GetBackendServiceHealth(s.projectID, bs.Region, bs.Name)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("%s health: %s", bs.Name, status)}
 	}
 }
 
@@ -1004,6 +1162,45 @@ func (s *Service) deleteHealthCheckCmd(hc HealthCheck) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting health check %s...", hc.Name)}
+	}
+}
+
+// deleteUrlMapCmd triggers deletion of the given URL map.
+func (s *Service) deleteUrlMapCmd(um UrlMap) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteUrlMap(s.projectID, um.Region, um.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting URL map %s...", um.Name)}
+	}
+}
+
+// deleteForwardingRuleCmd triggers deletion of the given forwarding rule.
+func (s *Service) deleteForwardingRuleCmd(fr ForwardingRule) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteForwardingRule(s.projectID, fr.Region, fr.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting forwarding rule %s...", fr.Name)}
+	}
+}
+
+// deleteSslCertificateCmd triggers deletion of the given SSL certificate.
+func (s *Service) deleteSslCertificateCmd(cert SslCertificate) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteSslCertificate(s.projectID, cert.Region, cert.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting SSL certificate %s...", cert.Name)}
 	}
 }
 

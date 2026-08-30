@@ -296,6 +296,199 @@ func (c *Client) CreateHealthCheck(projectID string, opts HealthCheckCreateOpts)
 	return err
 }
 
+// UpdateBackendServiceTimeout patches a backend service's request timeout,
+// matching `gcloud compute backend-services update --timeout`. Every other
+// field (protocol, health checks, session affinity, CDN, security policy,
+// etc.) is a separate cross-resource edit and out of scope for this
+// minimal-viable Update flow.
+func (c *Client) UpdateBackendServiceTimeout(projectID, region, name string, timeoutSec int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	patch := &compute.BackendService{TimeoutSec: timeoutSec}
+	if region == "global" || region == "" {
+		_, err := c.service.BackendServices.Patch(projectID, name, patch).Do()
+		return err
+	}
+	_, err := c.service.RegionBackendServices.Patch(projectID, region, name, patch).Do()
+	return err
+}
+
+// GetBackendServiceHealth reports the health status of a backend service's
+// first backend group, matching `gcloud compute backend-services
+// get-health`. A backend service can have multiple backend groups; this
+// checks only the first one, which covers the common single-group case
+// without requiring the caller to pick a group.
+func (c *Client) GetBackendServiceHealth(projectID, region, name string) (string, error) {
+	if demo.Enabled {
+		return "HEALTHY", nil
+	}
+	if c.service == nil {
+		return "", fmt.Errorf("compute client not initialized")
+	}
+
+	var backends []*compute.Backend
+	if region == "global" || region == "" {
+		bs, err := c.service.BackendServices.Get(projectID, name).Do()
+		if err != nil {
+			return "", err
+		}
+		backends = bs.Backends
+	} else {
+		bs, err := c.service.RegionBackendServices.Get(projectID, region, name).Do()
+		if err != nil {
+			return "", err
+		}
+		backends = bs.Backends
+	}
+	if len(backends) == 0 {
+		return "", fmt.Errorf("backend service %s has no backend groups", name)
+	}
+	ref := &compute.ResourceGroupReference{Group: backends[0].Group}
+
+	var statuses []*compute.HealthStatus
+	if region == "global" || region == "" {
+		resp, err := c.service.BackendServices.GetHealth(projectID, name, ref).Do()
+		if err != nil {
+			return "", err
+		}
+		statuses = resp.HealthStatus
+	} else {
+		resp, err := c.service.RegionBackendServices.GetHealth(projectID, region, name, ref).Do()
+		if err != nil {
+			return "", err
+		}
+		statuses = resp.HealthStatus
+	}
+
+	if len(statuses) == 0 {
+		return "no health status reported", nil
+	}
+	parts := make([]string, 0, len(statuses))
+	for _, st := range statuses {
+		parts = append(parts, fmt.Sprintf("%s: %s", st.IpAddress, st.HealthState))
+	}
+	return strings.Join(parts, ", "), nil
+}
+
+// AddBackendServiceIAMBinding grants a role to a member on a backend
+// service, matching `gcloud compute backend-services
+// add-iam-policy-binding`. It fetches the current policy, merges the new
+// binding into it, and writes the whole policy back -- this never drops any
+// existing binding, unlike a raw set-iam-policy.
+func (c *Client) AddBackendServiceIAMBinding(projectID, region, name, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if region == "global" || region == "" {
+		policy, err := c.service.BackendServices.GetIamPolicy(projectID, name).Do()
+		if err != nil {
+			return fmt.Errorf("get backend service IAM policy: %w", err)
+		}
+		policy.Bindings = mergeComputeIAMBinding(policy.Bindings, role, member)
+		_, err = c.service.BackendServices.SetIamPolicy(projectID, name, &compute.GlobalSetPolicyRequest{Policy: policy}).Do()
+		return err
+	}
+	policy, err := c.service.RegionBackendServices.GetIamPolicy(projectID, region, name).Do()
+	if err != nil {
+		return fmt.Errorf("get backend service IAM policy: %w", err)
+	}
+	policy.Bindings = mergeComputeIAMBinding(policy.Bindings, role, member)
+	_, err = c.service.RegionBackendServices.SetIamPolicy(projectID, region, name, &compute.RegionSetPolicyRequest{Policy: policy}).Do()
+	return err
+}
+
+// mergeComputeIAMBinding appends member to the existing binding for role if
+// one exists (skipping if already granted), or appends a brand-new role
+// binding otherwise. It never removes or replaces any other binding.
+func mergeComputeIAMBinding(bindings []*compute.Binding, role, member string) []*compute.Binding {
+	for _, b := range bindings {
+		if b.Role != role {
+			continue
+		}
+		for _, m := range b.Members {
+			if m == member {
+				return bindings
+			}
+		}
+		b.Members = append(b.Members, member)
+		return bindings
+	}
+	return append(bindings, &compute.Binding{Role: role, Members: []string{member}})
+}
+
+// DeleteUrlMap deletes a URL map, matching `gcloud compute url-maps
+// delete`.
+func (c *Client) DeleteUrlMap(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if region == "global" || region == "" {
+		_, err := c.service.UrlMaps.Delete(projectID, name).Do()
+		return err
+	}
+	_, err := c.service.RegionUrlMaps.Delete(projectID, region, name).Do()
+	return err
+}
+
+// InvalidateUrlMapCache invalidates CDN-cached content under a URL map for
+// the given path pattern, matching `gcloud compute url-maps
+// invalidate-cdn-cache --path`. Only global URL maps support cache
+// invalidation.
+func (c *Client) InvalidateUrlMapCache(projectID, name, path string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.UrlMaps.InvalidateCache(projectID, name, &compute.CacheInvalidationRule{Path: path}).Do()
+	return err
+}
+
+// DeleteForwardingRule deletes a forwarding rule, matching `gcloud compute
+// forwarding-rules delete`.
+func (c *Client) DeleteForwardingRule(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if region == "global" || region == "" {
+		_, err := c.service.GlobalForwardingRules.Delete(projectID, name).Do()
+		return err
+	}
+	_, err := c.service.ForwardingRules.Delete(projectID, region, name).Do()
+	return err
+}
+
+// DeleteSslCertificate deletes an SSL certificate, matching `gcloud compute
+// ssl-certificates delete`.
+func (c *Client) DeleteSslCertificate(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	if region == "global" || region == "" {
+		_, err := c.service.SslCertificates.Delete(projectID, name).Do()
+		return err
+	}
+	_, err := c.service.RegionSslCertificates.Delete(projectID, region, name).Do()
+	return err
+}
+
 func healthCheckPortAndType(hc *compute.HealthCheck) (port int64, checkType string) {
 	switch {
 	case hc.HttpHealthCheck != nil:

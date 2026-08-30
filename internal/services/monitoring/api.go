@@ -9,20 +9,24 @@ import (
 
 	gmonitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
+	dashboard "cloud.google.com/go/monitoring/dashboard/apiv1"
+	"cloud.google.com/go/monitoring/dashboard/apiv1/dashboardpb"
 	"github.com/yogirk/tgcp/internal/demo"
 	"google.golang.org/genproto/googleapis/api/monitoredres"
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Client wraps the two Cloud Monitoring sub-clients this service needs.
-// Both Uptime checks and Alert policies live under the same Cloud Monitoring
-// API surface (cloud.google.com/go/monitoring/apiv3/v2), but are exposed via
-// separate typed clients (UptimeCheckClient / AlertPolicyClient) rather than
-// one combined client — so we hold both here.
+// Client wraps the Cloud Monitoring sub-clients this service needs. Uptime
+// checks, Alert policies, Dashboards, and Snoozes all live under the Cloud
+// Monitoring API surface, but are exposed via separate typed clients rather
+// than one combined client — so we hold all of them here.
 type Client struct {
-	uptime *gmonitoring.UptimeCheckClient
-	alert  *gmonitoring.AlertPolicyClient
+	uptime    *gmonitoring.UptimeCheckClient
+	alert     *gmonitoring.AlertPolicyClient
+	dashboard *dashboard.DashboardsClient
+	snooze    *gmonitoring.SnoozeClient
 }
 
 func NewClient(ctx context.Context) (*Client, error) {
@@ -37,7 +41,15 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("monitoring alert policy client: %w", err)
 	}
-	return &Client{uptime: uptimeClient, alert: alertClient}, nil
+	dashboardClient, err := dashboard.NewDashboardsClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("monitoring dashboards client: %w", err)
+	}
+	snoozeClient, err := gmonitoring.NewSnoozeClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("monitoring snooze client: %w", err)
+	}
+	return &Client{uptime: uptimeClient, alert: alertClient, dashboard: dashboardClient, snooze: snoozeClient}, nil
 }
 
 // ListUptimeChecks lists all Uptime check configurations for the project.
@@ -163,6 +175,179 @@ func (c *Client) DeleteUptimeCheck(fullName string) error {
 		return fmt.Errorf("client not init")
 	}
 	return c.uptime.DeleteUptimeCheckConfig(context.Background(), &monitoringpb.DeleteUptimeCheckConfigRequest{Name: fullName})
+}
+
+// CreateAlertPolicy creates a single-condition metric-threshold alerting
+// policy, matching the simplest shape of `gcloud alpha monitoring policies
+// create`. Multi-condition policies, notification channels, and condition
+// kinds other than a metric threshold (absence, log match, MQL, PromQL,
+// SQL) are deliberately out of scope for this minimal-viable Create flow.
+func (c *Client) CreateAlertPolicy(projectID string, opts AlertPolicyCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.alert == nil {
+		return fmt.Errorf("client not init")
+	}
+
+	threshold, err := strconv.ParseFloat(opts.ThresholdValue, 64)
+	if err != nil {
+		return fmt.Errorf("invalid threshold value %q: %w", opts.ThresholdValue, err)
+	}
+	durationSec, err := strconv.ParseInt(opts.DurationSec, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", opts.DurationSec, err)
+	}
+
+	policy := &monitoringpb.AlertPolicy{
+		DisplayName: opts.DisplayName,
+		Combiner:    monitoringpb.AlertPolicy_OR,
+		Conditions: []*monitoringpb.AlertPolicy_Condition{
+			{
+				DisplayName: opts.DisplayName,
+				Condition: &monitoringpb.AlertPolicy_Condition_ConditionThreshold{
+					ConditionThreshold: &monitoringpb.AlertPolicy_Condition_MetricThreshold{
+						Filter:         opts.MetricFilter,
+						Comparison:     comparisonFromSymbol(opts.Comparison),
+						ThresholdValue: threshold,
+						Duration:       durationpb.New(time.Duration(durationSec) * time.Second),
+					},
+				},
+			},
+		},
+	}
+
+	ctx := context.Background()
+	_, err = c.alert.CreateAlertPolicy(ctx, &monitoringpb.CreateAlertPolicyRequest{
+		Name:        fmt.Sprintf("projects/%s", projectID),
+		AlertPolicy: policy,
+	})
+	return err
+}
+
+func comparisonFromSymbol(s string) monitoringpb.ComparisonType {
+	switch s {
+	case ">":
+		return monitoringpb.ComparisonType_COMPARISON_GT
+	case ">=":
+		return monitoringpb.ComparisonType_COMPARISON_GE
+	case "<":
+		return monitoringpb.ComparisonType_COMPARISON_LT
+	case "<=":
+		return monitoringpb.ComparisonType_COMPARISON_LE
+	case "==":
+		return monitoringpb.ComparisonType_COMPARISON_EQ
+	case "!=":
+		return monitoringpb.ComparisonType_COMPARISON_NE
+	default:
+		return monitoringpb.ComparisonType_COMPARISON_GT
+	}
+}
+
+// ListDashboards lists all custom dashboards for the project.
+func (c *Client) ListDashboards(projectID string) ([]Dashboard, error) {
+	if demo.Enabled {
+		return []Dashboard{}, nil
+	}
+	if c.dashboard == nil {
+		return nil, fmt.Errorf("client not init")
+	}
+	ctx := context.Background()
+	var out []Dashboard
+	it := c.dashboard.ListDashboards(ctx, &dashboardpb.ListDashboardsRequest{
+		Parent: fmt.Sprintf("projects/%s", projectID),
+	})
+	for d, err := range it.All() {
+		if err != nil {
+			return nil, fmt.Errorf("list dashboards: %w", err)
+		}
+		out = append(out, Dashboard{Name: shortName(d.GetName()), FullName: d.GetName(), DisplayName: d.GetDisplayName()})
+	}
+	return out, nil
+}
+
+// DeleteDashboard deletes a custom dashboard, matching
+// `gcloud monitoring dashboards delete`. Dashboard *creation* is
+// deliberately not implemented — a dashboard's layout is an arbitrary,
+// deeply nested JSON structure (grid/mosaic layout + widgets), which
+// doesn't fit this codebase's simple-form Create pattern; use the Cloud
+// Console or `gcloud monitoring dashboards create --config-from-file`
+// instead.
+func (c *Client) DeleteDashboard(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.dashboard == nil {
+		return fmt.Errorf("client not init")
+	}
+	return c.dashboard.DeleteDashboard(context.Background(), &dashboardpb.DeleteDashboardRequest{Name: fullName})
+}
+
+// ListSnoozes lists all Snoozes for the project (both active and expired;
+// the API has no built-in "active only" filter parameter beyond a raw
+// AIP-160 filter string, which this minimal wrapper doesn't expose).
+func (c *Client) ListSnoozes(projectID string) ([]Snooze, error) {
+	if demo.Enabled {
+		return []Snooze{}, nil
+	}
+	if c.snooze == nil {
+		return nil, fmt.Errorf("client not init")
+	}
+	ctx := context.Background()
+	var out []Snooze
+	it := c.snooze.ListSnoozes(ctx, &monitoringpb.ListSnoozesRequest{
+		Parent: fmt.Sprintf("projects/%s", projectID),
+	})
+	for sn, err := range it.All() {
+		if err != nil {
+			return nil, fmt.Errorf("list snoozes: %w", err)
+		}
+		s := Snooze{Name: shortName(sn.GetName()), FullName: sn.GetName(), DisplayName: sn.GetDisplayName()}
+		if c := sn.GetCriteria(); c != nil {
+			s.Policies = c.GetPolicies()
+		}
+		if iv := sn.GetInterval(); iv != nil {
+			s.StartTime = iv.GetStartTime().AsTime()
+			s.EndTime = iv.GetEndTime().AsTime()
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// CreateSnooze creates a Snooze that suppresses alerts from the given alert
+// policy for durationMinutes starting now, matching
+// `gcloud alpha monitoring snoozes create`.
+func (c *Client) CreateSnooze(projectID string, opts SnoozeCreateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.snooze == nil {
+		return fmt.Errorf("client not init")
+	}
+	durationMin, err := strconv.ParseInt(opts.DurationMinutes, 10, 64)
+	if err != nil || durationMin <= 0 {
+		return fmt.Errorf("invalid duration minutes %q", opts.DurationMinutes)
+	}
+
+	start := time.Now()
+	end := start.Add(time.Duration(durationMin) * time.Minute)
+
+	snooze := &monitoringpb.Snooze{
+		DisplayName: opts.DisplayName,
+		Criteria:    &monitoringpb.Snooze_Criteria{Policies: []string{opts.AlertPolicyFullName}},
+		Interval: &monitoringpb.TimeInterval{
+			StartTime: timestamppb.New(start),
+			EndTime:   timestamppb.New(end),
+		},
+	}
+
+	ctx := context.Background()
+	_, err = c.snooze.CreateSnooze(ctx, &monitoringpb.CreateSnoozeRequest{
+		Parent: fmt.Sprintf("projects/%s", projectID),
+		Snooze: snooze,
+	})
+	return err
 }
 
 // DeleteAlertPolicy deletes an alerting policy, matching

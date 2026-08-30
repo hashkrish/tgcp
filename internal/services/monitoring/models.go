@@ -1,5 +1,44 @@
 package monitoring
 
+import "time"
+
+// AlertPolicyCreateOpts holds the minimal set of fields needed to create a
+// single-condition metric-threshold alerting policy via the Create form.
+type AlertPolicyCreateOpts struct {
+	DisplayName    string
+	MetricFilter   string // e.g. `metric.type="compute.googleapis.com/instance/cpu/utilization"`
+	Comparison     string // >, >=, <, <=, ==, !=
+	ThresholdValue string // numeric string
+	DurationSec    string // numeric string
+}
+
+// Dashboard represents a Cloud Monitoring custom dashboard (read-only view;
+// layout/widgets are not surfaced here, only identity).
+type Dashboard struct {
+	Name        string // Short dashboard ID
+	FullName    string // projects/{project}/dashboards/{id}
+	DisplayName string
+}
+
+// SnoozeCreateOpts holds the minimal set of fields needed to create a
+// Snooze (suppress one alert policy's alerts for a fixed duration starting
+// now) via the Create form.
+type SnoozeCreateOpts struct {
+	DisplayName         string
+	AlertPolicyFullName string // projects/{project}/alertPolicies/{id}
+	DurationMinutes     string // numeric string
+}
+
+// Snooze represents a Cloud Monitoring Snooze (read-only view).
+type Snooze struct {
+	Name        string // Short snooze ID
+	FullName    string // projects/{project}/snoozes/{id}
+	DisplayName string
+	Policies    []string // Full alert policy resource names this snooze suppresses
+	StartTime   time.Time
+	EndTime     time.Time
+}
+
 // UptimeCheckCreateOpts holds the minimal set of fields needed to create an
 // HTTP(S) Uptime check via the Create form.
 type UptimeCheckCreateOpts struct {

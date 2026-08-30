@@ -206,6 +206,110 @@ func (c *Client) DeleteFirewallRule(projectID, name string) error {
 	return err
 }
 
+// CreateNetwork creates a new VPC network, matching `gcloud compute
+// networks create`. Only auto-mode vs. custom-mode subnet creation is
+// configurable here -- routing mode, MTU, and other advanced options are
+// out of scope for this minimal-viable create form.
+func (c *Client) CreateNetwork(projectID, name string, autoCreateSubnetworks bool) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Networks.Insert(projectID, &compute.Network{
+		Name:                  name,
+		AutoCreateSubnetworks: autoCreateSubnetworks,
+	}).Do()
+	return err
+}
+
+// DeleteNetwork deletes a VPC network, matching `gcloud compute networks
+// delete`. GCP refuses this while any subnets, firewall rules, or other
+// resources still reference the network, so no client-side guard is needed.
+func (c *Client) DeleteNetwork(projectID, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Networks.Delete(projectID, name).Do()
+	return err
+}
+
+// CreateSubnet creates a new subnet in an existing custom-mode network,
+// matching `gcloud compute networks subnets create`. Secondary ranges,
+// private Google access, and flow logs are out of scope for this
+// minimal-viable create form.
+func (c *Client) CreateSubnet(projectID, region, name, networkLink, ipCidrRange string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Subnetworks.Insert(projectID, region, &compute.Subnetwork{
+		Name:        name,
+		Network:     networkLink,
+		IpCidrRange: ipCidrRange,
+	}).Do()
+	return err
+}
+
+// DeleteSubnet deletes a subnet, matching `gcloud compute networks subnets
+// delete`.
+func (c *Client) DeleteSubnet(projectID, region, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Subnetworks.Delete(projectID, region, name).Do()
+	return err
+}
+
+// AddSubnetIAMBinding grants a role to a member on a subnet, matching
+// `gcloud compute networks subnets add-iam-policy-binding`. It fetches the
+// current policy, merges the new binding into it, and writes the whole
+// policy back -- this never drops any existing binding, unlike a raw
+// set-iam-policy.
+func (c *Client) AddSubnetIAMBinding(projectID, region, name, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	policy, err := c.service.Subnetworks.GetIamPolicy(projectID, region, name).Do()
+	if err != nil {
+		return fmt.Errorf("get subnet IAM policy: %w", err)
+	}
+	policy.Bindings = mergeComputeIAMBinding(policy.Bindings, role, member)
+	_, err = c.service.Subnetworks.SetIamPolicy(projectID, region, name, &compute.RegionSetPolicyRequest{Policy: policy}).Do()
+	return err
+}
+
+// mergeComputeIAMBinding appends member to the existing binding for role if
+// one exists (skipping if already granted), or appends a brand-new role
+// binding otherwise. It never removes or replaces any other binding.
+func mergeComputeIAMBinding(bindings []*compute.Binding, role, member string) []*compute.Binding {
+	for _, b := range bindings {
+		if b.Role != role {
+			continue
+		}
+		for _, m := range b.Members {
+			if m == member {
+				return bindings
+			}
+		}
+		b.Members = append(b.Members, member)
+		return bindings
+	}
+	return append(bindings, &compute.Binding{Role: role, Members: []string{member}})
+}
+
 func splitAndTrim(s string) []string {
 	if s == "" {
 		return nil

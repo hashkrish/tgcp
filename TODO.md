@@ -92,23 +92,23 @@
 - [ ] Cloud DNS: no record-sets transaction/export/import
 
 ### Networking
-- [ ] VPC: networks/subnets not covered at all (firewall rules only)
-- [ ] VPC: no subnet IAM
-- [ ] Load Balancing: no update (every one is a cross-resource edit)
-- [ ] Load Balancing: no get-health/invalidate-cdn-cache
-- [ ] Load Balancing: no IAM
-- [ ] Load Balancing: only 2 of 5 resource types support create/delete
-- [ ] Filestore: no revert/promote/pause/resume-replica
-- [ ] Filestore: no IAM
-- [ ] Filestore: `snapshots` subgroup not covered
+- [x] VPC: networks/subnets not covered at all (firewall rules only) — Create/Delete for networks (list view) and subnets (network detail, Subnets tab).
+- [x] VPC: no subnet IAM — add-iam-policy-binding only (`g` in Subnets tab); remove/set declined (lockout risk).
+- [x] Load Balancing: no update (every one is a cross-resource edit) — **Scoped**: single-field `UpdateBackendServiceTimeout` patch (`u`), matching the repo's existing single-field-Update convention; true cross-resource editing (URL maps/proxies/forwarding rules together) is out of scope, documented in code.
+- [x] Load Balancing: no get-health/invalidate-cdn-cache — `h` (backend health) and `i` (CDN cache invalidate on URL Maps).
+- [x] Load Balancing: no IAM — add-iam-policy-binding only (`g`, global + regional backend services); remove/set declined.
+- [x] Load Balancing: only 2 of 5 resource types support create/delete — **Partial**: Delete added for all 5 types (URL Maps, Forwarding Rules, SSL Certificates joined Backend Services/Health Checks). Create for the remaining 3 **declined**: URL maps need a default-service reference, forwarding rules need a target proxy, SSL certs need cert/key material or managed-domain config — none of that prerequisite plumbing exists yet as a manageable resource in this tool, so there's no honest minimal-viable create form to build.
+- [x] Filestore: no revert/promote/pause/resume-replica — **Partial**: revert (`v`, snapshot ID form) and promote-replica (`p`) implemented. Pause/resume-replica **declined**: the vendored `cloud.google.com/go/filestore/apiv1` client has no such methods in this SDK version.
+- [x] Filestore: no IAM — **Declined**: no `GetIamPolicy`/`SetIamPolicy` on the vendored Filestore client; not a resource-level-IAM-enabled type in this SDK.
+- [x] Filestore: `snapshots` subgroup not covered — full Create/List/Delete (`s` opens Snapshots, `c` create, `x` delete).
 
 ### Observability
-- [ ] Cloud Monitoring: no alert-policy create
-- [ ] Cloud Monitoring: no policy migrate
-- [ ] Cloud Monitoring: no IAM
-- [ ] Cloud Monitoring: dashboards/snoozes not covered
-- [ ] Cloud Logging: no IAM (views)
-- [ ] Cloud Logging: `sinks`/`metrics`/`buckets`/`views` not covered at all
+- [x] Cloud Monitoring: no alert-policy create — single-condition metric-threshold policy, matching the simplest `gcloud alpha monitoring policies create` shape.
+- [x] Cloud Monitoring: no policy migrate — **Declined**: no stable public API RPC for this; it's an alpha-only gcloud-side schema conversion with ambiguous semantics, not a simple one-shot call.
+- [x] Cloud Monitoring: no IAM — **Declined**: verified via `go doc`/grep across the entire `cloud.google.com/go/monitoring` client library (AlertPolicy/UptimeCheck/Dashboards/Snooze clients) — none expose `GetIamPolicy`/`SetIamPolicy`. Monitoring resources have no resource-level IAM in GCP; access is project-scoped only.
+- [x] Cloud Monitoring: dashboards/snoozes not covered — **Partial**: dashboards (list, delete) and snoozes (list, create) implemented. Dashboard create declined: a dashboard's layout is arbitrary nested JSON (grid/mosaic + widgets), a poor fit for this codebase's simple-form Create pattern (documented in code; use Console or `--config-from-file` instead). Snooze delete not implemented since the real API has none (snoozes only expire or update).
+- [x] Cloud Logging: no IAM (views) — add-only (`g`); verified `ProjectsLocationsBucketsViewsService` supports `GetIamPolicy`/`SetIamPolicy`. Remove/set declined (lockout risk).
+- [x] Cloud Logging: `sinks`/`metrics`/`buckets`/`views` not covered at all — full list/create/delete for sinks, log-based metrics, and log buckets, added as a new "Resources" mode (`R`); views list/create/delete scoped to the project's default bucket (`_Default`/`global`) to avoid a full bucket-picker UI.
 
 ### Developer / CI
 - [ ] Cloud Build: no IAM (connections)

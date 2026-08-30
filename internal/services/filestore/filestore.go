@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
@@ -29,7 +30,27 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewSnapshots
+	ViewCreateSnapshot
+	ViewRevert
 )
+
+// newSnapshotCreateForm builds the FormModel for creating a new snapshot of
+// the currently-selected instance.
+func newSnapshotCreateForm() components.FormModel {
+	return components.NewForm("Create Snapshot", []components.FormField{
+		{Label: "Snapshot ID", Placeholder: "my-snapshot", Required: true},
+		{Label: "Description"},
+	})
+}
+
+// newRevertForm builds the FormModel for reverting an instance to a prior
+// snapshot, matching `gcloud filestore instances revert --snapshot`.
+func newRevertForm(inst Instance) components.FormModel {
+	return components.NewForm("Revert Instance: "+inst.Name, []components.FormField{
+		{Label: "Snapshot ID", Placeholder: "my-snapshot", Required: true},
+	})
+}
 
 // newInstanceUpdateForm builds the FormModel for resizing an instance's
 // first file share, seeded with its current capacity. Multi-share
@@ -49,6 +70,7 @@ func newInstanceUpdateForm(inst Instance) components.FormModel {
 }
 
 type instancesMsg []Instance
+type snapshotsMsg []Snapshot
 type errMsg error
 
 // actionResultMsg carries the result of an async mutating action (e.g.
@@ -76,12 +98,18 @@ type Service struct {
 
 	viewState        ViewState
 	selectedInstance *Instance
+	selectedSnapshot *Snapshot
 
-	createForm components.FormModel
-	updateForm components.FormModel
+	snapshots     []Snapshot
+	snapshotTable *components.StandardTable
+
+	createForm         components.FormModel
+	updateForm         components.FormModel
+	snapshotCreateForm components.FormModel
+	revertForm         components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "promote-replica", "revert", "delete-snapshot"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -99,12 +127,21 @@ func NewService(cache *core.Cache) *Service {
 
 	t := components.NewStandardTable(columns)
 
+	snapCols := []table.Column{
+		{Title: "Name", Width: 22},
+		{Title: "State", Width: 12},
+		{Title: "Created", Width: 22},
+		{Title: "Description", Width: 30},
+	}
+	snapTable := components.NewStandardTable(snapCols)
+
 	svc := &Service{
-		table:     t,
-		filter:    components.NewFilterWithPlaceholder("Filter instances..."),
-		spinner:   components.NewSpinner(),
-		viewState: ViewList,
-		cache:     cache,
+		table:         t,
+		snapshotTable: snapTable,
+		filter:        components.NewFilterWithPlaceholder("Filter instances..."),
+		spinner:       components.NewSpinner(),
+		viewState:     ViewList,
+		cache:         cache,
 	}
 	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredInstances, svc.updateTable)
 	return svc
@@ -123,9 +160,12 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Ent:Detail  n:New Instance"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  u:Update  d:Delete"
+		return "Esc/q:Back  u:Update  d:Delete  s:Snapshots  p:Promote Replica  v:Revert"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewSnapshots {
+		return "Esc/q:Back  c:Create Snapshot  x:Delete"
+	}
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewCreateSnapshot || s.viewState == ViewRevert {
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	if s.viewState == ViewConfirmation {
@@ -224,6 +264,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
+	case snapshotsMsg:
+		s.spinner.Stop()
+		s.snapshots = msg
+		s.updateSnapshotTable()
+		return s, nil
+
 	case errMsg:
 		s.spinner.Stop()
 		s.err = msg
@@ -244,6 +290,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
 				},
 				s.Refresh(),
+			)
+		}
+		if s.pendingAction == "create-snapshot" || s.pendingAction == "delete-snapshot" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.fetchSnapshotsCmd(),
 			)
 		}
 		if msg.err != nil {
@@ -364,15 +424,91 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "s": // Snapshots
+				if s.selectedInstance != nil {
+					s.viewState = ViewSnapshots
+					return s, tea.Batch(s.fetchSnapshotsCmd(), s.spinner.Start(""))
+				}
+				return s, nil
+			case "p": // Promote replica (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "promote-replica"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "v": // Revert to snapshot
+				if s.selectedInstance != nil {
+					s.revertForm = newRevertForm(*s.selectedInstance)
+					s.viewState = ViewRevert
+				}
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewSnapshots {
+			switch msg.String() {
+			case "esc", "q":
+				s.viewState = ViewDetail
+				return s, nil
+			case "c": // Create snapshot
+				s.snapshotCreateForm = newSnapshotCreateForm()
+				s.viewState = ViewCreateSnapshot
+				return s, nil
+			case "x": // Delete snapshot (Confirm)
+				if idx := s.snapshotTable.Cursor(); idx >= 0 && idx < len(s.snapshots) {
+					s.selectedSnapshot = &s.snapshots[idx]
+					s.pendingAction = "delete-snapshot"
+					s.actionSource = ViewSnapshots
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			}
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.snapshotTable.Update(msg)
+			s.snapshotTable = updatedTable
+			return s, cmd
+		}
+
+		if s.viewState == ViewCreateSnapshot {
+			result, formCmd := s.snapshotCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewSnapshots
+				return s, nil
+			}
+			if result.Submitted {
+				s.pendingAction = "create-snapshot"
+				s.viewState = ViewSnapshots
+				return s, s.createSnapshotCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewRevert {
+			result, formCmd := s.revertForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingAction = "revert"
+				s.viewState = ViewDetail
+				return s, s.revertInstanceCmd(*s.selectedInstance)
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
 			switch msg.String() {
 			case "y", "enter":
 				var actionCmd tea.Cmd
-				if s.pendingAction == "delete" && s.selectedInstance != nil {
+				switch {
+				case s.pendingAction == "delete" && s.selectedInstance != nil:
 					actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
+				case s.pendingAction == "promote-replica" && s.selectedInstance != nil:
+					actionCmd = s.promoteReplicaCmd(*s.selectedInstance)
+				case s.pendingAction == "delete-snapshot" && s.selectedSnapshot != nil:
+					actionCmd = s.deleteSnapshotCmd(*s.selectedSnapshot)
 				}
 				s.viewState = s.actionSource
 				return s, actionCmd
@@ -416,20 +552,67 @@ func (s *Service) View() string {
 		return s.renderConfirmation()
 	}
 
+	if s.viewState == ViewSnapshots {
+		return s.renderSnapshotsView()
+	}
+
+	if s.viewState == ViewCreateSnapshot {
+		return s.snapshotCreateForm.View()
+	}
+
+	if s.viewState == ViewRevert {
+		return s.revertForm.View()
+	}
+
 	return s.renderListView()
 }
 
-// renderConfirmation renders the instance-delete confirmation dialog.
-func (s *Service) renderConfirmation() string {
+// renderSnapshotsView renders the scrollable list of an instance's snapshots.
+func (s *Service) renderSnapshotsView() string {
 	if s.selectedInstance == nil {
-		return "Error: No instance selected"
+		return "No instance selected"
 	}
-	return components.RenderConfirmationWithMessage(
-		s.pendingAction,
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Instances",
 		s.selectedInstance.Name,
-		"instance",
-		fmt.Sprintf("Are you sure you want to DELETE instance %s? This destroys all file shares and their data.", s.selectedInstance.Name),
+		"Snapshots",
 	)
+	if len(s.snapshots) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("snapshots"))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.snapshotTable.View())
+}
+
+// renderConfirmation renders the confirmation dialog for the pending
+// action: instance deletion, replica promotion, or snapshot deletion.
+func (s *Service) renderConfirmation() string {
+	switch s.pendingAction {
+	case "promote-replica":
+		if s.selectedInstance == nil {
+			return "Error: No instance selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"promote", s.selectedInstance.Name, "instance",
+			fmt.Sprintf("Promote replica instance %s to active?", s.selectedInstance.Name),
+		)
+	case "delete-snapshot":
+		if s.selectedSnapshot == nil {
+			return "Error: No snapshot selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedSnapshot.Name, "snapshot")
+	default:
+		if s.selectedInstance == nil {
+			return "Error: No instance selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			s.pendingAction,
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("Are you sure you want to DELETE instance %s? This destroys all file shares and their data.", s.selectedInstance.Name),
+		)
+	}
 }
 
 // createInstanceCmd fires the CreateInstance API call using the current
@@ -488,6 +671,90 @@ func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name)}
 	}
+}
+
+// promoteReplicaCmd promotes a standby replica instance to active.
+func (s *Service) promoteReplicaCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.PromoteReplica(inst.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Promoting replica %s...", inst.Name)}
+	}
+}
+
+// revertInstanceCmd fires the RevertInstance API call using the current
+// revertForm value.
+func (s *Service) revertInstanceCmd(inst Instance) tea.Cmd {
+	snapshotID := s.revertForm.Value("Snapshot ID")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RevertInstance(inst.FullName, snapshotID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Reverting instance %s to snapshot %s...", inst.Name, snapshotID)}
+	}
+}
+
+// createSnapshotCmd fires the CreateSnapshot API call using the current
+// snapshotCreateForm values.
+func (s *Service) createSnapshotCmd() tea.Cmd {
+	v := s.snapshotCreateForm.Values()
+	snapshotID, description := v["Snapshot ID"], v["Description"]
+	var instanceFullName string
+	if s.selectedInstance != nil {
+		instanceFullName = s.selectedInstance.FullName
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateSnapshot(instanceFullName, snapshotID, description); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s...", snapshotID)}
+	}
+}
+
+// deleteSnapshotCmd triggers deletion of the given snapshot.
+func (s *Service) deleteSnapshotCmd(snap Snapshot) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteSnapshot(snap.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting snapshot %s...", snap.Name)}
+	}
+}
+
+// fetchSnapshotsCmd fetches the snapshot list for the currently-selected instance.
+func (s *Service) fetchSnapshotsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil || s.selectedInstance == nil {
+			return errMsg(fmt.Errorf("no instance selected"))
+		}
+		snaps, err := s.client.ListSnapshots(s.selectedInstance.FullName)
+		if err != nil {
+			return errMsg(err)
+		}
+		return snapshotsMsg(snaps)
+	}
+}
+
+// updateSnapshotTable rebuilds the snapshot table rows from s.snapshots.
+func (s *Service) updateSnapshotTable() {
+	rows := make([]table.Row, len(s.snapshots))
+	for i, snap := range s.snapshots {
+		rows[i] = table.Row{snap.Name, snap.State, snap.CreateTime, snap.Description}
+	}
+	s.snapshotTable.SetRows(rows)
 }
 
 func (s *Service) renderListView() string {

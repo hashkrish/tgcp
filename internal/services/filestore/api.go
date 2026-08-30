@@ -138,6 +138,106 @@ func (c *Client) UpdateInstanceCapacity(fullName, shareName string, capacityGB i
 	return err
 }
 
+// RevertInstance reverts an instance's file share to a prior snapshot,
+// matching `gcloud filestore instances revert --snapshot`. This is a
+// long-running, fire-and-forget operation like CreateInstance -- the next
+// list refresh reflects it once done.
+func (c *Client) RevertInstance(fullName, targetSnapshotID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+	_, err := c.client.RevertInstance(context.Background(), &filestorepb.RevertInstanceRequest{
+		Name:             fullName,
+		TargetSnapshotId: targetSnapshotID,
+	})
+	return err
+}
+
+// PromoteReplica promotes a standby Filestore replica instance to active,
+// matching `gcloud filestore instances promote-replica`. PeerInstance is
+// left unset -- required only when calling this on an already-active
+// instance to promote one of its peers, which isn't a flow this app offers.
+func (c *Client) PromoteReplica(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+	_, err := c.client.PromoteReplica(context.Background(), &filestorepb.PromoteReplicaRequest{
+		Name: fullName,
+	})
+	return err
+}
+
+// ListSnapshots lists the snapshots taken of a Filestore instance, matching
+// `gcloud filestore snapshots list --instance`.
+func (c *Client) ListSnapshots(instanceFullName string) ([]Snapshot, error) {
+	if demo.Enabled {
+		return []Snapshot{}, nil
+	}
+	if c.client == nil {
+		return nil, fmt.Errorf("client not init")
+	}
+	ctx := context.Background()
+	it := c.client.ListSnapshots(ctx, &filestorepb.ListSnapshotsRequest{Parent: instanceFullName})
+	var snaps []Snapshot
+	for snap, err := range it.All() {
+		if err != nil {
+			return nil, fmt.Errorf("list filestore snapshots: %w", err)
+		}
+		snaps = append(snaps, toSnapshot(snap))
+	}
+	return snaps, nil
+}
+
+// CreateSnapshot creates a snapshot of a Filestore instance, matching
+// `gcloud filestore snapshots create`. Fire-and-forget, like CreateInstance.
+func (c *Client) CreateSnapshot(instanceFullName, snapshotID, description string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+	_, err := c.client.CreateSnapshot(context.Background(), &filestorepb.CreateSnapshotRequest{
+		Parent:     instanceFullName,
+		SnapshotId: snapshotID,
+		Snapshot:   &filestorepb.Snapshot{Description: description},
+	})
+	return err
+}
+
+// DeleteSnapshot deletes a Filestore snapshot, matching `gcloud filestore
+// snapshots delete`.
+func (c *Client) DeleteSnapshot(fullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not init")
+	}
+	_, err := c.client.DeleteSnapshot(context.Background(), &filestorepb.DeleteSnapshotRequest{Name: fullName})
+	return err
+}
+
+func toSnapshot(s *filestorepb.Snapshot) Snapshot {
+	createTime := ""
+	if t := s.GetCreateTime(); t != nil {
+		createTime = t.AsTime().Local().Format("2006-01-02 15:04:05 MST")
+	}
+	return Snapshot{
+		Name:        shortName(s.GetName()),
+		FullName:    s.GetName(),
+		Description: s.GetDescription(),
+		State:       s.GetState().String(),
+		CreateTime:  createTime,
+	}
+}
+
 // DeleteInstance deletes a Filestore instance, matching
 // `gcloud filestore instances delete`. This permanently destroys all file
 // shares (and their data) on the instance.

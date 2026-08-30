@@ -30,7 +30,43 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewCreateNetwork
+	ViewCreateSubnet
+	ViewGrantSubnetIAM
 )
+
+// newNetworkCreateForm builds the FormModel for creating a new VPC network.
+func newNetworkCreateForm() components.FormModel {
+	return components.NewForm("Create VPC Network", []components.FormField{
+		{Label: "Name", Placeholder: "my-network", Required: true},
+		{Label: "Subnet Mode", Default: "auto", Placeholder: "auto or custom", Required: true, Validate: func(v string) string {
+			if v != "auto" && v != "custom" {
+				return "must be \"auto\" or \"custom\""
+			}
+			return ""
+		}},
+	})
+}
+
+// newSubnetCreateForm builds the FormModel for creating a new subnet in the
+// currently-selected network.
+func newSubnetCreateForm() components.FormModel {
+	return components.NewForm("Create Subnet", []components.FormField{
+		{Label: "Name", Placeholder: "my-subnet", Required: true},
+		{Label: "Region", Placeholder: "us-central1", Required: true},
+		{Label: "IP CIDR Range", Placeholder: "10.0.0.0/24", Required: true},
+	})
+}
+
+// newSubnetIAMForm builds the FormModel for granting an IAM role to a
+// member on a subnet, matching `gcloud compute networks subnets
+// add-iam-policy-binding`.
+func newSubnetIAMForm(sub Subnet) components.FormModel {
+	return components.NewForm("Grant IAM Role: "+sub.Name, []components.FormField{
+		{Label: "Member", Placeholder: "user:alice@example.com", Required: true},
+		{Label: "Role", Default: "roles/compute.networkUser", Required: true},
+	})
+}
 
 // newFirewallUpdateForm builds the FormModel for updating a firewall
 // rule's priority, seeded with its current value. Action, ports,
@@ -91,14 +127,20 @@ type Service struct {
 	viewState        ViewState
 	selectedNetwork  *Network
 	selectedFirewall *Firewall
+	selectedSubnet   *Subnet
 
 	createForm     components.FormModel
 	createReturnTo ViewState
 
 	updateForm components.FormModel
 
+	// Network/Subnet Create & IAM State
+	networkCreateForm components.FormModel
+	subnetCreateForm  components.FormModel
+	subnetIAMForm     components.FormModel
+
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "delete-network", "delete-subnet"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -150,18 +192,18 @@ func (s *Service) ShortName() string { return "net" }
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "Ent:Detail  r:Refresh"
+		return "Ent:Detail  n:New Network  d:Delete  r:Refresh"
 	}
 	if s.viewState == ViewDetail {
 		if s.activeTab == TabFirewalls {
 			return "[]:Switch Tab  Esc/q:Back  n:New Firewall Rule  u:Update  d:Delete"
 		}
-		return "[]:Switch Tab  Esc/q:Back  n:New Firewall Rule"
+		return "[]:Switch Tab  Esc/q:Back  n:New Subnet  d:Delete  g:Grant IAM"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewCreateNetwork || s.viewState == ViewCreateSubnet || s.viewState == ViewGrantSubnetIAM {
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	return ""
@@ -372,6 +414,45 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, formCmd
 		}
 
+		if s.viewState == ViewCreateNetwork {
+			result, formCmd := s.networkCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				s.viewState = ViewList
+				return s, s.createNetworkCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewCreateSubnet {
+			result, formCmd := s.subnetCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted {
+				s.viewState = ViewDetail
+				return s, s.createSubnetCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewGrantSubnetIAM {
+			result, formCmd := s.subnetIAMForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedSubnet != nil {
+				s.viewState = ViewDetail
+				return s, s.grantSubnetIAMCmd(*s.selectedSubnet)
+			}
+			return s, formCmd
+		}
+
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
@@ -379,12 +460,25 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch s.viewState {
 		case ViewList:
-			if msg.String() == "enter" {
+			switch msg.String() {
+			case "enter":
 				if s.networksTable.Cursor() >= 0 && s.networksTable.Cursor() < len(s.networks) {
 					s.selectedNetwork = &s.networks[s.networksTable.Cursor()]
 					s.viewState = ViewDetail
 					s.activeTab = TabSubnets // Default to subnets
 					return s, tea.Batch(s.fetchSubnetsCmd(), s.fetchFirewallsCmd(), s.spinner.Start(""))
+				}
+			case "n": // New network
+				s.networkCreateForm = newNetworkCreateForm()
+				s.viewState = ViewCreateNetwork
+				return s, nil
+			case "d": // Delete network (Confirm)
+				if idx := s.networksTable.Cursor(); idx >= 0 && idx < len(s.networks) {
+					s.selectedNetwork = &s.networks[idx]
+					s.pendingAction = "delete-network"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
 				}
 			}
 			var updatedTable *components.StandardTable
@@ -398,7 +492,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewList
 				s.selectedNetwork = nil
 				return s, nil
-			case "n": // New firewall rule
+			case "n": // New subnet (Subnets tab) or new firewall rule (Firewalls tab)
+				if s.activeTab == TabSubnets {
+					s.subnetCreateForm = newSubnetCreateForm()
+					s.viewState = ViewCreateSubnet
+					return s, nil
+				}
 				network := "default"
 				if s.selectedNetwork != nil {
 					network = s.selectedNetwork.Name
@@ -431,11 +530,28 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return s, nil
 					}
 				}
-			case "d": // Delete firewall rule (Firewalls tab only, Confirm)
+			case "g": // Grant IAM role on subnet (Subnets tab only)
+				if s.activeTab == TabSubnets {
+					if idx := s.subnetsTable.Cursor(); idx >= 0 && idx < len(s.subnets) {
+						s.selectedSubnet = &s.subnets[idx]
+						s.subnetIAMForm = newSubnetIAMForm(*s.selectedSubnet)
+						s.viewState = ViewGrantSubnetIAM
+						return s, nil
+					}
+				}
+			case "d": // Delete firewall rule / subnet (Confirm)
 				if s.activeTab == TabFirewalls {
 					if idx := s.firewallsTable.Cursor(); idx >= 0 && idx < len(s.firewalls) {
 						s.selectedFirewall = &s.firewalls[idx]
 						s.pendingAction = "delete"
+						s.actionSource = ViewDetail
+						s.viewState = ViewConfirmation
+						return s, nil
+					}
+				} else {
+					if idx := s.subnetsTable.Cursor(); idx >= 0 && idx < len(s.subnets) {
+						s.selectedSubnet = &s.subnets[idx]
+						s.pendingAction = "delete-subnet"
 						s.actionSource = ViewDetail
 						s.viewState = ViewConfirmation
 						return s, nil
@@ -458,10 +574,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "y", "enter":
 				var actionCmd tea.Cmd
-				if s.pendingAction == "delete" && s.selectedFirewall != nil {
+				switch {
+				case s.pendingAction == "delete" && s.selectedFirewall != nil:
 					actionCmd = s.deleteFirewallCmd(*s.selectedFirewall)
+				case s.pendingAction == "delete-network" && s.selectedNetwork != nil:
+					actionCmd = s.deleteNetworkCmd(*s.selectedNetwork)
+					s.selectedNetwork = nil
+				case s.pendingAction == "delete-subnet" && s.selectedSubnet != nil:
+					actionCmd = s.deleteSubnetCmd(*s.selectedSubnet)
 				}
 				s.viewState = s.actionSource
+				s.pendingAction = ""
 				return s, actionCmd
 			case "n", "esc", "q":
 				s.viewState = s.actionSource
@@ -504,18 +627,118 @@ func (s *Service) View() string {
 		return s.createForm.View()
 	case ViewUpdate:
 		return s.updateForm.View()
+	case ViewCreateNetwork:
+		return s.networkCreateForm.View()
+	case ViewCreateSubnet:
+		return s.subnetCreateForm.View()
+	case ViewGrantSubnetIAM:
+		return s.subnetIAMForm.View()
 	case ViewConfirmation:
 		return s.renderConfirmation()
 	}
 	return ""
 }
 
-// renderConfirmation renders the firewall-rule-delete confirmation dialog.
+// renderConfirmation renders the delete confirmation dialog for a firewall
+// rule, network, or subnet.
 func (s *Service) renderConfirmation() string {
-	if s.selectedFirewall == nil {
-		return "Error: No firewall rule selected"
+	switch s.pendingAction {
+	case "delete-network":
+		if s.selectedNetwork == nil {
+			return "Error: No network selected"
+		}
+		return components.RenderConfirmationWithMessage("delete", s.selectedNetwork.Name, "network",
+			fmt.Sprintf("Delete network %s?\n\nThis fails if any subnets, firewall rules, or other resources still reference it.", styles.TitleStyle.Render(s.selectedNetwork.Name)))
+	case "delete-subnet":
+		if s.selectedSubnet == nil {
+			return "Error: No subnet selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedSubnet.Name, "subnet")
+	default:
+		if s.selectedFirewall == nil {
+			return "Error: No firewall rule selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedFirewall.Name, "firewall rule")
 	}
-	return components.RenderConfirmation(s.pendingAction, s.selectedFirewall.Name, "firewall rule")
+}
+
+// createNetworkCmd fires the CreateNetwork API call using the current
+// networkCreateForm values.
+func (s *Service) createNetworkCmd() tea.Cmd {
+	v := s.networkCreateForm.Values()
+	name := v["Name"]
+	auto := v["Subnet Mode"] == "auto"
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateNetwork(s.projectID, name, auto); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating network %s...", name)}
+	}
+}
+
+// deleteNetworkCmd triggers deletion of the given VPC network.
+func (s *Service) deleteNetworkCmd(n Network) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteNetwork(s.projectID, n.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting network %s...", n.Name)}
+	}
+}
+
+// createSubnetCmd fires the CreateSubnet API call using the current
+// subnetCreateForm values, attached to the currently-selected network.
+func (s *Service) createSubnetCmd() tea.Cmd {
+	v := s.subnetCreateForm.Values()
+	name, region, cidr := v["Name"], v["Region"], v["IP CIDR Range"]
+	var networkLink string
+	if s.selectedNetwork != nil {
+		networkLink = s.selectedNetwork.SelfLink
+	}
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateSubnet(s.projectID, region, name, networkLink, cidr); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating subnet %s...", name)}
+	}
+}
+
+// deleteSubnetCmd triggers deletion of the given subnet.
+func (s *Service) deleteSubnetCmd(sub Subnet) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteSubnet(s.projectID, sub.Region, sub.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting subnet %s...", sub.Name)}
+	}
+}
+
+// grantSubnetIAMCmd fires the AddSubnetIAMBinding API call using the
+// current subnetIAMForm values.
+func (s *Service) grantSubnetIAMCmd(sub Subnet) tea.Cmd {
+	v := s.subnetIAMForm.Values()
+	member, role := v["Member"], v["Role"]
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddSubnetIAMBinding(s.projectID, sub.Region, sub.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on subnet %s", role, member, sub.Name)}
+	}
 }
 
 // createFirewallCmd fires the CreateFirewallRule API call using the current

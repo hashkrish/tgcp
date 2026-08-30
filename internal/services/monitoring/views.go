@@ -32,25 +32,39 @@ func (s *Service) View() string {
 	return s.renderListView()
 }
 
-// renderConfirmation renders the uptime-check/alert-policy delete
+// renderConfirmation renders the uptime-check/alert-policy/dashboard delete
 // confirmation dialog.
 func (s *Service) renderConfirmation() string {
-	if s.activeTab == TabUptimeChecks {
+	switch s.activeTab {
+	case TabUptimeChecks:
 		if s.selectedCheck == nil {
 			return "Error: No uptime check selected"
 		}
 		return components.RenderConfirmation(s.pendingAction, s.selectedCheck.DisplayName, "uptime check")
+	case TabDashboards:
+		if s.selectedDashboard == nil {
+			return "Error: No dashboard selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedDashboard.DisplayName, "dashboard")
+	default:
+		if s.selectedAlert == nil {
+			return "Error: No alert policy selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedAlert.DisplayName, "alert policy")
 	}
-	if s.selectedAlert == nil {
-		return "Error: No alert policy selected"
-	}
-	return components.RenderConfirmation(s.pendingAction, s.selectedAlert.DisplayName, "alert policy")
 }
 
 func (s *Service) renderListView() string {
-	label := "Uptime Checks"
-	if s.activeTab == TabAlertPolicies {
+	var label string
+	switch s.activeTab {
+	case TabAlertPolicies:
 		label = "Alert Policies"
+	case TabDashboards:
+		label = "Dashboards"
+	case TabSnoozes:
+		label = "Snoozes"
+	default:
+		label = "Uptime Checks"
 	}
 
 	breadcrumb := components.Breadcrumb(
@@ -59,35 +73,48 @@ func (s *Service) renderListView() string {
 		label,
 	)
 
-	var uStyle, aStyle lipgloss.Style
-	if s.activeTab == TabUptimeChecks {
-		uStyle = styles.ActiveTabStyle
-		aStyle = styles.InactiveTabStyle
-	} else {
-		uStyle = styles.InactiveTabStyle
-		aStyle = styles.ActiveTabStyle
+	tabStyle := func(t Tab) lipgloss.Style {
+		if s.activeTab == t {
+			return styles.ActiveTabStyle
+		}
+		return styles.InactiveTabStyle
 	}
 	// Tab labels need explicit leading/trailing spaces now that
 	// ActiveTabStyle/InactiveTabStyle are plain text with no padding --
 	// without them adjacent labels render with zero separation between
 	// them (e.g. "Uptime ChecksAlert Policies").
 	tabs := lipgloss.JoinHorizontal(lipgloss.Top,
-		uStyle.Render(" Uptime Checks "),
-		aStyle.Render(" Alert Policies "),
+		tabStyle(TabUptimeChecks).Render(" Uptime Checks "),
+		tabStyle(TabAlertPolicies).Render(" Alert Policies "),
+		tabStyle(TabDashboards).Render(" Dashboards "),
+		tabStyle(TabSnoozes).Render(" Snoozes "),
 	)
 
 	var content string
-	if s.activeTab == TabUptimeChecks {
+	switch s.activeTab {
+	case TabUptimeChecks:
 		if len(s.uptimeChecks) == 0 {
 			content = components.EmptyState("uptime checks")
 		} else {
 			content = s.uptimeTable.View()
 		}
-	} else {
+	case TabAlertPolicies:
 		if len(s.alertPolicys) == 0 {
 			content = components.EmptyState("alert policies")
 		} else {
 			content = s.alertTable.View()
+		}
+	case TabDashboards:
+		if len(s.dashboards) == 0 {
+			content = components.EmptyState("dashboards")
+		} else {
+			content = s.dashboardTable.View()
+		}
+	case TabSnoozes:
+		if len(s.snoozes) == 0 {
+			content = components.EmptyState("snoozes")
+		} else {
+			content = s.snoozeTable.View()
 		}
 	}
 

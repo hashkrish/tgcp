@@ -66,10 +66,66 @@ type Tab int
 const (
 	TabUptimeChecks Tab = iota
 	TabAlertPolicies
+	TabDashboards
+	TabSnoozes
 )
+
+// tabOrder is the left-to-right cycle order used by the "[", "]", "tab" keys.
+var tabOrder = []Tab{TabUptimeChecks, TabAlertPolicies, TabDashboards, TabSnoozes}
+
+// newAlertPolicyCreateForm builds the FormModel for a single-condition
+// metric-threshold alert policy, matching CreateAlertPolicy's minimal scope.
+func newAlertPolicyCreateForm() components.FormModel {
+	return components.NewForm("New Alert Policy", []components.FormField{
+		{Label: "Display Name", Required: true},
+		{Label: "Metric Filter", Placeholder: `metric.type="compute.googleapis.com/instance/cpu/utilization"`, Required: true},
+		{Label: "Comparison", Default: ">", Required: true, Validate: func(v string) string {
+			switch v {
+			case ">", ">=", "<", "<=", "==", "!=":
+				return ""
+			}
+			return "must be one of > >= < <= == !="
+		}},
+		{Label: "Threshold Value", Default: "0.8", Required: true, Validate: func(v string) string {
+			if _, err := strconv.ParseFloat(v, 64); err != nil {
+				return "must be a number"
+			}
+			return ""
+		}},
+		{Label: "Duration Sec", Default: "60", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				return "must be a non-negative integer"
+			}
+			return ""
+		}},
+	})
+}
+
+// newSnoozeCreateForm builds the FormModel for a Snooze that suppresses the
+// given alert policy's alerts for a fixed duration starting now.
+func newSnoozeCreateForm(policies []AlertPolicy) components.FormModel {
+	placeholder := "alert-policy-id"
+	if len(policies) > 0 {
+		placeholder = policies[0].Name
+	}
+	return components.NewForm("New Snooze", []components.FormField{
+		{Label: "Display Name", Required: true},
+		{Label: "Alert Policy ID", Placeholder: placeholder, Required: true},
+		{Label: "Duration Minutes", Default: "60", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				return "must be a positive integer"
+			}
+			return ""
+		}},
+	})
+}
 
 type uptimeChecksMsg []UptimeCheck
 type alertPoliciesMsg []AlertPolicy
+type dashboardsMsg []Dashboard
+type snoozesMsg []Snooze
 type errMsg error
 
 // actionResultMsg carries the result of an async mutating action (e.g.
@@ -87,19 +143,24 @@ type Service struct {
 	client    *Client
 	projectID string
 
-	uptimeTable *components.StandardTable
-	alertTable  *components.StandardTable
+	uptimeTable    *components.StandardTable
+	alertTable     *components.StandardTable
+	dashboardTable *components.StandardTable
+	snoozeTable    *components.StandardTable
 
 	activeTab Tab
 
 	uptimeChecks []UptimeCheck
 	alertPolicys []AlertPolicy
+	dashboards   []Dashboard
+	snoozes      []Snooze
 	spinner      components.SpinnerModel
 	err          error
 
-	viewState     ViewState
-	selectedCheck *UptimeCheck
-	selectedAlert *AlertPolicy
+	viewState         ViewState
+	selectedCheck     *UptimeCheck
+	selectedAlert     *AlertPolicy
+	selectedDashboard *Dashboard
 
 	createForm components.FormModel
 	updateForm components.FormModel
@@ -129,13 +190,29 @@ func NewService(cache *core.Cache) *Service {
 	}
 	aTable := components.NewStandardTable(aCols)
 
+	dCols := []table.Column{
+		{Title: "Display Name", Width: 40},
+		{Title: "ID", Width: 30},
+	}
+	dTable := components.NewStandardTable(dCols)
+
+	sCols := []table.Column{
+		{Title: "Display Name", Width: 26},
+		{Title: "Policies", Width: 10},
+		{Title: "Start", Width: 17},
+		{Title: "End", Width: 17},
+	}
+	sTable := components.NewStandardTable(sCols)
+
 	return &Service{
-		uptimeTable: uTable,
-		alertTable:  aTable,
-		spinner:     components.NewSpinner(),
-		viewState:   ViewList,
-		activeTab:   TabUptimeChecks,
-		cache:       cache,
+		uptimeTable:    uTable,
+		alertTable:     aTable,
+		dashboardTable: dTable,
+		snoozeTable:    sTable,
+		spinner:        components.NewSpinner(),
+		viewState:      ViewList,
+		activeTab:      TabUptimeChecks,
+		cache:          cache,
 	}
 }
 
@@ -144,8 +221,15 @@ func (s *Service) ShortName() string { return "monitoring" }
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		if s.activeTab == TabUptimeChecks {
+		switch s.activeTab {
+		case TabUptimeChecks:
 			return "[]:Switch Tab  Ent:Detail  r:Refresh  n:New Uptime Check"
+		case TabAlertPolicies:
+			return "[]:Switch Tab  Ent:Detail  r:Refresh  n:New Alert Policy"
+		case TabDashboards:
+			return "[]:Switch Tab  r:Refresh  d:Delete"
+		case TabSnoozes:
+			return "[]:Switch Tab  r:Refresh  n:New Snooze"
 		}
 		return "[]:Switch Tab  Ent:Detail  r:Refresh"
 	}
@@ -199,6 +283,8 @@ func (s *Service) Refresh() tea.Cmd {
 		s.spinner.Start(""),
 		s.fetchUptimeChecksCmd(true),
 		s.fetchAlertPoliciesCmd(true),
+		s.fetchDashboardsCmd(true),
+		s.fetchSnoozesCmd(true),
 	)
 }
 
@@ -207,9 +293,12 @@ func (s *Service) Reset() {
 	s.activeTab = TabUptimeChecks
 	s.selectedCheck = nil
 	s.selectedAlert = nil
+	s.selectedDashboard = nil
 	s.err = nil
 	s.uptimeTable.SetCursor(0)
 	s.alertTable.SetCursor(0)
+	s.dashboardTable.SetCursor(0)
+	s.snoozeTable.SetCursor(0)
 }
 
 // SetActiveTab switches to a specific tab by string key, so the command
@@ -223,6 +312,10 @@ func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
 		s.activeTab = TabUptimeChecks
 	case "alert-policies":
 		s.activeTab = TabAlertPolicies
+	case "dashboards":
+		s.activeTab = TabDashboards
+	case "snoozes":
+		s.activeTab = TabSnoozes
 	default:
 		return false, nil
 	}
@@ -236,11 +329,15 @@ func (s *Service) IsRootView() bool {
 func (s *Service) Focus() {
 	s.uptimeTable.Focus()
 	s.alertTable.Focus()
+	s.dashboardTable.Focus()
+	s.snoozeTable.Focus()
 }
 
 func (s *Service) Blur() {
 	s.uptimeTable.Blur()
 	s.alertTable.Blur()
+	s.dashboardTable.Blur()
+	s.snoozeTable.Blur()
 }
 
 // -----------------------------------------------------------------------------
@@ -256,7 +353,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
-		return s, tea.Batch(s.fetchUptimeChecksCmd(false), s.fetchAlertPoliciesCmd(false), s.tick())
+		return s, tea.Batch(s.fetchUptimeChecksCmd(false), s.fetchAlertPoliciesCmd(false), s.fetchDashboardsCmd(false), s.fetchSnoozesCmd(false), s.tick())
 
 	case uptimeChecksMsg:
 		s.spinner.Stop()
@@ -268,6 +365,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.alertPolicys = msg
 		s.updateAlertTable()
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
+	case dashboardsMsg:
+		s.spinner.Stop()
+		s.dashboards = msg
+		s.updateDashboardTable()
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
+	case snoozesMsg:
+		s.spinner.Stop()
+		s.snoozes = msg
+		s.updateSnoozeTable()
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case errMsg:
@@ -321,15 +430,9 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		if s.viewState == ViewList {
-			var updatedTable *components.StandardTable
-			if s.activeTab == TabUptimeChecks {
-				updatedTable, cmd = s.uptimeTable.Update(msg)
-				s.uptimeTable = updatedTable
-			} else {
-				updatedTable, cmd = s.alertTable.Update(msg)
-				s.alertTable = updatedTable
-			}
-			return s, cmd
+			updatedTable, mcmd := s.activeTable().Update(msg)
+			s.setActiveTable(updatedTable)
+			return s, mcmd
 		}
 
 	case tea.KeyMsg:
@@ -340,7 +443,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			}
 			if result.Submitted {
-				return s, s.createUptimeCheckCmd()
+				switch s.activeTab {
+				case TabAlertPolicies:
+					return s, s.createAlertPolicyCmd()
+				case TabSnoozes:
+					return s, s.createSnoozeCmd()
+				default:
+					return s, s.createUptimeCheckCmd()
+				}
 			}
 			return s, formCmd
 		}
@@ -366,7 +476,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ViewList:
 			switch msg.String() {
 			case "n":
-				if s.activeTab == TabUptimeChecks {
+				switch s.activeTab {
+				case TabUptimeChecks:
 					s.createForm = components.NewForm("New Uptime Check", []components.FormField{
 						{Label: "Display Name", Required: true},
 						{Label: "Host", Required: true},
@@ -375,22 +486,35 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						{Label: "Protocol", Default: "HTTPS", Required: true},
 					})
 					s.viewState = ViewCreate
+				case TabAlertPolicies:
+					s.createForm = newAlertPolicyCreateForm()
+					s.viewState = ViewCreate
+				case TabSnoozes:
+					s.createForm = newSnoozeCreateForm(s.alertPolicys)
+					s.viewState = ViewCreate
 				}
 				return s, nil
 			case "[", "]", "tab":
-				if s.activeTab == TabUptimeChecks {
-					s.activeTab = TabAlertPolicies
-				} else {
-					s.activeTab = TabUptimeChecks
+				s.activeTab = nextTab(s.activeTab)
+				return s, nil
+			case "d":
+				if s.activeTab == TabDashboards {
+					if idx := s.dashboardTable.Cursor(); idx >= 0 && idx < len(s.dashboards) {
+						s.selectedDashboard = &s.dashboards[idx]
+						s.pendingAction = "delete"
+						s.actionSource = ViewList
+						s.viewState = ViewConfirmation
+					}
 				}
 				return s, nil
 			case "enter":
-				if s.activeTab == TabUptimeChecks {
+				switch s.activeTab {
+				case TabUptimeChecks:
 					if idx := s.uptimeTable.Cursor(); idx >= 0 && idx < len(s.uptimeChecks) {
 						s.selectedCheck = &s.uptimeChecks[idx]
 						s.viewState = ViewDetail
 					}
-				} else {
+				case TabAlertPolicies:
 					if idx := s.alertTable.Cursor(); idx >= 0 && idx < len(s.alertPolicys) {
 						s.selectedAlert = &s.alertPolicys[idx]
 						s.viewState = ViewDetail
@@ -399,15 +523,9 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			}
 
-			var updatedTable *components.StandardTable
-			if s.activeTab == TabUptimeChecks {
-				updatedTable, cmd = s.uptimeTable.Update(msg)
-				s.uptimeTable = updatedTable
-			} else {
-				updatedTable, cmd = s.alertTable.Update(msg)
-				s.alertTable = updatedTable
-			}
-			return s, cmd
+			updatedTable, tcmd := s.activeTable().Update(msg)
+			s.setActiveTable(updatedTable)
+			return s, tcmd
 
 		case ViewDetail:
 			switch msg.String() {
@@ -437,23 +555,133 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y", "enter":
 				var actionCmd tea.Cmd
 				if s.pendingAction == "delete" {
-					if s.activeTab == TabUptimeChecks && s.selectedCheck != nil {
+					switch {
+					case s.activeTab == TabUptimeChecks && s.selectedCheck != nil:
 						actionCmd = s.deleteUptimeCheckCmd(*s.selectedCheck)
-					} else if s.activeTab == TabAlertPolicies && s.selectedAlert != nil {
+					case s.activeTab == TabAlertPolicies && s.selectedAlert != nil:
 						actionCmd = s.deleteAlertPolicyCmd(*s.selectedAlert)
+					case s.activeTab == TabDashboards && s.selectedDashboard != nil:
+						actionCmd = s.deleteDashboardCmd(*s.selectedDashboard)
 					}
 				}
 				s.viewState = s.actionSource
+				s.selectedDashboard = nil
 				return s, actionCmd
 			case "n", "esc", "q":
 				s.viewState = s.actionSource
 				s.pendingAction = ""
+				s.selectedDashboard = nil
 				return s, nil
 			}
 		}
 	}
 
 	return s, nil
+}
+
+// nextTab cycles through tabOrder, wrapping around at the end.
+func nextTab(t Tab) Tab {
+	for i, cur := range tabOrder {
+		if cur == t {
+			return tabOrder[(i+1)%len(tabOrder)]
+		}
+	}
+	return tabOrder[0]
+}
+
+// activeTable returns the StandardTable backing the currently active tab.
+func (s *Service) activeTable() *components.StandardTable {
+	switch s.activeTab {
+	case TabAlertPolicies:
+		return s.alertTable
+	case TabDashboards:
+		return s.dashboardTable
+	case TabSnoozes:
+		return s.snoozeTable
+	default:
+		return s.uptimeTable
+	}
+}
+
+// setActiveTable writes back an updated table to whichever field backs the
+// currently active tab, mirroring activeTable's routing.
+func (s *Service) setActiveTable(t *components.StandardTable) {
+	switch s.activeTab {
+	case TabAlertPolicies:
+		s.alertTable = t
+	case TabDashboards:
+		s.dashboardTable = t
+	case TabSnoozes:
+		s.snoozeTable = t
+	default:
+		s.uptimeTable = t
+	}
+}
+
+// createAlertPolicyCmd fires the CreateAlertPolicy API call using the
+// current createForm values.
+func (s *Service) createAlertPolicyCmd() tea.Cmd {
+	v := s.createForm.Values()
+	opts := AlertPolicyCreateOpts{
+		DisplayName:    v["Display Name"],
+		MetricFilter:   v["Metric Filter"],
+		Comparison:     v["Comparison"],
+		ThresholdValue: v["Threshold Value"],
+		DurationSec:    v["Duration Sec"],
+	}
+	s.viewState = ViewList
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateAlertPolicy(s.projectID, opts); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating alert policy %s...", opts.DisplayName)}
+	}
+}
+
+// deleteDashboardCmd triggers deletion of the given dashboard.
+func (s *Service) deleteDashboardCmd(d Dashboard) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteDashboard(d.FullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting dashboard %s...", d.DisplayName)}
+	}
+}
+
+// createSnoozeCmd fires the CreateSnooze API call using the current
+// createForm values, resolving the entered short alert-policy ID to a full
+// resource name against the currently loaded policy list.
+func (s *Service) createSnoozeCmd() tea.Cmd {
+	v := s.createForm.Values()
+	displayName := v["Display Name"]
+	policyID := v["Alert Policy ID"]
+	duration := v["Duration Minutes"]
+
+	fullName := fmt.Sprintf("projects/%s/alertPolicies/%s", s.projectID, policyID)
+	for _, p := range s.alertPolicys {
+		if p.Name == policyID {
+			fullName = p.FullName
+			break
+		}
+	}
+
+	s.viewState = ViewList
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		opts := SnoozeCreateOpts{DisplayName: displayName, AlertPolicyFullName: fullName, DurationMinutes: duration}
+		if err := s.client.CreateSnooze(s.projectID, opts); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating snooze %s...", displayName)}
+	}
 }
 
 // createUptimeCheckCmd fires the CreateUptimeCheck API call using the
@@ -575,6 +803,54 @@ func (s *Service) fetchAlertPoliciesCmd(force bool) tea.Cmd {
 	}
 }
 
+func (s *Service) fetchDashboardsCmd(force bool) tea.Cmd {
+	return func() tea.Msg {
+		key := fmt.Sprintf("monitoring_dashboards:%s", s.projectID)
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if items, ok := val.([]Dashboard); ok {
+					return dashboardsMsg(items)
+				}
+			}
+		}
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not init"))
+		}
+		items, err := s.client.ListDashboards(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
+		if s.cache != nil {
+			s.cache.Set(key, items, CacheTTL)
+		}
+		return dashboardsMsg(items)
+	}
+}
+
+func (s *Service) fetchSnoozesCmd(force bool) tea.Cmd {
+	return func() tea.Msg {
+		key := fmt.Sprintf("monitoring_snoozes:%s", s.projectID)
+		if !force && s.cache != nil {
+			if val, found := s.cache.Get(key); found {
+				if items, ok := val.([]Snooze); ok {
+					return snoozesMsg(items)
+				}
+			}
+		}
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not init"))
+		}
+		items, err := s.client.ListSnoozes(s.projectID)
+		if err != nil {
+			return errMsg(err)
+		}
+		if s.cache != nil {
+			s.cache.Set(key, items, CacheTTL)
+		}
+		return snoozesMsg(items)
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Table Updates
 // -----------------------------------------------------------------------------
@@ -597,4 +873,27 @@ func (s *Service) updateAlertTable() {
 		rows[i] = table.Row{p.DisplayName, enabled, fmt.Sprintf("%d", len(p.Conditions)), p.Combiner}
 	}
 	s.alertTable.SetRows(rows)
+}
+
+func (s *Service) updateDashboardTable() {
+	rows := make([]table.Row, len(s.dashboards))
+	for i, d := range s.dashboards {
+		rows[i] = table.Row{d.DisplayName, d.Name}
+	}
+	s.dashboardTable.SetRows(rows)
+}
+
+func (s *Service) updateSnoozeTable() {
+	rows := make([]table.Row, len(s.snoozes))
+	for i, sn := range s.snoozes {
+		start, end := "", ""
+		if !sn.StartTime.IsZero() {
+			start = sn.StartTime.Format("2006-01-02 15:04")
+		}
+		if !sn.EndTime.IsZero() {
+			end = sn.EndTime.Format("2006-01-02 15:04")
+		}
+		rows[i] = table.Row{sn.DisplayName, fmt.Sprintf("%d", len(sn.Policies)), start, end}
+	}
+	s.snoozeTable.SetRows(rows)
 }

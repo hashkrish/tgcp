@@ -38,3 +38,13 @@ type Instance struct {
 	CreateTime    string // RFC3339-ish formatted, empty if unknown
 	FileShares    []FileShare
 }
+
+// Snapshot represents a point-in-time snapshot of a Filestore instance's
+// file share.
+type Snapshot struct {
+	Name        string // Short snapshot ID
+	FullName    string // Full resource name (projects/*/locations/*/instances/*/snapshots/*)
+	Description string
+	State       string // READY, CREATING, DELETING, ...
+	CreateTime  string
+}

@@ -20,12 +20,83 @@ func (s *Service) View() string {
 		return s.spinner.View()
 	}
 
+	if s.resourcesMode {
+		return s.renderResourcesView()
+	}
+
 	if s.viewingDetail {
 		return s.renderDetailView()
 	}
 
 	// Default: List View
 	return s.renderListView()
+}
+
+// renderResourcesView renders the sinks/metrics/buckets/views browser.
+func (s *Service) renderResourcesView() string {
+	switch s.resourceViewState {
+	case ResourceViewCreate, ResourceViewGrantIAM:
+		return s.resourceCreateForm.View()
+	case ResourceViewConfirmation:
+		return components.RenderConfirmation("delete", s.pendingResourceDelete, "resource")
+	}
+
+	var label string
+	switch s.resourceTab {
+	case ResourceTabMetrics:
+		label = "Log Metrics"
+	case ResourceTabBuckets:
+		label = "Log Buckets"
+	case ResourceTabViews:
+		label = fmt.Sprintf("Views (bucket %s)", s.viewBucketID)
+	default:
+		label = "Sinks"
+	}
+
+	breadcrumb := components.Breadcrumb(s.Name(), "Resources", label)
+
+	tabStyle := func(t ResourceTab) lipgloss.Style {
+		if s.resourceTab == t {
+			return styles.ActiveTabStyle
+		}
+		return styles.InactiveTabStyle
+	}
+	tabs := lipgloss.JoinHorizontal(lipgloss.Top,
+		tabStyle(ResourceTabSinks).Render(" Sinks "),
+		tabStyle(ResourceTabMetrics).Render(" Metrics "),
+		tabStyle(ResourceTabBuckets).Render(" Buckets "),
+		tabStyle(ResourceTabViews).Render(" Views "),
+	)
+
+	var content string
+	switch s.resourceTab {
+	case ResourceTabSinks:
+		if len(s.sinks) == 0 {
+			content = components.EmptyState("sinks")
+		} else {
+			content = s.sinkTable.View()
+		}
+	case ResourceTabMetrics:
+		if len(s.metrics) == 0 {
+			content = components.EmptyState("log metrics")
+		} else {
+			content = s.metricTable.View()
+		}
+	case ResourceTabBuckets:
+		if len(s.buckets) == 0 {
+			content = components.EmptyState("log buckets")
+		} else {
+			content = s.bucketTable.View()
+		}
+	case ResourceTabViews:
+		if len(s.views) == 0 {
+			content = components.EmptyState("views")
+		} else {
+			content = s.viewTable.View()
+		}
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, tabs, content)
 }
 
 // renderListView renders the compact log table
