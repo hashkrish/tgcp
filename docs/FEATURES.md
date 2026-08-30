@@ -63,6 +63,11 @@ TGCP is tuned for long sessions in a terminal: dark-first, minimal chrome, and d
 -   **Subnets**: View subnetworks and their IP ranges.
 -   **Firewalls**: View firewall rules, priorities, and targets.
 
+### IP Addresses
+-   **Regional & Global**: Lists reserved static IP addresses across every region plus global addresses (used by global external load balancers/Cloud CDN) in one view.
+-   **Reserve & Release**: Create a new external or internal static address, or release one that's no longer needed.
+-   **Usage**: See whether an address is `RESERVED` or `IN_USE`, and which resource is using it.
+
 ### Data & Analytics
 -   **BigQuery**: Browse datasets and tables.
 -   **Pub/Sub**: Monitor topics and subscriptions. View backlog statistics.

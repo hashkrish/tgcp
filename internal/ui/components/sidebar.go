@@ -33,9 +33,9 @@ var groupBreaks = map[int]bool{
 	7:  true, // After Storage (GCS, Disks, Filestore)
 	12: true, // After Databases (Cloud SQL, Spanner, Bigtable, Memorystore, Firestore)
 	18: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
-	25: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking, Load Balancing, DNS, KMS)
-	27: true, // After Observability (Cloud Logging, Cloud Monitoring)
-	29: true, // After DevOps (Cloud Build, Artifact Registry)
+	26: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking, Load Balancing, DNS, KMS, IP Addresses)
+	28: true, // After Observability (Cloud Logging, Cloud Monitoring)
+	30: true, // After DevOps (Cloud Build, Artifact Registry)
 }
 
 // Icons here are deliberately plain ASCII rather than Unicode
@@ -78,6 +78,7 @@ func NewSidebar() SidebarModel {
 			{Name: "Load Balancing", ShortName: "loadbalancing", Icon: "+"},
 			{Name: "Cloud DNS", ShortName: "dns", Icon: ":"},
 			{Name: "Cloud KMS", ShortName: "kms", Icon: "*"},
+			{Name: "IP Addresses", ShortName: "ipaddress", Icon: "I"},
 			// Observability
 			{Name: "Cloud Logging", ShortName: "logs", Icon: "L"},
 			{Name: "Cloud Monitoring", ShortName: "monitoring", Icon: "O"},

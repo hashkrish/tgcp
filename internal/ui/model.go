@@ -28,6 +28,7 @@ import (
 	"github.com/yogirk/tgcp/internal/services/gcs"
 	"github.com/yogirk/tgcp/internal/services/gke"
 	"github.com/yogirk/tgcp/internal/services/iam"
+	"github.com/yogirk/tgcp/internal/services/ipaddress"
 	"github.com/yogirk/tgcp/internal/services/jobs"
 	"github.com/yogirk/tgcp/internal/services/kms"
 	"github.com/yogirk/tgcp/internal/services/loadbalancing"
@@ -1116,6 +1117,9 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	})
 	registry.Register("net", func(cache *core.Cache) services.Service {
 		return net.NewService(cache)
+	})
+	registry.Register("ipaddress", func(cache *core.Cache) services.Service {
+		return ipaddress.NewService(cache)
 	})
 	registry.Register("loadbalancing", func(cache *core.Cache) services.Service {
 		return loadbalancing.NewService(cache)
