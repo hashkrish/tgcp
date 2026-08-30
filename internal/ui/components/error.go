@@ -36,6 +36,36 @@ func (m ErrorModel) Update(msg tea.Msg) (ErrorModel, tea.Cmd) {
 	return m, nil
 }
 
+// errorBoxMargin is how much terminal width the error box leaves unused on
+// each side combined, so its border doesn't sit flush against the terminal
+// edge. errorBoxMinWidth floors the box width on tiny terminals.
+const (
+	errorBoxMargin   = 6
+	errorBoxMinWidth = 40
+)
+
+// errorBoxWidth sizes the box to almost the full terminal width (tracked via
+// globalWidth, see termsize.go) rather than a fixed width -- a fixed 80-col
+// box wasted most of a wide terminal and, worse, wrapped long GCP API error
+// text (e.g. "SERVICE_DISABLED") into far more lines than necessary.
+func errorBoxWidth() int {
+	return max(globalWidth-errorBoxMargin, errorBoxMinWidth)
+}
+
+// errorBoxOverhead is the box chrome eaten out of errorBoxWidth before text
+// can use it: 1-char border + Padding(SpaceS, SpaceM) horizontal padding on
+// each side.
+const errorBoxOverhead = 2 + 2*styles.SpaceM
+
+// errorMaxMessageLines caps how many wrapped lines of the raw error text are
+// shown. GCP API errors (e.g. "SERVICE_DISABLED") often bundle a long
+// message plus repeated help links/metadata that, left unbounded, produce a
+// box taller than the terminal -- since this box is rendered inline (not in
+// a scrollable viewport), any overflow just pushes the top of the box off
+// screen with no way to scroll back to it. Capping the line count keeps the
+// whole box on screen; the full error is still visible in --debug logs.
+const errorMaxMessageLines = 8
+
 // View renders the error component
 func (m ErrorModel) View() string {
 	if m.Error == nil {
@@ -49,15 +79,13 @@ func (m ErrorModel) View() string {
 		styles.ErrorStyle.Bold(true).Render(m.Title),
 	)
 
-	// Error message
-	errorMsg := m.Error.Error()
-	// Wrap long error messages
-	if m.Width > 0 {
-		maxWidth := m.Width - 10
-		if maxWidth > 3 && len(errorMsg) > maxWidth {
-			errorMsg = errorMsg[:maxWidth-3] + "..."
-		}
-	}
+	boxWidth := errorBoxWidth()
+	contentWidth := boxWidth - errorBoxOverhead
+
+	// Word-wrap the error message to the box's content width, then hard-cap
+	// the number of lines so the box can never grow taller than fits on
+	// screen (see errorMaxMessageLines).
+	errorMsg := wrapAndCapMessage(m.Error.Error(), contentWidth, errorMaxMessageLines)
 
 	// Suggestions section
 	var suggestions string
@@ -92,10 +120,24 @@ func (m ErrorModel) View() string {
 	box := styles.OverlayBoxStyle.
 		BorderForeground(styles.ColorError).
 		Padding(styles.SpaceS, styles.SpaceM).
-		Width(80).
+		Width(boxWidth).
 		Render(content)
 
 	return box
+}
+
+// wrapAndCapMessage word-wraps msg to width, then truncates to at most
+// maxLines, marking the cut with a trailing "…" so it's clear text was
+// dropped rather than the error simply ending mid-thought.
+func wrapAndCapMessage(msg string, width, maxLines int) string {
+	wrapped := lipgloss.NewStyle().Width(width).Render(msg)
+	lines := strings.Split(wrapped, "\n")
+	if len(lines) <= maxLines {
+		return wrapped
+	}
+	lines = lines[:maxLines]
+	lines[maxLines-1] = strings.TrimRight(lines[maxLines-1], " ") + " …"
+	return strings.Join(lines, "\n")
 }
 
 // generateSuggestions creates helpful suggestions based on error type

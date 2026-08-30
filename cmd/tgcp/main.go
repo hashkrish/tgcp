@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yogirk/tgcp/internal/config"
@@ -48,6 +49,7 @@ func main() {
 	if err != nil && *debug {
 		utils.Log("Error loading config: %v", err)
 	}
+	core.SetJobRetention(cfg.Jobs.MaxCount, time.Duration(cfg.Jobs.MaxAgeDays)*24*time.Hour)
 
 	// 4. Authenticate — or synthesize identity in demo mode.
 	var authState core.AuthState

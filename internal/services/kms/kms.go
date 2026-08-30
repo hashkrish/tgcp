@@ -362,11 +362,34 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
+			resource, name := "key ring", ""
+			if s.iamOnKey && s.selectedKey != nil {
+				resource, name = "crypto key", s.selectedKey.Name
+			} else if s.selectedRing != nil {
+				name = s.selectedRing.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  resource,
+					Name:      name,
+					Action:    "grant",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  resource,
+				Name:      name,
+				Action:    "grant",
+				Status:    core.JobSuccess,
+			})
 			if s.iamOnKey && s.selectedKey != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -382,12 +405,34 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if isVersionAction(s.pendingAction) {
+			verb := strings.TrimSuffix(s.pendingAction, "-version")
 			s.pendingAction = ""
+			versionID := ""
+			if s.selectedVersion != nil {
+				versionID = s.selectedVersion.VersionID
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "crypto key version",
+					Name:      versionID,
+					Action:    verb,
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "crypto key version",
+				Name:      versionID,
+				Action:    verb,
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewVersions
 			if s.selectedKey == nil {
 				return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
@@ -400,11 +445,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedKey != nil {
+				name = s.selectedKey.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "crypto key",
+					Name:      name,
+					Action:    "delete",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "crypto key",
+				Name:      name,
+				Action:    "delete",
+				Status:    core.JobSuccess,
+			})
 			s.selectedKey = nil
 			s.viewState = ViewKeys
 			return s, tea.Batch(
@@ -414,17 +480,69 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		wasUpdate := s.viewState == ViewUpdate
+		wasKeyRing := s.createReturnView == ViewRings
 		if msg.err != nil {
-			if s.viewState == ViewUpdate {
+			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
+				name := ""
+				if s.selectedKey != nil {
+					name = s.selectedKey.Name
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "crypto key",
+					Name:      name,
+					Action:    "update",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
+				resource, name := "crypto key", s.createForm.Value("Key ID")
+				if wasKeyRing {
+					resource, name = "key ring", s.createForm.Value("Key Ring ID")
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  resource,
+					Name:      name,
+					Action:    "create",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			}
 			return s, nil
 		}
-		if s.viewState == ViewUpdate {
+		if wasUpdate {
+			name := ""
+			if s.selectedKey != nil {
+				name = s.selectedKey.Name
+			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "crypto key",
+				Name:      name,
+				Action:    "update",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewKeys
 		} else {
+			resource, name := "crypto key", s.createForm.Value("Key ID")
+			if wasKeyRing {
+				resource, name = "key ring", s.createForm.Value("Key Ring ID")
+			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  resource,
+				Name:      name,
+				Action:    "create",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = s.createReturnView
 		}
 		if msg.msg != "" {

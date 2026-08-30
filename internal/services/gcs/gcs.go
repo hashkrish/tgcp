@@ -400,11 +400,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete-object" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedObject != nil {
+				name = s.selectedObject.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "delete", Status: core.JobSuccess})
 			if s.selectedObject != nil {
 				s.objects = removeObjectByName(s.objects, s.selectedObject.Name)
 				s.objectFilterSession.Apply(s.objects)
@@ -416,11 +422,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
+			bucketName := ""
+			if s.selectedBucket != nil {
+				bucketName = s.selectedBucket.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "grant", Status: core.JobSuccess})
 			if s.selectedBucket != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -431,11 +443,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			bucketName := ""
+			if s.selectedBucket != nil {
+				bucketName = s.selectedBucket.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "delete", Status: core.JobSuccess})
 			s.selectedBucket = nil
 			s.viewState = ViewList
 			return s, tea.Batch(
@@ -447,11 +465,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "move-object" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedObject != nil {
+				name = s.selectedObject.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "move", Status: core.JobFailed, Error: msg.err.Error()})
 				s.moveForm.SubmitErr = msg.err.Error()
 				s.viewState = ViewMoveObject
 				return s, nil
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "move", Status: core.JobSuccess})
 			s.selectedObject = nil
 			s.viewState = ViewObjects
 			return s, tea.Batch(
@@ -472,11 +496,26 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
+				name := ""
+				if s.selectedBucket != nil {
+					name = s.selectedBucket.Name
+				}
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: name, Action: "update", Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
+		}
+		if s.viewState == ViewUpdate {
+			name := ""
+			if s.selectedBucket != nil {
+				name = s.selectedBucket.Name
+			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: name, Action: "update", Status: core.JobSuccess})
+		} else {
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobSuccess})
 		}
 		s.viewState = ViewList
 		return s, tea.Batch(

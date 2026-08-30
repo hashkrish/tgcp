@@ -19,8 +19,11 @@ type vulnMsg struct {
 	err    error
 }
 type resourceActionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // newTagRemoveForm builds the FormModel for removing a single URL tag from
@@ -85,9 +88,9 @@ func (s *Service) deleteTagCmd(repoFullName string, img DockerImage, tag string)
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteTag(repoFullName, img, tag); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "tag", name: tag, action: "untag"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Removed tag %q", tag)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Removed tag %q", tag), resource: "tag", name: tag, action: "untag"}
 	}
 }
 
@@ -97,9 +100,9 @@ func (s *Service) deletePackageCmd(pkg PackageItem) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeletePackage(pkg.Name); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "package", name: pkg.DisplayName, action: "delete"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted package %s", pkg.DisplayName)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted package %s", pkg.DisplayName), resource: "package", name: pkg.DisplayName, action: "delete"}
 	}
 }
 
@@ -109,9 +112,9 @@ func (s *Service) deleteVersionCmd(v VersionItem) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteVersion(v.Name); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "version", name: v.Name, action: "delete"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted version %s", v.Name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted version %s", v.Name), resource: "version", name: v.Name, action: "delete"}
 	}
 }
 
@@ -174,10 +177,20 @@ func (s *Service) handleResourceMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return s, nil, true
 	case resourceActionResultMsg:
 		if m.err != nil {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: m.resource, Name: m.name, Action: m.action,
+				Status: core.JobFailed, Error: m.err.Error(),
+			})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: m.err.Error(), Type: core.ToastError}
 			}, true
 		}
+		core.RecordJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: m.resource, Name: m.name, Action: m.action,
+			Status: core.JobSuccess,
+		})
 		var refresh tea.Cmd
 		switch s.viewState {
 		case ViewPackages:

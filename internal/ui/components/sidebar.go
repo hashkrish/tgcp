@@ -84,6 +84,8 @@ func NewSidebar() SidebarModel {
 			// DevOps
 			{Name: "Cloud Build", ShortName: "cloudbuild", Icon: "^"},
 			{Name: "Artifact Registry", ShortName: "artifactregistry", Icon: "A"},
+			// Local (not a GCP service -- app-local, cross-project state)
+			{Name: "Job History", ShortName: "jobs", Icon: "J"},
 		},
 		Cursor:  0,
 		Active:  true, // Default focus on start

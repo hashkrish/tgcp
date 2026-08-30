@@ -278,11 +278,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedInstance != nil {
+				name = s.selectedInstance.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: name, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: name, Action: "delete", Status: core.JobSuccess})
 			s.selectedInstance = nil
 			s.viewState = ViewList
 			return s, tea.Batch(
@@ -293,12 +299,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.pendingAction == "create-snapshot" || s.pendingAction == "delete-snapshot" {
+			action := "delete"
+			if s.pendingAction == "create-snapshot" {
+				action = "create"
+			}
 			s.pendingAction = ""
+			name := ""
+			if s.selectedSnapshot != nil {
+				name = s.selectedSnapshot.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "snapshot", Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "snapshot", Name: name, Action: action, Status: core.JobSuccess})
 			return s, tea.Batch(
 				func() tea.Msg {
 					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
@@ -306,7 +322,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.fetchSnapshotsCmd(),
 			)
 		}
+		// Remaining outcomes share this generic path: create-instance,
+		// update-instance, promote-replica, revert. pendingAction (still set
+		// for the latter two) and viewState (ViewUpdate for update)
+		// disambiguate which one this is.
+		genericAction := "create"
+		genericName := s.createForm.Value("Instance ID")
+		switch {
+		case s.viewState == ViewUpdate:
+			genericAction = "update"
+			if s.selectedInstance != nil {
+				genericName = s.selectedInstance.Name
+			}
+		case s.pendingAction == "promote-replica":
+			genericAction = "promote"
+			if s.selectedInstance != nil {
+				genericName = s.selectedInstance.Name
+			}
+		case s.pendingAction == "revert":
+			genericAction = "revert"
+			if s.selectedInstance != nil {
+				genericName = s.selectedInstance.Name
+			}
+		}
+		s.pendingAction = ""
 		if msg.err != nil {
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: genericName, Action: genericAction, Status: core.JobFailed, Error: msg.err.Error()})
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -315,6 +356,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
+		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: genericName, Action: genericAction, Status: core.JobSuccess})
 		if s.viewState == ViewUpdate {
 			s.viewState = ViewDetail
 		}

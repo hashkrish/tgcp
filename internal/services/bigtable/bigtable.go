@@ -334,6 +334,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			instName := ""
+			if s.selectedInstance != nil {
+				instName = s.selectedInstance.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+				Name: instName, Action: "delete", Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -351,6 +363,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete-table" {
 			s.pendingAction = ""
+			tableName := ""
+			if s.selectedTable != nil {
+				tableName = s.selectedTable.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+				Name: tableName, Action: "delete", Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
 			}
@@ -363,6 +387,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
+			instName := ""
+			if s.selectedInstance != nil {
+				instName = s.selectedInstance.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+				Name: instName, Action: "grant", Status: status, Error: errStr,
+			})
 			return s, func() tea.Msg {
 				if msg.err != nil {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -371,6 +407,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.viewState == ViewCreateTable {
+			tableID := s.tableCreateForm.Value("Table ID")
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+				Name: tableID, Action: "create", Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				s.tableCreateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -383,6 +428,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, toast
 		}
 		if s.viewState == ViewUndeleteTable {
+			tableID := s.undeleteTableForm.Value("Table ID")
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+				Name: tableID, Action: "undelete", Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				s.undeleteTableForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -395,6 +449,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, toast
 		}
 		if s.viewState == ViewRestoreTable {
+			tableID := s.restoreTableForm.Value("New Table ID")
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+				Name: tableID, Action: "restore", Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				s.restoreTableForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -405,6 +468,24 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, tea.Batch(toast, s.fetchTablesCmd(s.selectedInstance.Name))
 			}
 			return s, toast
+		}
+		{
+			action := "create"
+			instName := s.createForm.Value("Instance ID")
+			if s.viewState == ViewUpdate {
+				action = "update"
+				if s.selectedInstance != nil {
+					instName = s.selectedInstance.Name
+				}
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+				Name: instName, Action: action, Status: status, Error: errStr,
+			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {

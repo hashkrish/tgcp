@@ -28,6 +28,7 @@ import (
 	"github.com/yogirk/tgcp/internal/services/gcs"
 	"github.com/yogirk/tgcp/internal/services/gke"
 	"github.com/yogirk/tgcp/internal/services/iam"
+	"github.com/yogirk/tgcp/internal/services/jobs"
 	"github.com/yogirk/tgcp/internal/services/kms"
 	"github.com/yogirk/tgcp/internal/services/loadbalancing"
 	"github.com/yogirk/tgcp/internal/services/logging"
@@ -1135,6 +1136,9 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	registry.Register("artifactregistry", func(cache *core.Cache) services.Service {
 		return artifactregistry.NewService(cache)
 	})
+	registry.Register("jobs", func(cache *core.Cache) services.Service {
+		return jobs.NewService(cache)
+	})
 }
 
 // tabbedService is implemented by services with more than one tab (see
@@ -1168,7 +1172,7 @@ type subServiceTab struct {
 
 // serviceSubTabs lists the extra (non-default) tabs per service short name.
 // Keys here must match the case strings each service's own SetActiveTab
-// switches on (internal/services/{gce,net,monitoring,loadbalancing,cloudrun}).
+// switches on (internal/services/{gce,net,monitoring,loadbalancing,cloudrun,pubsub}).
 var serviceSubTabs = map[string][]subServiceTab{
 	"gce":        {{Key: "instance-groups", Label: "Instance Groups (MIGs)"}},
 	"net":        {{Key: "firewalls", Label: "Firewall Rules"}},
@@ -1179,7 +1183,8 @@ var serviceSubTabs = map[string][]subServiceTab{
 		{Key: "forwarding-rules", Label: "Forwarding Rules"},
 		{Key: "ssl-certificates", Label: "SSL Certificates"},
 	},
-	"run": {{Key: "functions", Label: "Functions"}},
+	"run":    {{Key: "functions", Label: "Functions"}},
+	"pubsub": {{Key: "subscriptions", Label: "Subscriptions"}},
 }
 
 // serviceCommands builds one command-palette entry per registered service,

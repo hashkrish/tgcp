@@ -14,6 +14,16 @@ type Config struct {
 	UI       UIConfig            `yaml:"ui"`
 	Features FeaturesConfig      `yaml:"features"`
 	Projects []ConfiguredProject `yaml:"projects"`
+	Jobs     JobsConfig          `yaml:"jobs"`
+}
+
+// JobsConfig controls retention for the persisted job-history log
+// (~/.tgcp/jobs.json, see internal/core/jobs.go) shown in the Job History
+// view. Both limits always apply together (a job is kept only if it
+// satisfies both); either can be disabled independently by setting it <= 0.
+type JobsConfig struct {
+	MaxCount   int `yaml:"max_count"`    // 0/unset -> DefaultConfig's 500; <=0 (explicit) means unbounded by count
+	MaxAgeDays int `yaml:"max_age_days"` // 0/unset -> DefaultConfig's 30; <=0 (explicit) means unbounded by age
 }
 
 // ConfiguredProject is one entry in the `projects:` list in ~/.tgcprc,
@@ -46,6 +56,10 @@ func DefaultConfig() *Config {
 		Features: FeaturesConfig{
 			EnableGCE:      true,
 			EnableCloudSQL: true,
+		},
+		Jobs: JobsConfig{
+			MaxCount:   500,
+			MaxAgeDays: 30,
 		},
 	}
 }

@@ -87,10 +87,15 @@ type tablesMsg []Table
 type schemaMsg []SchemaField
 type errMsg error
 
-// actionResultMsg carries the result of an async action (e.g. dataset creation)
+// actionResultMsg carries the result of an async action (e.g. dataset
+// creation). resource/name/action identify what was acted on, for
+// job-history recording.
 type actionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // queryResultMsg carries the result of an ad-hoc SQL query (see RunQuery).
@@ -322,6 +327,19 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		if msg.err != nil {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: msg.resource, Name: msg.name, Action: msg.action,
+				Status: core.JobFailed, Error: msg.err.Error(),
+			})
+		} else {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: msg.resource, Name: msg.name, Action: msg.action,
+				Status: core.JobSuccess,
+			})
+		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -707,9 +725,9 @@ func (s *Service) deleteDatasetCmd(ds Dataset) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteDataset(ds.ID); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "dataset", name: ds.ID, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting dataset %s...", ds.ID)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting dataset %s...", ds.ID), resource: "dataset", name: ds.ID, action: "delete"}
 	}
 }
 
@@ -725,9 +743,9 @@ func (s *Service) createDatasetCmd() tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateDataset(id, location); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "dataset", name: id, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Dataset %s created", id)}
+		return actionResultMsg{msg: fmt.Sprintf("Dataset %s created", id), resource: "dataset", name: id, action: "create"}
 	}
 }
 
@@ -740,9 +758,9 @@ func (s *Service) updateDatasetCmd(ds Dataset) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.UpdateDatasetDescription(ds.ID, description); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "dataset", name: ds.ID, action: "update"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating dataset %s...", ds.ID)}
+		return actionResultMsg{msg: fmt.Sprintf("Updating dataset %s...", ds.ID), resource: "dataset", name: ds.ID, action: "update"}
 	}
 }
 
@@ -753,9 +771,9 @@ func (s *Service) createTableCmd(ds Dataset, tableID string, schema []SchemaFiel
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateTable(ds.ID, tableID, schema); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "table", name: tableID, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Table %s created", tableID)}
+		return actionResultMsg{msg: fmt.Sprintf("Table %s created", tableID), resource: "table", name: tableID, action: "create"}
 	}
 }
 
@@ -766,9 +784,9 @@ func (s *Service) deleteTableCmd(ds Dataset, t Table) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteTable(ds.ID, t.ID); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "table", name: t.ID, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting table %s...", t.ID)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting table %s...", t.ID), resource: "table", name: t.ID, action: "delete"}
 	}
 }
 

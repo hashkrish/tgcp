@@ -280,11 +280,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedZone != nil {
+				name = s.selectedZone.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "managed zone",
+					Name:      name,
+					Action:    "delete",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "managed zone",
+				Name:      name,
+				Action:    "delete",
+				Status:    core.JobSuccess,
+			})
 			s.selectedZone = nil
 			s.viewState = ViewZones
 			return s, tea.Batch(
@@ -296,11 +317,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedZone != nil {
+				name = s.selectedZone.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "managed zone",
+					Name:      name,
+					Action:    "grant",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "managed zone",
+				Name:      name,
+				Action:    "grant",
+				Status:    core.JobSuccess,
+			})
 			if s.selectedZone != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -310,10 +352,31 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.viewState == ViewUpdateZone {
+			name := ""
+			if s.selectedZone != nil {
+				name = s.selectedZone.Name
+			}
 			if msg.err != nil {
 				s.updateZoneForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "managed zone",
+					Name:      name,
+					Action:    "update",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, nil
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "managed zone",
+				Name:      name,
+				Action:    "update",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewZones
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -321,10 +384,31 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.viewState == ViewUpdateRecord {
+			name := ""
+			if s.selectedRecord != nil {
+				name = s.selectedRecord.Name
+			}
 			if msg.err != nil {
 				s.updateRecordForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "record",
+					Name:      name,
+					Action:    "update",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, nil
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "record",
+				Name:      name,
+				Action:    "update",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewRecords
 			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 			if s.selectedZone != nil {
@@ -334,8 +418,25 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			s.createForm.SubmitErr = msg.err.Error()
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "managed zone",
+				Name:      s.createForm.Value("Zone Name"),
+				Action:    "create",
+				Status:    core.JobFailed,
+				Error:     msg.err.Error(),
+			})
 			return s, nil
 		}
+		core.RecordJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "managed zone",
+			Name:      s.createForm.Value("Zone Name"),
+			Action:    "create",
+			Status:    core.JobSuccess,
+		})
 		s.viewState = ViewZones
 		if msg.msg != "" {
 			return s, tea.Batch(

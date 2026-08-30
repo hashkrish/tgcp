@@ -85,11 +85,16 @@ type forwardingRulesMsg []ForwardingRule
 type sslCertificatesMsg []SslCertificate
 type errMsg error
 
-// actionResultMsg carries the result of an async mutating action (e.g.
-// health check creation).
+// actionResultMsg carries the result of an async action (e.g. health check
+// creation, or a read like get-health). resource/name/action identify what
+// was acted on for job-history recording; left empty for read-only actions
+// (e.g. get-health), which are never recorded.
 type actionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // -----------------------------------------------------------------------------
@@ -489,6 +494,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		if msg.resource != "" {
+			if msg.err != nil {
+				core.RecordJob(core.Job{
+					ProjectID: s.projectID, Service: s.ShortName(),
+					Resource: msg.resource, Name: msg.name, Action: msg.action,
+					Status: core.JobFailed, Error: msg.err.Error(),
+				})
+			} else {
+				core.RecordJob(core.Job{
+					ProjectID: s.projectID, Service: s.ShortName(),
+					Resource: msg.resource, Name: msg.name, Action: msg.action,
+					Status: core.JobSuccess,
+				})
+			}
+		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -803,9 +823,9 @@ func (s *Service) createHealthCheckCmd() tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateHealthCheck(s.projectID, opts); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "health check", name: opts.Name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating health check %s...", opts.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating health check %s...", opts.Name), resource: "health check", name: opts.Name, action: "create"}
 	}
 }
 
@@ -819,9 +839,9 @@ func (s *Service) invalidateCacheCmd(um UrlMap) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.InvalidateUrlMapCache(s.projectID, um.Name, path); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "URL map", name: um.Name, action: "invalidate-cache"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Invalidating cache for %s at path %s...", um.Name, path)}
+		return actionResultMsg{msg: fmt.Sprintf("Invalidating cache for %s at path %s...", um.Name, path), resource: "URL map", name: um.Name, action: "invalidate-cache"}
 	}
 }
 
@@ -836,9 +856,9 @@ func (s *Service) grantBackendIAMCmd(bs BackendService) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.AddBackendServiceIAMBinding(s.projectID, bs.Region, bs.Name, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "backend service", name: bs.Name, action: "grant-iam"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on backend service %s", role, member, bs.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on backend service %s", role, member, bs.Name), resource: "backend service", name: bs.Name, action: "grant-iam"}
 	}
 }
 
@@ -852,9 +872,9 @@ func (s *Service) updateBackendTimeoutCmd(bs BackendService) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.UpdateBackendServiceTimeout(s.projectID, bs.Region, bs.Name, timeout); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "backend service", name: bs.Name, action: "update-timeout"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating timeout for %s...", bs.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Updating timeout for %s...", bs.Name), resource: "backend service", name: bs.Name, action: "update-timeout"}
 	}
 }
 
@@ -1146,9 +1166,9 @@ func (s *Service) deleteBackendCmd(bs BackendService) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteBackendService(s.projectID, bs.Region, bs.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "backend service", name: bs.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting backend service %s...", bs.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting backend service %s...", bs.Name), resource: "backend service", name: bs.Name, action: "delete"}
 	}
 }
 
@@ -1159,9 +1179,9 @@ func (s *Service) deleteHealthCheckCmd(hc HealthCheck) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteHealthCheck(s.projectID, hc.Region, hc.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "health check", name: hc.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting health check %s...", hc.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting health check %s...", hc.Name), resource: "health check", name: hc.Name, action: "delete"}
 	}
 }
 
@@ -1172,9 +1192,9 @@ func (s *Service) deleteUrlMapCmd(um UrlMap) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteUrlMap(s.projectID, um.Region, um.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "URL map", name: um.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting URL map %s...", um.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting URL map %s...", um.Name), resource: "URL map", name: um.Name, action: "delete"}
 	}
 }
 
@@ -1185,9 +1205,9 @@ func (s *Service) deleteForwardingRuleCmd(fr ForwardingRule) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteForwardingRule(s.projectID, fr.Region, fr.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "forwarding rule", name: fr.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting forwarding rule %s...", fr.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting forwarding rule %s...", fr.Name), resource: "forwarding rule", name: fr.Name, action: "delete"}
 	}
 }
 
@@ -1198,9 +1218,9 @@ func (s *Service) deleteSslCertificateCmd(cert SslCertificate) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteSslCertificate(s.projectID, cert.Region, cert.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "SSL certificate", name: cert.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting SSL certificate %s...", cert.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting SSL certificate %s...", cert.Name), resource: "SSL certificate", name: cert.Name, action: "delete"}
 	}
 }
 

@@ -48,6 +48,14 @@ type errMsg error
 type actionResultMsg struct {
 	err error
 	msg string
+
+	// resource/name/action describe the mutating call this result came
+	// from, so the single actionResultMsg case in Update can record a
+	// core.Job for whichever of delete/call/grant just completed without
+	// needing separate result types per action.
+	resource string
+	name     string
+	action   string
 }
 
 // iamPolicyMsg carries the result of a GetFunctionIAMPolicy fetch.
@@ -254,6 +262,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		status := core.JobSuccess
+		jobErr := ""
+		if msg.err != nil {
+			status = core.JobFailed
+			jobErr = msg.err.Error()
+		}
+		core.RecordJob(core.Job{
+			ProjectID: s.projectID,
+			Service:   s.ShortName(),
+			Resource:  msg.resource,
+			Name:      msg.name,
+			Action:    msg.action,
+			Status:    status,
+			Error:     jobErr,
+		})
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -593,12 +616,12 @@ func (s *Service) renderConfirmation() string {
 func (s *Service) DeleteFunctionCmd(fn Function) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "function", name: fn.Name, action: "delete"}
 		}
 		if err := s.client.DeleteFunction(fn.FullName); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "function", name: fn.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting function %s...", fn.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting function %s...", fn.Name), resource: "function", name: fn.Name, action: "delete"}
 	}
 }
 
@@ -608,13 +631,13 @@ func (s *Service) DeleteFunctionCmd(fn Function) tea.Cmd {
 func (s *Service) CallFunctionCmd(fn Function, data string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "function", name: fn.Name, action: "call"}
 		}
 		result, err := s.client.CallFunction(fn, data)
 		if err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "function", name: fn.Name, action: "call"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Called %s: %s", fn.Name, result)}
+		return actionResultMsg{msg: fmt.Sprintf("Called %s: %s", fn.Name, result), resource: "function", name: fn.Name, action: "call"}
 	}
 }
 
@@ -636,12 +659,12 @@ func (s *Service) fetchIAMCmd(fn Function) tea.Cmd {
 func (s *Service) addIAMBindingCmd(fn Function, role, member string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "function", name: fn.Name, action: "grant"}
 		}
 		if err := s.client.AddFunctionIAMBinding(fn.FullName, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "function", name: fn.Name, action: "grant"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on function %s", role, member, fn.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on function %s", role, member, fn.Name), resource: "function", name: fn.Name, action: "grant"}
 	}
 }
 

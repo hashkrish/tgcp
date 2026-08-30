@@ -95,10 +95,14 @@ type firewallsMsg []Firewall
 type errMsg error
 
 // actionResultMsg carries the result of an async mutating action (e.g.
-// firewall rule creation).
+// firewall rule creation). resource/name/action identify what was acted on,
+// for job-history recording.
 type actionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // -----------------------------------------------------------------------------
@@ -340,10 +344,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					ProjectID: s.projectID, Service: s.ShortName(),
+					Resource: msg.resource, Name: msg.name, Action: msg.action,
+					Status: core.JobFailed, Error: msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: msg.resource, Name: msg.name, Action: msg.action,
+				Status: core.JobSuccess,
+			})
 			s.selectedFirewall = nil
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -353,6 +367,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if msg.err != nil {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: msg.resource, Name: msg.name, Action: msg.action,
+				Status: core.JobFailed, Error: msg.err.Error(),
+			})
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -361,6 +380,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
+		core.RecordJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: msg.resource, Name: msg.name, Action: msg.action,
+			Status: core.JobSuccess,
+		})
 		if s.viewState == ViewUpdate {
 			s.viewState = ViewDetail
 		}
@@ -673,9 +697,9 @@ func (s *Service) createNetworkCmd() tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateNetwork(s.projectID, name, auto); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "network", name: name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating network %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating network %s...", name), resource: "network", name: name, action: "create"}
 	}
 }
 
@@ -686,9 +710,9 @@ func (s *Service) deleteNetworkCmd(n Network) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteNetwork(s.projectID, n.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "network", name: n.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting network %s...", n.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting network %s...", n.Name), resource: "network", name: n.Name, action: "delete"}
 	}
 }
 
@@ -706,9 +730,9 @@ func (s *Service) createSubnetCmd() tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateSubnet(s.projectID, region, name, networkLink, cidr); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "subnet", name: name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating subnet %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating subnet %s...", name), resource: "subnet", name: name, action: "create"}
 	}
 }
 
@@ -719,9 +743,9 @@ func (s *Service) deleteSubnetCmd(sub Subnet) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteSubnet(s.projectID, sub.Region, sub.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "subnet", name: sub.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting subnet %s...", sub.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting subnet %s...", sub.Name), resource: "subnet", name: sub.Name, action: "delete"}
 	}
 }
 
@@ -735,9 +759,9 @@ func (s *Service) grantSubnetIAMCmd(sub Subnet) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.AddSubnetIAMBinding(s.projectID, sub.Region, sub.Name, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "subnet", name: sub.Name, action: "grant-iam"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on subnet %s", role, member, sub.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on subnet %s", role, member, sub.Name), resource: "subnet", name: sub.Name, action: "grant-iam"}
 	}
 }
 
@@ -761,9 +785,9 @@ func (s *Service) createFirewallCmd() tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateFirewallRule(s.projectID, opts); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "firewall rule", name: opts.Name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating firewall rule %s...", opts.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating firewall rule %s...", opts.Name), resource: "firewall rule", name: opts.Name, action: "create"}
 	}
 }
 
@@ -781,9 +805,9 @@ func (s *Service) updateFirewallCmd(fw Firewall) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.UpdateFirewallPriority(s.projectID, fw.Name, priority); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "firewall rule", name: fw.Name, action: "update"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating firewall rule %s...", fw.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Updating firewall rule %s...", fw.Name), resource: "firewall rule", name: fw.Name, action: "update"}
 	}
 }
 
@@ -839,9 +863,9 @@ func (s *Service) deleteFirewallCmd(fw Firewall) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteFirewallRule(s.projectID, fw.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "firewall rule", name: fw.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting firewall rule %s...", fw.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting firewall rule %s...", fw.Name), resource: "firewall rule", name: fw.Name, action: "delete"}
 	}
 }
 

@@ -24,11 +24,29 @@ type DetailCardOpts struct {
 	FooterHint  string
 }
 
+// detailCardMargin is how much terminal width DetailCard leaves unused on
+// each side combined, so its border doesn't sit flush against the terminal
+// edge. detailCardMinWidth floors the box width on tiny terminals.
+const (
+	detailCardMargin   = 6
+	detailCardMinWidth = 40
+)
+
+// detailCardWidth sizes the box to almost the full terminal width (tracked
+// via globalWidth, see termsize.go) rather than a fixed 80 columns -- a fixed
+// width box rendered inline (not in a scrollable viewport) with enough rows
+// grows taller than the terminal, pushing the top of the box off screen with
+// no way to scroll back to it. Widening the box lets more rows fit without
+// wrapping, and reduces how tall the box needs to be.
+func detailCardWidth() int {
+	return max(globalWidth-detailCardMargin, detailCardMinWidth)
+}
+
 // DetailCard renders a standardized detail card with header bar.
 func DetailCard(opts DetailCardOpts) string {
 	width := opts.Width
 	if width <= 0 {
-		width = 80
+		width = detailCardWidth()
 	}
 	borderColor := opts.BorderColor
 	if borderColor == "" {
@@ -44,6 +62,8 @@ func DetailCard(opts DetailCardOpts) string {
 
 	box := styles.PrimaryBoxStyle.
 		BorderForeground(borderColor).
+		BorderLeft(false).
+		BorderRight(false).
 		Width(width).
 		Render(body)
 

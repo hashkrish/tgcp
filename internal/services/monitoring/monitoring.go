@@ -387,11 +387,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			resource, name := "", ""
+			switch {
+			case s.activeTab == TabUptimeChecks && s.selectedCheck != nil:
+				resource, name = "uptime check", s.selectedCheck.DisplayName
+			case s.activeTab == TabAlertPolicies && s.selectedAlert != nil:
+				resource, name = "alert policy", s.selectedAlert.DisplayName
+			case s.activeTab == TabDashboards && s.selectedDashboard != nil:
+				resource, name = "dashboard", s.selectedDashboard.DisplayName
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "delete", Status: core.JobSuccess})
 			s.selectedCheck = nil
 			s.selectedAlert = nil
 			s.viewState = ViewList
@@ -402,15 +413,41 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		action := "create"
+		if s.viewState == ViewUpdate {
+			action = "update"
+		}
+		resource, name := "uptime check", ""
+		switch s.activeTab {
+		case TabAlertPolicies:
+			resource = "alert policy"
+			if s.viewState == ViewUpdate {
+				name = ""
+			} else {
+				name = s.createForm.Value("Display Name")
+			}
+		case TabSnoozes:
+			resource = "snooze"
+			name = s.createForm.Value("Display Name")
+		default:
+			if s.viewState == ViewUpdate && s.selectedCheck != nil {
+				name = s.selectedCheck.DisplayName
+			} else {
+				name = s.createForm.Value("Display Name")
+			}
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, nil
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
+		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobSuccess})
 		if s.viewState == ViewUpdate {
 			s.viewState = ViewDetail
 		}

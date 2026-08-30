@@ -114,6 +114,13 @@ projects:
     name: "Prod"
   - id: "my-dev-project"
     name: "Dev"
+
+# Optional: retention for the "Job History" view (every create/update/
+# delete/etc. you perform, persisted to ~/.tgcp/jobs.json). Both limits
+# always apply together; set either to 0 or less to make it unbounded.
+jobs:
+  max_count: 500     # keep at most this many jobs (default 500)
+  max_age_days: 30   # drop jobs older than this many days (default 30)
 ```
 
 ### CLI Options

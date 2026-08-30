@@ -165,18 +165,27 @@ type revisionsMsg struct {
 // errMsg is the standard error message
 type errMsg error
 
-// actionResultMsg carries the result of an async mutating action (e.g. service creation)
+// actionResultMsg carries the result of an async mutating action (e.g. service creation).
+// resource/name/action are filled in by the Cmd that produced it, since
+// s.pendingAction is already cleared by the time this message is handled --
+// they exist purely for the core.RecordJob call in the Update() handler.
 type actionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // revisionActionResultMsg carries the result of a revision-scoped mutating
 // action (promote/tag). Unlike actionResultMsg, success re-fetches just the
 // selected service's revisions rather than the whole service list.
 type revisionActionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // iamPolicyMsg carries the result of a GetServiceIAMPolicy fetch.
@@ -525,6 +534,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		if msg.resource != "" {
+			job := core.Job{
+				ProjectID: s.projectID,
+				Service:   s.ShortName(),
+				Resource:  msg.resource,
+				Name:      msg.name,
+				Action:    msg.action,
+				Status:    core.JobSuccess,
+			}
+			if msg.err != nil {
+				job.Status = core.JobFailed
+				job.Error = msg.err.Error()
+			}
+			core.RecordJob(job)
+		}
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -549,6 +573,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, s.Refresh()
 
 	case revisionActionResultMsg:
+		if msg.resource != "" {
+			job := core.Job{
+				ProjectID: s.projectID,
+				Service:   s.ShortName(),
+				Resource:  msg.resource,
+				Name:      msg.name,
+				Action:    msg.action,
+				Status:    core.JobSuccess,
+			}
+			if msg.err != nil {
+				job.Status = core.JobFailed
+				job.Error = msg.err.Error()
+			}
+			core.RecordJob(job)
+		}
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -1406,12 +1445,12 @@ func (s *Service) renderFuncDetailView() string {
 func (s *Service) CreateServiceCmd(name, region, image string, port int64) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: name, action: "create"}
 		}
 		if err := s.client.CreateService(s.projectID, region, name, image, port); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "service", name: name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating service %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating service %s...", name), resource: "service", name: name, action: "create"}
 	}
 }
 
@@ -1420,12 +1459,12 @@ func (s *Service) CreateServiceCmd(name, region, image string, port int64) tea.C
 func (s *Service) UpdateServiceCmd(name, region, image string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: name, action: "update"}
 		}
 		if err := s.client.UpdateServiceImage(s.projectID, region, name, image); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "service", name: name, action: "update"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating service %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Updating service %s...", name), resource: "service", name: name, action: "update"}
 	}
 }
 
@@ -1433,12 +1472,12 @@ func (s *Service) UpdateServiceCmd(name, region, image string) tea.Cmd {
 func (s *Service) DeleteServiceCmd(svc RunService) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: svc.Name, action: "delete"}
 		}
 		if err := s.client.DeleteService(s.projectID, svc.Region, svc.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "service", name: svc.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting service %s...", svc.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting service %s...", svc.Name), resource: "service", name: svc.Name, action: "delete"}
 	}
 }
 
@@ -1447,12 +1486,12 @@ func (s *Service) DeleteServiceCmd(svc RunService) tea.Cmd {
 func (s *Service) PromoteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized"), resource: "revision", name: rev.Name, action: "promote"}
 		}
 		if err := s.client.PromoteRevision(s.projectID, svc.Region, svc.Name, rev.Name); err != nil {
-			return revisionActionResultMsg{err: err}
+			return revisionActionResultMsg{err: err, resource: "revision", name: rev.Name, action: "promote"}
 		}
-		return revisionActionResultMsg{msg: fmt.Sprintf("Promoted revision %s to 100%% traffic", rev.Name)}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Promoted revision %s to 100%% traffic", rev.Name), resource: "revision", name: rev.Name, action: "promote"}
 	}
 }
 
@@ -1460,12 +1499,12 @@ func (s *Service) PromoteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 func (s *Service) TagRevisionCmd(svc RunService, rev Revision, tag string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized"), resource: "revision", name: rev.Name, action: "tag"}
 		}
 		if err := s.client.TagRevision(s.projectID, svc.Region, svc.Name, rev.Name, tag); err != nil {
-			return revisionActionResultMsg{err: err}
+			return revisionActionResultMsg{err: err, resource: "revision", name: rev.Name, action: "tag"}
 		}
-		return revisionActionResultMsg{msg: fmt.Sprintf("Tagged revision %s as %q", rev.Name, tag)}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Tagged revision %s as %q", rev.Name, tag), resource: "revision", name: rev.Name, action: "tag"}
 	}
 }
 
@@ -1473,12 +1512,12 @@ func (s *Service) TagRevisionCmd(svc RunService, rev Revision, tag string) tea.C
 func (s *Service) UntagRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized"), resource: "revision", name: rev.Name, action: "untag"}
 		}
 		if err := s.client.UntagRevision(s.projectID, svc.Region, svc.Name, rev.Name); err != nil {
-			return revisionActionResultMsg{err: err}
+			return revisionActionResultMsg{err: err, resource: "revision", name: rev.Name, action: "untag"}
 		}
-		return revisionActionResultMsg{msg: fmt.Sprintf("Removed tag from revision %s", rev.Name)}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Removed tag from revision %s", rev.Name), resource: "revision", name: rev.Name, action: "untag"}
 	}
 }
 
@@ -1487,12 +1526,12 @@ func (s *Service) UntagRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 func (s *Service) SetTrafficSplitCmd(svc RunService, split []TrafficSplitEntry) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: svc.Name, action: "split-traffic"}
 		}
 		if err := s.client.SetTrafficSplit(s.projectID, svc.Region, svc.Name, split); err != nil {
-			return revisionActionResultMsg{err: err}
+			return revisionActionResultMsg{err: err, resource: "service", name: svc.Name, action: "split-traffic"}
 		}
-		return revisionActionResultMsg{msg: fmt.Sprintf("Updated traffic split for %s", svc.Name)}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Updated traffic split for %s", svc.Name), resource: "service", name: svc.Name, action: "split-traffic"}
 	}
 }
 
@@ -1514,12 +1553,12 @@ func (s *Service) fetchIAMCmd(svc RunService) tea.Cmd {
 func (s *Service) addIAMBindingCmd(svc RunService, role, member string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: svc.Name, action: "grant"}
 		}
 		if err := s.client.AddServiceIAMBinding(s.projectID, svc.Region, svc.Name, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "service", name: svc.Name, action: "grant"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on service %s", role, member, svc.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on service %s", role, member, svc.Name), resource: "service", name: svc.Name, action: "grant"}
 	}
 }
 
@@ -1528,12 +1567,12 @@ func (s *Service) addIAMBindingCmd(svc RunService, role, member string) tea.Cmd 
 func (s *Service) DeleteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized"), resource: "revision", name: rev.Name, action: "delete"}
 		}
 		if err := s.client.DeleteRevision(s.projectID, svc.Region, rev.Name); err != nil {
-			return revisionActionResultMsg{err: err}
+			return revisionActionResultMsg{err: err, resource: "revision", name: rev.Name, action: "delete"}
 		}
-		return revisionActionResultMsg{msg: fmt.Sprintf("Deleting revision %s...", rev.Name)}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Deleting revision %s...", rev.Name), resource: "revision", name: rev.Name, action: "delete"}
 	}
 }
 

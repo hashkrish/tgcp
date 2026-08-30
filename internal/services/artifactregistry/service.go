@@ -131,10 +131,14 @@ type imagesMsg []DockerImage
 type errMsg error
 
 // actionResultMsg carries the result of an async mutating action (e.g.
-// repository creation).
+// repository creation). resource/name/action identify what was acted on,
+// for job-history recording.
 type actionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // iamPolicyMsg carries the result of a GetRepositoryIAMPolicy fetch.
@@ -411,6 +415,19 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		if msg.err != nil {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: msg.resource, Name: msg.name, Action: msg.action,
+				Status: core.JobFailed, Error: msg.err.Error(),
+			})
+		} else {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: msg.resource, Name: msg.name, Action: msg.action,
+				Status: core.JobSuccess,
+			})
+		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -807,9 +824,9 @@ func (s *Service) createRepositoryCmd() tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateRepository(s.projectID, opts); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "repository", name: opts.RepositoryID, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating repository %s...", opts.RepositoryID)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating repository %s...", opts.RepositoryID), resource: "repository", name: opts.RepositoryID, action: "create"}
 	}
 }
 
@@ -823,9 +840,9 @@ func (s *Service) updateRepositoryCmd(item RepositoryItem) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.UpdateRepositoryDescription(s.projectID, item.Region, item.Name, description); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "repository", name: item.Name, action: "update"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating repository %s...", item.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Updating repository %s...", item.Name), resource: "repository", name: item.Name, action: "update"}
 	}
 }
 
@@ -836,9 +853,9 @@ func (s *Service) deleteRepositoryCmd(item RepositoryItem) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteRepository(s.projectID, item.Region, item.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "repository", name: item.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting repository %s...", item.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting repository %s...", item.Name), resource: "repository", name: item.Name, action: "delete"}
 	}
 }
 
@@ -891,9 +908,9 @@ func (s *Service) addIAMBindingCmd(item RepositoryItem, role, member string) tea
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.AddRepositoryIAMBinding(name, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "repository", name: item.Name, action: "grant-iam"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on repository %s", role, member, item.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on repository %s", role, member, item.Name), resource: "repository", name: item.Name, action: "grant-iam"}
 	}
 }
 
@@ -1068,14 +1085,14 @@ func (s *Service) fetchImagesCmd(repo RepositoryItem, force bool) tea.Cmd {
 func (s *Service) deleteImageCmd(img DockerImage) tea.Cmd {
 	return func() tea.Msg {
 		err := s.client.DeleteImage(img.Name)
-		if err != nil {
-			return actionResultMsg{err: err}
-		}
 		name := img.URI
 		if len(img.Tags) > 0 {
 			name = strings.Join(img.Tags, ", ")
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting image %s...", name)}
+		if err != nil {
+			return actionResultMsg{err: err, resource: "image", name: name, action: "delete"}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting image %s...", name), resource: "image", name: name, action: "delete"}
 	}
 }
 

@@ -302,11 +302,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
+			clusterName := ""
+			if s.selectedCluster != nil {
+				clusterName = s.selectedCluster.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "grant", Status: core.JobSuccess})
 			if s.selectedCluster != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -317,12 +323,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "kill-job" {
 			s.pendingAction = ""
+			jobID := ""
+			if s.selectedJob != nil {
+				jobID = s.selectedJob.ID
+			}
 			s.selectedJob = nil
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobID, Action: "kill", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobID, Action: "kill", Status: core.JobSuccess})
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.fetchJobsCmd(),
@@ -330,18 +342,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "diagnose" {
 			s.pendingAction = ""
+			clusterName := ""
+			if s.selectedCluster != nil {
+				clusterName = s.selectedCluster.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "diagnose", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "diagnose", Status: core.JobSuccess})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.viewState == ViewJobSubmit {
+			clusterName := ""
+			if s.selectedCluster != nil {
+				clusterName = s.selectedCluster.Name
+			}
 			if msg.err != nil {
 				s.jobSubmitForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: clusterName, Action: "submit", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, nil
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: clusterName, Action: "submit", Status: core.JobSuccess})
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.fetchJobsCmd(),
@@ -350,11 +374,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "start" || s.pendingAction == "stop" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			clusterName := ""
+			if s.selectedCluster != nil {
+				clusterName = s.selectedCluster.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				s.selectedCluster = nil
 				s.viewState = ViewList
@@ -366,14 +396,26 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		clusterName := ""
+		if s.viewState == ViewUpdate && s.selectedCluster != nil {
+			clusterName = s.selectedCluster.Name
+		} else {
+			clusterName = s.createForm.Value("Cluster Name")
+		}
+		action := "create"
+		if s.viewState == ViewUpdate {
+			action = "update"
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 			return s, nil
 		}
+		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobSuccess})
 		s.viewState = ViewList
 		return s, tea.Batch(
 			func() tea.Msg {

@@ -130,6 +130,13 @@ type Service struct {
 	pendingAction string    // "start" or "stop"
 	actionSource  ViewState // Where to return after confirmation
 
+	// pendingJobAction/pendingJobName snapshot the instance-level action and
+	// target name at confirmation time (before pendingAction/selectedInstance
+	// are reset), so the actionResultMsg handler can still record a job for
+	// it once the async call resolves.
+	pendingJobAction string
+	pendingJobName   string
+
 	// Create State
 	createForm components.FormModel
 
@@ -383,6 +390,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Databases/Users sub-view actions re-fetch just that sub-list on
 		// success instead of the generic instance-list Refresh() below.
 		if s.pendingAction == "db-create" || s.pendingAction == "db-delete" {
+			action := "create"
+			name := s.dbCreateForm.Value("Name")
+			if s.pendingAction == "db-delete" {
+				action = "delete"
+				if s.selectedDatabase != nil {
+					name = s.selectedDatabase.Name
+				}
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+				Name: name, Action: action, Status: status, Error: errStr,
+			})
 			s.pendingAction = ""
 			if msg.err != nil {
 				return s, func() tea.Msg {
@@ -398,6 +421,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "user-create" || s.pendingAction == "user-delete" {
+			action := "create"
+			name := s.userCreateForm.Value("Name")
+			if s.pendingAction == "user-delete" {
+				action = "delete"
+				if s.selectedDBUser != nil {
+					name = s.selectedDBUser.Name
+				}
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "user",
+				Name: name, Action: action, Status: status, Error: errStr,
+			})
 			s.pendingAction = ""
 			if msg.err != nil {
 				return s, func() tea.Msg {
@@ -411,6 +450,36 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 			}
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		{
+			// Instance-level lifecycle (start/stop/restart/failover/
+			// promote-replica/switchover/clone/delete) actions carry their
+			// job action/name via pendingJobAction/pendingJobName, snapshotted
+			// at confirmation time; create/update instance submit directly
+			// from their forms without going through pendingAction.
+			action := s.pendingJobAction
+			name := s.pendingJobName
+			if s.viewState == ViewCreate {
+				action = "create"
+				name = s.createForm.Value("Name")
+			} else if s.viewState == ViewUpdate {
+				action = "update"
+				if s.selectedInstance != nil {
+					name = s.selectedInstance.Name
+				}
+			}
+			if action != "" {
+				status, errStr := core.JobSuccess, ""
+				if msg.err != nil {
+					status, errStr = core.JobFailed, msg.err.Error()
+				}
+				core.RecordJob(core.Job{
+					Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+					Name: name, Action: action, Status: status, Error: errStr,
+				})
+			}
+			s.pendingJobAction = ""
+			s.pendingJobName = ""
 		}
 		if msg.err != nil {
 			s.err = msg.err
@@ -742,6 +811,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.pendingAction = "delete-confirm2"
 					return s, nil
 				}
+				instanceNameBeforeDelete := ""
+				if s.selectedInstance != nil {
+					instanceNameBeforeDelete = s.selectedInstance.Name
+				}
 				var actionCmd tea.Cmd
 				switch s.pendingAction {
 				case "start":
@@ -775,6 +848,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "user-delete":
 					if s.selectedInstance != nil && s.selectedDBUser != nil {
 						actionCmd = s.deleteUserCmd(*s.selectedInstance, *s.selectedDBUser)
+					}
+				}
+				// Snapshot the instance-level action/name for job recording
+				// before pendingAction/selectedInstance are reset below —
+				// db-delete/user-delete record against their own
+				// selectedDatabase/selectedDBUser instead, so skip those.
+				if s.pendingAction != "db-delete" && s.pendingAction != "user-delete" && actionCmd != nil {
+					jobAction := s.pendingAction
+					if jobAction == "delete-confirm2" {
+						jobAction = "delete"
+					}
+					s.pendingJobAction = jobAction
+					if s.selectedInstance != nil {
+						s.pendingJobName = s.selectedInstance.Name
+					} else {
+						s.pendingJobName = instanceNameBeforeDelete
 					}
 				}
 				s.viewState = s.actionSource

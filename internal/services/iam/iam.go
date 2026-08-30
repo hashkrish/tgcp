@@ -252,7 +252,36 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction != "" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			acc := s.selectedAccount
+			key := s.selectedKey
 			if msg.err != nil {
+				resource, name := "service account", ""
+				if acc != nil {
+					name = acc.Email
+				}
+				if (action == "delete-key" || action == "create-key") && key != nil {
+					resource, name = "service account key", key.KeyID
+				}
+				jobAction := action
+				if action == "delete-confirm2" {
+					jobAction = "delete"
+				} else if action == "delete-key" {
+					jobAction = "delete"
+				} else if action == "create-key" {
+					jobAction = "create"
+				}
+				if action == "undelete" {
+					name = s.undeleteForm.Value("Unique ID")
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  resource,
+					Name:      name,
+					Action:    jobAction,
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
@@ -261,27 +290,79 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// account no longer exists. Disable/enable leave the detail
 			// view up so the refreshed status is visible in place.
 			if action == "delete-confirm2" {
+				if acc != nil {
+					core.RecordJob(core.Job{
+						Service:   s.ShortName(),
+						ProjectID: s.projectID,
+						Resource:  "service account",
+						Name:      acc.Email,
+						Action:    "delete",
+						Status:    core.JobSuccess,
+					})
+				}
 				s.viewDetail = false
 				s.selectedAccount = nil
 			}
-			if action == "grant" && s.selectedAccount != nil {
+			if action == "grant" && acc != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "service account",
+					Name:      acc.Email,
+					Action:    "grant",
+					Status:    core.JobSuccess,
+				})
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
-					s.fetchIAMPolicyCmd(*s.selectedAccount),
+					s.fetchIAMPolicyCmd(*acc),
 				)
 			}
-			if (action == "delete-key" || action == "create-key") && s.selectedAccount != nil {
+			if (action == "delete-key" || action == "create-key") && acc != nil {
+				jobAction := "create"
+				resourceName := ""
+				if key != nil {
+					resourceName = key.KeyID
+				}
+				if action == "delete-key" {
+					jobAction = "delete"
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "service account key",
+					Name:      resourceName,
+					Action:    jobAction,
+					Status:    core.JobSuccess,
+				})
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
-					s.fetchKeysCmd(*s.selectedAccount),
+					s.fetchKeysCmd(*acc),
 				)
 			}
 			if action == "undelete" {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "service account",
+					Name:      s.undeleteForm.Value("Unique ID"),
+					Action:    "undelete",
+					Status:    core.JobSuccess,
+				})
 				s.viewUndelete = false
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 					s.Refresh(),
 				)
+			}
+			if (action == "enable" || action == "disable") && acc != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "service account",
+					Name:      acc.Email,
+					Action:    action,
+					Status:    core.JobSuccess,
+				})
 			}
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -290,14 +371,53 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		wasUpdate := s.viewUpdate
 		if msg.err != nil {
-			if s.viewUpdate {
+			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
+				name := ""
+				if s.selectedAccount != nil {
+					name = s.selectedAccount.Email
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "service account",
+					Name:      name,
+					Action:    "update",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "service account",
+					Name:      s.createForm.Value("Account ID"),
+					Action:    "create",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			}
 			return s, nil
 		}
+		jobName := s.createForm.Value("Account ID")
+		jobAction := "create"
+		if wasUpdate {
+			jobAction = "update"
+			if s.selectedAccount != nil {
+				jobName = s.selectedAccount.Email
+			}
+		}
+		core.RecordJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "service account",
+			Name:      jobName,
+			Action:    jobAction,
+			Status:    core.JobSuccess,
+		})
 		s.viewCreate = false
 		s.viewUpdate = false
 		if msg.msg != "" {

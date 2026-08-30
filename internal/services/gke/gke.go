@@ -125,6 +125,13 @@ type Service struct {
 	pendingAction string    // e.g. "connect"
 	actionSource  ViewState // Where to return after confirmation
 
+	// Job history bookkeeping: captured right before firing a mutating
+	// command (once pendingAction/selectedCluster context may already be
+	// cleared) so the generic actionResultMsg handler knows what to record.
+	pendingJobResource string
+	pendingJobName     string
+	pendingJobAction   string
+
 	// Create State
 	createForm components.FormModel
 
@@ -275,7 +282,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		resource, name, action := s.pendingJobResource, s.pendingJobName, s.pendingJobAction
+		s.pendingJobResource, s.pendingJobName, s.pendingJobAction = "", "", ""
 		if msg.err != nil {
+			if resource != "" {
+				core.RecordJob(core.Job{
+					ProjectID: s.projectID,
+					Service:   s.ShortName(),
+					Resource:  resource,
+					Name:      name,
+					Action:    action,
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
+			}
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -285,6 +305,16 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		} else if msg.msg != "" {
+			if resource != "" {
+				core.RecordJob(core.Job{
+					ProjectID: s.projectID,
+					Service:   s.ShortName(),
+					Resource:  resource,
+					Name:      name,
+					Action:    action,
+					Status:    core.JobSuccess,
+				})
+			}
 			return s, tea.Batch(
 				func() tea.Msg {
 					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
@@ -427,12 +457,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var actionCmd tea.Cmd
 				nextView := ViewList
 				if s.pendingAction == "delete-confirm2" && s.selectedCluster != nil {
+					s.pendingJobResource, s.pendingJobName, s.pendingJobAction = "cluster", s.selectedCluster.Name, "delete"
 					actionCmd = s.DeleteClusterCmd(*s.selectedCluster)
 					s.selectedCluster = nil
 				} else if s.pendingAction == "master-upgrade" && s.selectedCluster != nil {
+					s.pendingJobResource, s.pendingJobName, s.pendingJobAction = "cluster", s.selectedCluster.Name, "master-upgrade"
 					actionCmd = s.UpgradeMasterCmd(*s.selectedCluster, s.pendingVersion)
 					nextView = ViewDetail
 				} else if s.pendingAction == "nodepool-upgrade" && s.selectedCluster != nil && len(s.selectedCluster.NodePools) > 0 {
+					s.pendingJobResource, s.pendingJobName, s.pendingJobAction = "node pool", s.selectedCluster.NodePools[0].Name, "nodepool-upgrade"
 					actionCmd = s.UpgradeNodePoolCmd(*s.selectedCluster, s.selectedCluster.NodePools[0], s.pendingVersion)
 					nextView = ViewDetail
 				}
@@ -458,6 +491,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				vals := s.createForm.Values()
 				nodeCount, _ := strconv.ParseInt(vals["Node Count"], 10, 64)
 				s.viewState = ViewList
+				s.pendingJobResource, s.pendingJobName, s.pendingJobAction = "cluster", vals["Name"], "create"
 				return s, s.CreateClusterCmd(vals["Name"], vals["Zone/Location"], nodeCount, vals["Machine Type"])
 			}
 			return s, fcmd
@@ -475,6 +509,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cluster := *s.selectedCluster
 				pool := cluster.NodePools[0]
 				s.viewState = ViewDetail
+				s.pendingJobResource, s.pendingJobName, s.pendingJobAction = "node pool", pool.Name, "resize"
 				return s, s.ResizeNodePoolCmd(cluster, pool, nodeCount)
 			}
 			return s, fcmd

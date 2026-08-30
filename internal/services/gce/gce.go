@@ -323,6 +323,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
+		if msg.resource != "" {
+			job := core.Job{
+				ProjectID: s.projectID,
+				Service:   s.ShortName(),
+				Resource:  msg.resource,
+				Name:      msg.name,
+				Action:    msg.action,
+				Status:    core.JobSuccess,
+			}
+			if msg.err != nil {
+				job.Status = core.JobFailed
+				job.Error = msg.err.Error()
+			}
+			core.RecordJob(job)
+		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -948,9 +963,9 @@ func (s *Service) CreateInstanceCmd(name, zone, machineType, sourceImage, networ
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateInstance(s.projectID, zone, name, machineType, sourceImage, network); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating instance %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating instance %s...", name), resource: "instance", name: name, action: "create"}
 	}
 }
 
@@ -958,12 +973,12 @@ func (s *Service) CreateInstanceCmd(name, zone, machineType, sourceImage, networ
 func (s *Service) UpdateInstanceTagsCmd(inst Instance, tags []string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: inst.Name, action: "update"}
 		}
 		if err := s.client.UpdateInstanceTags(s.projectID, inst.Zone, inst.Name, tags); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: inst.Name, action: "update"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating tags for instance %s...", inst.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Updating tags for instance %s...", inst.Name), resource: "instance", name: inst.Name, action: "update"}
 	}
 }
 
@@ -971,12 +986,12 @@ func (s *Service) UpdateInstanceTagsCmd(inst Instance, tags []string) tea.Cmd {
 func (s *Service) DeleteInstanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: inst.Name, action: "delete"}
 		}
 		if err := s.client.DeleteInstance(s.projectID, inst.Zone, inst.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: inst.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name), resource: "instance", name: inst.Name, action: "delete"}
 	}
 }
 
@@ -984,12 +999,12 @@ func (s *Service) DeleteInstanceCmd(inst Instance) tea.Cmd {
 func (s *Service) DeleteGroupCmd(group InstanceGroup) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: group.Name, action: "delete"}
 		}
 		if err := s.client.DeleteInstanceGroup(s.projectID, group.Location, group.Name, group.Regional); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: group.Name, action: "delete"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting MIG %s...", group.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting MIG %s...", group.Name), resource: "instance group", name: group.Name, action: "delete"}
 	}
 }
 
@@ -997,12 +1012,12 @@ func (s *Service) DeleteGroupCmd(group InstanceGroup) tea.Cmd {
 func (s *Service) ResizeGroupCmd(group InstanceGroup, size int64) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: group.Name, action: "resize"}
 		}
 		if err := s.client.ResizeInstanceGroup(s.projectID, group.Location, group.Name, size, group.Regional); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: group.Name, action: "resize"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Resizing MIG %s to %d instances...", group.Name, size)}
+		return actionResultMsg{msg: fmt.Sprintf("Resizing MIG %s to %d instances...", group.Name, size), resource: "instance group", name: group.Name, action: "resize"}
 	}
 }
 
@@ -1011,12 +1026,12 @@ func (s *Service) ResizeGroupCmd(group InstanceGroup, size int64) tea.Cmd {
 func (s *Service) PerformMaintenanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: inst.Name, action: "maintenance"}
 		}
 		if err := s.client.PerformMaintenanceInstance(s.projectID, inst.Zone, inst.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: inst.Name, action: "maintenance"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Performing maintenance on instance %s...", inst.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Performing maintenance on instance %s...", inst.Name), resource: "instance", name: inst.Name, action: "maintenance"}
 	}
 }
 
@@ -1041,9 +1056,9 @@ func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.AddInstanceIAMBinding(s.projectID, inst.Zone, inst.Name, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: inst.Name, action: "grant"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on instance %s", role, member, inst.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on instance %s", role, member, inst.Name), resource: "instance", name: inst.Name, action: "grant"}
 	}
 }
 
@@ -1051,12 +1066,12 @@ func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
 func (s *Service) CreateGroupCmd(name, zone, baseInstanceName, instanceTemplate string, targetSize int64) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: name, action: "create"}
 		}
 		if err := s.client.CreateInstanceGroup(s.projectID, zone, name, baseInstanceName, instanceTemplate, targetSize); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: name, action: "create"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating MIG %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating MIG %s...", name), resource: "instance group", name: name, action: "create"}
 	}
 }
 
@@ -1065,12 +1080,12 @@ func (s *Service) CreateGroupCmd(name, zone, baseInstanceName, instanceTemplate 
 func (s *Service) StartInstancesInGroupCmd(group InstanceGroup) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: group.Name, action: "start"}
 		}
 		if err := s.client.StartInstancesInGroup(s.projectID, group.Location, group.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: group.Name, action: "start"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Starting all instances in MIG %s...", group.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Starting all instances in MIG %s...", group.Name), resource: "instance group", name: group.Name, action: "start"}
 	}
 }
 
@@ -1078,12 +1093,12 @@ func (s *Service) StartInstancesInGroupCmd(group InstanceGroup) tea.Cmd {
 func (s *Service) StopInstancesInGroupCmd(group InstanceGroup) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: group.Name, action: "stop"}
 		}
 		if err := s.client.StopInstancesInGroup(s.projectID, group.Location, group.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: group.Name, action: "stop"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Stopping all instances in MIG %s...", group.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Stopping all instances in MIG %s...", group.Name), resource: "instance group", name: group.Name, action: "stop"}
 	}
 }
 
@@ -1091,12 +1106,12 @@ func (s *Service) StopInstancesInGroupCmd(group InstanceGroup) tea.Cmd {
 func (s *Service) RollingActionReplaceCmd(group InstanceGroup) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: group.Name, action: "replace"}
 		}
 		if err := s.client.RollingActionReplaceGroup(s.projectID, group.Location, group.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: group.Name, action: "replace"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Rolling replace started for MIG %s...", group.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Rolling replace started for MIG %s...", group.Name), resource: "instance group", name: group.Name, action: "replace"}
 	}
 }
 
@@ -1104,12 +1119,12 @@ func (s *Service) RollingActionReplaceCmd(group InstanceGroup) tea.Cmd {
 func (s *Service) RollingActionRestartCmd(group InstanceGroup) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance group", name: group.Name, action: "restart"}
 		}
 		if err := s.client.RollingActionRestartGroup(s.projectID, group.Location, group.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance group", name: group.Name, action: "restart"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Rolling restart started for MIG %s...", group.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Rolling restart started for MIG %s...", group.Name), resource: "instance group", name: group.Name, action: "restart"}
 	}
 }
 

@@ -253,11 +253,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "pause" || s.pendingAction == "resume" || s.pendingAction == "run" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			name := ""
+			if s.selectedJob != nil {
+				name = s.selectedJob.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				s.selectedJob = nil
 				s.viewState = ViewList
@@ -271,18 +277,42 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate || s.viewState == ViewUpdateTarget {
+				name := ""
+				if s.selectedJob != nil {
+					name = s.selectedJob.Name
+				}
+				action := "update"
+				if s.viewState == ViewUpdateTarget {
+					action = "update-target"
+				}
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
 		}
 		if s.viewState == ViewUpdateTarget {
+			name := ""
+			if s.selectedJob != nil {
+				name = s.selectedJob.Name
+			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: "update-target", Status: core.JobSuccess})
 			s.viewState = ViewDetail
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.Refresh(),
 			)
+		}
+		if s.viewState == ViewUpdate {
+			name := ""
+			if s.selectedJob != nil {
+				name = s.selectedJob.Name
+			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: "update", Status: core.JobSuccess})
+		} else {
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobSuccess})
 		}
 		s.viewState = ViewList
 		if msg.msg != "" {

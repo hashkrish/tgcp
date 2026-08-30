@@ -68,10 +68,15 @@ type iamPolicyMsg struct {
 	bindings []IAMBinding
 }
 
-// actionResultMsg carries the result of an async disk action (e.g. snapshot creation)
+// actionResultMsg carries the result of an async disk action (e.g. snapshot creation).
+// action/name are captured at Cmd-creation time (rather than read back off
+// s.pendingAction, which is already reset by the time this message arrives)
+// so the core.RecordJob call in Update can label the job correctly.
 type actionResultMsg struct {
-	err error
-	msg string
+	err    error
+	msg    string
+	action string
+	name   string
 }
 
 // -----------------------------------------------------------------------------
@@ -284,10 +289,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					ProjectID: s.projectID,
+					Service:   s.ShortName(),
+					Resource:  "disk",
+					Name:      msg.name,
+					Action:    msg.action,
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID,
+				Service:   s.ShortName(),
+				Resource:  "disk",
+				Name:      msg.name,
+				Action:    msg.action,
+				Status:    core.JobSuccess,
+			})
 			if s.selectedDisk != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -297,10 +319,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if msg.err != nil {
+			core.RecordJob(core.Job{
+				ProjectID: s.projectID,
+				Service:   s.ShortName(),
+				Resource:  "disk",
+				Name:      msg.name,
+				Action:    msg.action,
+				Status:    core.JobFailed,
+				Error:     msg.err.Error(),
+			})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
+		core.RecordJob(core.Job{
+			ProjectID: s.projectID,
+			Service:   s.ShortName(),
+			Resource:  "disk",
+			Name:      msg.name,
+			Action:    msg.action,
+			Status:    core.JobSuccess,
+		})
 		if msg.msg != "" {
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -624,13 +663,13 @@ func (s *Service) renderListView() string {
 func (s *Service) CreateSnapshotCmd(disk Disk) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "snapshot", name: disk.Name}
 		}
 		snapshotName, err := s.client.CreateSnapshot(s.projectID, disk.Zone, disk.Name)
 		if err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "snapshot", name: disk.Name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s for disk %s...", snapshotName, disk.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s for disk %s...", snapshotName, disk.Name), action: "snapshot", name: disk.Name}
 	}
 }
 
@@ -638,12 +677,12 @@ func (s *Service) CreateSnapshotCmd(disk Disk) tea.Cmd {
 func (s *Service) StartAsyncReplicationCmd(disk Disk, secondaryDiskURI string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "start-replication", name: disk.Name}
 		}
 		if err := s.client.StartAsyncReplication(s.projectID, disk.Zone, disk.Name, secondaryDiskURI); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "start-replication", name: disk.Name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Starting async replication for disk %s...", disk.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Starting async replication for disk %s...", disk.Name), action: "start-replication", name: disk.Name}
 	}
 }
 
@@ -651,12 +690,12 @@ func (s *Service) StartAsyncReplicationCmd(disk Disk, secondaryDiskURI string) t
 func (s *Service) StopAsyncReplicationCmd(disk Disk) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "stop-replication", name: disk.Name}
 		}
 		if err := s.client.StopAsyncReplication(s.projectID, disk.Zone, disk.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "stop-replication", name: disk.Name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Stopping async replication for disk %s...", disk.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Stopping async replication for disk %s...", disk.Name), action: "stop-replication", name: disk.Name}
 	}
 }
 
@@ -678,12 +717,12 @@ func (s *Service) fetchIAMCmd(disk Disk) tea.Cmd {
 func (s *Service) addIAMBindingCmd(disk Disk, role, member string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "grant", name: disk.Name}
 		}
 		if err := s.client.AddDiskIAMBinding(s.projectID, disk.Zone, disk.Name, role, member); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "grant", name: disk.Name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on disk %s", role, member, disk.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on disk %s", role, member, disk.Name), action: "grant", name: disk.Name}
 	}
 }
 
@@ -691,12 +730,12 @@ func (s *Service) addIAMBindingCmd(disk Disk, role, member string) tea.Cmd {
 func (s *Service) CreateDiskCmd(name, zone string, sizeGB int64, diskType string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "create", name: name}
 		}
 		if err := s.client.CreateDisk(s.projectID, zone, name, sizeGB, diskType); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "create", name: name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Creating disk %s...", name)}
+		return actionResultMsg{msg: fmt.Sprintf("Creating disk %s...", name), action: "create", name: name}
 	}
 }
 
@@ -704,12 +743,12 @@ func (s *Service) CreateDiskCmd(name, zone string, sizeGB int64, diskType string
 func (s *Service) DeleteDiskCmd(disk Disk) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "delete", name: disk.Name}
 		}
 		if err := s.client.DeleteDisk(s.projectID, disk.Zone, disk.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "delete", name: disk.Name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Deleting disk %s...", disk.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting disk %s...", disk.Name), action: "delete", name: disk.Name}
 	}
 }
 
@@ -717,12 +756,12 @@ func (s *Service) DeleteDiskCmd(disk Disk) tea.Cmd {
 func (s *Service) ResizeDiskCmd(disk Disk, newSizeGB int64) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "resize", name: disk.Name}
 		}
 		if err := s.client.ResizeDisk(s.projectID, disk.Zone, disk.Name, newSizeGB); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, action: "resize", name: disk.Name}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Resizing disk %s to %dGB...", disk.Name, newSizeGB)}
+		return actionResultMsg{msg: fmt.Sprintf("Resizing disk %s to %dGB...", disk.Name, newSizeGB), action: "resize", name: disk.Name}
 	}
 }
 

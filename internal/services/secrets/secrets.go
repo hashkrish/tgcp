@@ -341,11 +341,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedSecret != nil {
+				name = s.selectedSecret.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "secret",
+					Name:      name,
+					Action:    "grant",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "secret",
+				Name:      name,
+				Action:    "grant",
+				Status:    core.JobSuccess,
+			})
 			if s.selectedSecret != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -357,11 +378,46 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "version-enable" || s.pendingAction == "version-disable" || s.pendingAction == "version-destroy" || s.pendingAction == "add-version" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			resource, name := "secret", ""
+			jobAction := action
+			switch action {
+			case "delete":
+				if s.selectedSecret != nil {
+					name = s.selectedSecret.Name
+				}
+			case "add-version":
+				if s.selectedSecret != nil {
+					name = s.selectedSecret.Name
+				}
+			default: // version-enable, version-disable, version-destroy
+				resource = "secret version"
+				jobAction = strings.TrimPrefix(action, "version-")
+				if s.selectedVersion != nil {
+					name = s.selectedVersion.Name
+				}
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  resource,
+					Name:      name,
+					Action:    jobAction,
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  resource,
+				Name:      name,
+				Action:    jobAction,
+				Status:    core.JobSuccess,
+			})
 			if action == "delete" {
 				s.selectedSecret = nil
 				s.viewState = ViewList
@@ -386,17 +442,60 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				refreshCmd,
 			)
 		}
+		wasUpdate := s.viewState == ViewUpdate
 		if msg.err != nil {
-			if s.viewState == ViewUpdate {
+			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
+				name := ""
+				if s.selectedSecret != nil {
+					name = s.selectedSecret.Name
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "secret",
+					Name:      name,
+					Action:    "update",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "secret",
+					Name:      s.createForm.Value("Secret ID"),
+					Action:    "create",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			}
 			return s, nil
 		}
-		if s.viewState == ViewUpdate {
+		if wasUpdate {
+			name := ""
+			if s.selectedSecret != nil {
+				name = s.selectedSecret.Name
+			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "secret",
+				Name:      name,
+				Action:    "update",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewDetail
 		} else {
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "secret",
+				Name:      s.createForm.Value("Secret ID"),
+				Action:    "create",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewList
 		}
 		if msg.msg != "" {

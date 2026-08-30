@@ -219,11 +219,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "archive" || s.pendingAction == "cancel" || s.pendingAction == "drain" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			jobName := ""
+			if s.selectedJob != nil {
+				jobName = s.selectedJob.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: action, Status: core.JobSuccess})
 			if action == "archive" {
 				s.selectedJob = nil
 				s.viewState = ViewList
@@ -236,17 +242,26 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.viewState == ViewUpdateOptions {
+			jobName := ""
+			if s.selectedJob != nil {
+				jobName = s.selectedJob.Name
+			}
 			if msg.err != nil {
 				s.updateOptionsForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "update-options", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, nil
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "update-options", Status: core.JobSuccess})
 			s.viewState = ViewDetail
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
+		jobName := s.createForm.Value("Job Name")
 		if msg.err != nil {
 			s.createForm.SubmitErr = msg.err.Error()
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 			return s, nil
 		}
+		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "create", Status: core.JobSuccess})
 		s.viewState = ViewList
 		return s, tea.Batch(
 			func() tea.Msg {

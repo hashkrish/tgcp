@@ -200,14 +200,26 @@ func (s *Service) View() string {
 	// Filter Bar
 	var content strings.Builder
 	listLabel := "Topics"
+	var tabs string
 	if s.viewState == ViewListSubs {
 		listLabel = "Subscriptions"
+		tabs = lipgloss.JoinHorizontal(lipgloss.Top,
+			styles.InactiveTabStyle.Render(" Topics "),
+			styles.ActiveTabStyle.Render(" Subscriptions "),
+		)
+	} else {
+		tabs = lipgloss.JoinHorizontal(lipgloss.Top,
+			styles.ActiveTabStyle.Render(" Topics "),
+			styles.InactiveTabStyle.Render(" Subscriptions "),
+		)
 	}
 	content.WriteString(components.Breadcrumb(
 		fmt.Sprintf("Project %s", s.projectID),
 		s.Name(),
 		listLabel,
 	))
+	content.WriteString("\n")
+	content.WriteString(tabs)
 	content.WriteString("\n")
 	content.WriteString(s.filter.View())
 	content.WriteString("\n")

@@ -330,6 +330,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			dbName := ""
+			if s.selectedDB != nil {
+				dbName = s.selectedDB.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+				Name: dbName, Action: "delete", Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -346,6 +358,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "bulk-delete" {
 			s.pendingAction = ""
+			dbName := ""
+			if s.selectedDB != nil {
+				dbName = s.selectedDB.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+				Name: dbName, Action: "bulk-delete", Status: status, Error: errStr,
+			})
 			return s, func() tea.Msg {
 				if msg.err != nil {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -354,6 +378,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.viewState == ViewExport || s.viewState == ViewImport {
+			action := "export"
+			if s.viewState == ViewImport {
+				action = "import"
+			}
+			dbName := ""
+			if s.selectedDB != nil {
+				dbName = s.selectedDB.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+				Name: dbName, Action: action, Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				if s.viewState == ViewExport {
 					s.exportForm.SubmitErr = msg.err.Error()
@@ -366,6 +406,24 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.viewState == ViewClone || s.viewState == ViewRestore {
+			action := "clone"
+			dbName := ""
+			if s.viewState == ViewClone {
+				if s.selectedDB != nil {
+					dbName = s.selectedDB.Name
+				}
+			} else {
+				action = "restore"
+				dbName = s.restoreForm.Value("New Database ID")
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+				Name: dbName, Action: action, Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				if s.viewState == ViewClone {
 					s.cloneForm.SubmitErr = msg.err.Error()
@@ -379,6 +437,24 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.Refresh(),
 			)
+		}
+		{
+			action := "create"
+			dbName := s.createForm.Value("Database ID")
+			if s.viewState == ViewUpdate {
+				action = "update"
+				if s.selectedDB != nil {
+					dbName = s.selectedDB.Name
+				}
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+				Name: dbName, Action: action, Status: status, Error: errStr,
+			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {

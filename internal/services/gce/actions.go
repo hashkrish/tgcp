@@ -12,19 +12,28 @@ import (
 type actionResultMsg struct {
 	err error
 	msg string
+
+	// resource/name/action describe the mutating call this result came
+	// from, so the actionResultMsg handler in gce.go can record a
+	// core.Job -- captured here rather than read back off s.pendingAction
+	// because that field is already reset to "" by the time the result
+	// comes back (see the ViewConfirmation "y"/"enter" handling).
+	resource string
+	name     string
+	action   string
 }
 
 // StartInstanceCmd triggers the start operation
 func (s *Service) StartInstanceCmd(instance Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: instance.Name, action: "start"}
 		}
 		err := s.client.StartInstance(s.projectID, instance.Zone, instance.Name)
 		if err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: instance.Name, action: "start"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Starting instance %s...", instance.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Starting instance %s...", instance.Name), resource: "instance", name: instance.Name, action: "start"}
 	}
 }
 
@@ -32,13 +41,13 @@ func (s *Service) StartInstanceCmd(instance Instance) tea.Cmd {
 func (s *Service) StopInstanceCmd(instance Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: instance.Name, action: "stop"}
 		}
 		err := s.client.StopInstance(s.projectID, instance.Zone, instance.Name)
 		if err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: instance.Name, action: "stop"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Stopping instance %s...", instance.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Stopping instance %s...", instance.Name), resource: "instance", name: instance.Name, action: "stop"}
 	}
 }
 
@@ -46,12 +55,12 @@ func (s *Service) StopInstanceCmd(instance Instance) tea.Cmd {
 func (s *Service) ResetInstanceCmd(instance Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: instance.Name, action: "reset"}
 		}
 		if err := s.client.ResetInstance(s.projectID, instance.Zone, instance.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: instance.Name, action: "reset"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Resetting instance %s...", instance.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Resetting instance %s...", instance.Name), resource: "instance", name: instance.Name, action: "reset"}
 	}
 }
 
@@ -59,12 +68,12 @@ func (s *Service) ResetInstanceCmd(instance Instance) tea.Cmd {
 func (s *Service) SuspendInstanceCmd(instance Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: instance.Name, action: "suspend"}
 		}
 		if err := s.client.SuspendInstance(s.projectID, instance.Zone, instance.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: instance.Name, action: "suspend"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Suspending instance %s...", instance.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Suspending instance %s...", instance.Name), resource: "instance", name: instance.Name, action: "suspend"}
 	}
 }
 
@@ -72,12 +81,12 @@ func (s *Service) SuspendInstanceCmd(instance Instance) tea.Cmd {
 func (s *Service) ResumeInstanceCmd(instance Instance) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "instance", name: instance.Name, action: "resume"}
 		}
 		if err := s.client.ResumeInstance(s.projectID, instance.Zone, instance.Name); err != nil {
-			return actionResultMsg{err: err}
+			return actionResultMsg{err: err, resource: "instance", name: instance.Name, action: "resume"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Resuming instance %s...", instance.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Resuming instance %s...", instance.Name), resource: "instance", name: instance.Name, action: "resume"}
 	}
 }
 

@@ -221,10 +221,10 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewListTopics {
-		return "r:Refresh  /:Filter  s:Switch to Subs  n:New Topic  Ent:Detail"
+		return "r:Refresh  /:Filter  s/Tab:Switch to Subs  n:New Topic  Ent:Detail"
 	}
 	if s.viewState == ViewListSubs {
-		return "r:Refresh  /:Filter  t:Switch to Topics  n:New Sub  Ent:Detail"
+		return "r:Refresh  /:Filter  t/Shift+Tab:Switch to Topics  n:New Sub  Ent:Detail"
 	}
 	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
@@ -248,6 +248,38 @@ func (s *Service) HelpText() string {
 		return "Esc/q:Back  a:Ack All  m:Modify Ack Deadline"
 	}
 	return "Esc/q:Back"
+}
+
+// SetActiveTab switches to a specific tab by string key, so the command
+// palette can deep-link directly into a sub-tab (e.g. "Subscriptions")
+// instead of always landing on the default Topics tab (see serviceSubTabs in
+// internal/ui/model.go). Returns false for an unrecognized key, treated as
+// a harmless no-op by callers. The returned tea.Cmd mirrors what the "s"/"t"
+// (and "]"/"[") key handlers already do when switching tabs -- clearing the
+// filter, resetting the cursor, and lazily fetching the target list if it
+// hasn't been loaded yet.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	switch tab {
+	case "topics":
+		s.viewState = ViewListTopics
+		s.filter.ExitFilterMode()
+		s.table.SetCursor(0)
+		s.topicFilterSession.Apply(s.topics)
+		if len(s.topics) == 0 {
+			return true, tea.Batch(s.fetchTopicsCmd(true), s.spinner.Start(""))
+		}
+	case "subscriptions":
+		s.viewState = ViewListSubs
+		s.filter.ExitFilterMode()
+		s.table.SetCursor(0)
+		s.subFilterSession.Apply(s.subs)
+		if len(s.subs) == 0 {
+			return true, tea.Batch(s.fetchSubsCmd(true), s.spinner.Start(""))
+		}
+	default:
+		return false, nil
+	}
+	return true, nil
 }
 
 // -----------------------------------------------------------------------------
@@ -377,10 +409,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.pendingAction = ""
 		s.viewState = s.actionSource
 		if msg.err != nil {
+			name := ""
+			if s.selectedTopic != nil {
+				name = s.selectedTopic.Name
+			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "topic", Name: name, Action: "publish", Status: core.JobFailed, Error: msg.err.Error()})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
+		name := ""
+		if s.selectedTopic != nil {
+			name = s.selectedTopic.Name
+		}
+		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "topic", Name: name, Action: "publish", Status: core.JobSuccess})
 		return s, func() tea.Msg {
 			return core.ToastMsg{Message: fmt.Sprintf("Published message %s", msg.messageID), Type: core.ToastSuccess}
 		}
@@ -404,10 +446,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: s.iamResourceType, Name: s.iamResourceName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: s.iamResourceType, Name: s.iamResourceName, Action: "grant", Status: core.JobSuccess})
 			if s.iamResourceName != "" {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -419,42 +463,73 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "ack" {
 			s.pendingAction = ""
 			s.viewState = ViewDetailSub
+			name := ""
+			if s.selectedSub != nil {
+				name = s.selectedSub.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "ack", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "ack", Status: core.JobSuccess})
 			s.pulledMessages = nil
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "modify-ack-deadline" {
 			s.pendingAction = ""
 			s.viewState = ViewPulledMessages
+			name := ""
+			if s.selectedSub != nil {
+				name = s.selectedSub.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "modify-ack-deadline", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "modify-ack-deadline", Status: core.JobSuccess})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "seek" {
 			s.pendingAction = ""
 			s.viewState = ViewDetailSub
+			name := ""
+			if s.selectedSub != nil {
+				name = s.selectedSub.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "seek", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "seek", Status: core.JobSuccess})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "delete" || s.pendingAction == "detach" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			resource := "subscription"
+			name := ""
+			if s.selectedSub != nil {
+				name = s.selectedSub.Name
+			}
+			if s.viewState == ViewDetailTopic {
+				resource = "topic"
+				if s.selectedTopic != nil {
+					name = s.selectedTopic.Name
+				}
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				if s.viewState == ViewDetailTopic {
 					s.viewState = ViewListTopics
@@ -473,15 +548,39 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
+				name := ""
+				if s.selectedSub != nil {
+					name = s.selectedSub.Name
+				}
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "update", Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
+				resource := "subscription"
+				name := s.createForm.Value("Subscription ID")
+				if s.createReturnView == ViewListTopics {
+					resource = "topic"
+					name = s.createForm.Value("Topic ID")
+				}
+				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
 		}
 		if s.viewState == ViewUpdate {
+			name := ""
+			if s.selectedSub != nil {
+				name = s.selectedSub.Name
+			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "update", Status: core.JobSuccess})
 			s.viewState = ViewDetailSub
 		} else {
+			resource := "subscription"
+			name := s.createForm.Value("Subscription ID")
+			if s.createReturnView == ViewListTopics {
+				resource = "topic"
+				name = s.createForm.Value("Topic ID")
+			}
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "create", Status: core.JobSuccess})
 			s.viewState = s.createReturnView
 		}
 		if msg.msg != "" {
@@ -656,7 +755,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				s.viewState = ViewCreate
 				return s, nil
-			case "s": // Switch to Subs
+			case "s", "]": // Switch to Subs (also Tab, via the global "]" forward)
 				if s.viewState == ViewListTopics {
 					s.viewState = ViewListSubs
 					s.filter.ExitFilterMode() // Clear topic filter so it doesn't leak into subs
@@ -666,7 +765,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return s, tea.Batch(s.fetchSubsCmd(true), s.spinner.Start(""))
 					}
 				}
-			case "t": // Switch to Topics
+			case "t", "[": // Switch to Topics (also Shift+Tab, via the global "[" forward)
 				if s.viewState == ViewListSubs {
 					s.viewState = ViewListTopics
 					s.filter.ExitFilterMode() // Clear sub filter so it doesn't leak into topics

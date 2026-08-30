@@ -286,11 +286,32 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
+			name := ""
+			if s.selectedParameter != nil {
+				name = s.selectedParameter.Name
+			}
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "parameter",
+					Name:      name,
+					Action:    "delete",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "parameter",
+				Name:      name,
+				Action:    "delete",
+				Status:    core.JobSuccess,
+			})
 			s.selectedParameter = nil
 			s.viewState = ViewList
 			return s, tea.Batch(
@@ -302,11 +323,29 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "create-version" {
 			s.pendingAction = ""
+			versionID := s.versionCreateForm.Value("Version ID")
 			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "parameter version",
+					Name:      versionID,
+					Action:    "create",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 				s.versionCreateForm.SubmitErr = msg.err.Error()
 				s.viewState = ViewCreateVersion
 				return s, nil
 			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "parameter version",
+				Name:      versionID,
+				Action:    "create",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewVersions
 			if s.selectedParameter == nil {
 				return s, nil
@@ -319,17 +358,60 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.fetchVersionsCmd(s.selectedParameter.FullName),
 			)
 		}
+		wasUpdate := s.viewState == ViewUpdate
 		if msg.err != nil {
-			if s.viewState == ViewUpdate {
+			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
+				name := ""
+				if s.selectedParameter != nil {
+					name = s.selectedParameter.Name
+				}
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "parameter",
+					Name:      name,
+					Action:    "update",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "parameter",
+					Name:      s.createForm.Value("Parameter ID"),
+					Action:    "create",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
 			}
 			return s, nil
 		}
-		if s.viewState == ViewUpdate {
+		if wasUpdate {
+			name := ""
+			if s.selectedParameter != nil {
+				name = s.selectedParameter.Name
+			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "parameter",
+				Name:      name,
+				Action:    "update",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewDetail
 		} else {
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "parameter",
+				Name:      s.createForm.Value("Parameter ID"),
+				Action:    "create",
+				Status:    core.JobSuccess,
+			})
 			s.viewState = ViewList
 		}
 		if msg.msg != "" {

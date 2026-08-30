@@ -55,8 +55,11 @@ type workerPoolsMsg []WorkerPoolItem
 type connectionsMsg []ConnectionItem
 type cbRepositoriesMsg []CBRepositoryItem
 type resourceActionResultMsg struct {
-	err error
-	msg string
+	err      error
+	msg      string
+	resource string
+	name     string
+	action   string
 }
 
 // newTriggerCreateForm builds the FormModel for creating a repo-based build trigger.
@@ -143,9 +146,9 @@ func (s *Service) createTriggerCmd(opts TriggerCreateOpts) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateBuildTrigger(s.projectID, opts); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "trigger", name: opts.Name, action: "create"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Created trigger %s", opts.Name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Created trigger %s", opts.Name), resource: "trigger", name: opts.Name, action: "create"}
 	}
 }
 
@@ -155,9 +158,9 @@ func (s *Service) runTriggerCmd(t TriggerItem) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.RunBuildTrigger(s.projectID, t.ID, t.BranchName); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "run"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Running trigger %s...", t.Name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Running trigger %s...", t.Name), resource: "trigger", name: t.Name, action: "run"}
 	}
 }
 
@@ -167,9 +170,9 @@ func (s *Service) deleteTriggerCmd(t TriggerItem) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteBuildTrigger(s.projectID, t.ID); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "delete"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted trigger %s", t.Name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted trigger %s", t.Name), resource: "trigger", name: t.Name, action: "delete"}
 	}
 }
 
@@ -179,9 +182,9 @@ func (s *Service) createWorkerPoolCmd(poolID, region string) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.CreateWorkerPool(s.projectID, region, poolID); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "worker pool", name: poolID, action: "create"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Creating worker pool %s...", poolID)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Creating worker pool %s...", poolID), resource: "worker pool", name: poolID, action: "create"}
 	}
 }
 
@@ -192,9 +195,9 @@ func (s *Service) deleteWorkerPoolCmd(wp WorkerPoolItem) tea.Cmd {
 		}
 		region, id := parseRegionalName(wp.Name)
 		if err := s.client.DeleteWorkerPool(s.projectID, region, id); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "worker pool", name: id, action: "delete"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleting worker pool %s", id)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleting worker pool %s", id), resource: "worker pool", name: id, action: "delete"}
 	}
 }
 
@@ -205,9 +208,9 @@ func (s *Service) deleteConnectionCmd(conn ConnectionItem) tea.Cmd {
 		}
 		region, id := parseRegionalName(conn.Name)
 		if err := s.client.DeleteConnection(s.projectID, region, id); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "connection", name: id, action: "delete"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted connection %s", id)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted connection %s", id), resource: "connection", name: id, action: "delete"}
 	}
 }
 
@@ -217,9 +220,9 @@ func (s *Service) deleteCBRepositoryCmd(repo CBRepositoryItem) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.DeleteCBRepository(repo.Name); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, resource: "repository", name: repo.Name, action: "delete"}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted repository %s", repo.Name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted repository %s", repo.Name), resource: "repository", name: repo.Name, action: "delete"}
 	}
 }
 

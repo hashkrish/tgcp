@@ -12,6 +12,7 @@ TGCP (Terminal GCP Explorer) provides a comprehensive terminal interface for man
 -   **Smart Caching**: Minimizes API calls for a responsive experience.
 -   **ADC Authentication**: Seamless integration with your existing `gcloud` credentials.
 -   **Version Updates**: Automatic update checking with notifications when new versions are available.
+-   **Job History**: Every mutating action you take (create/update/delete/start/stop/etc., across every service) is recorded and persisted, with a searchable "Job History" view to revisit what changed, when, and its outcome. Configurable retention via `~/.tgcprc`'s `jobs:` block.
 
 ## Visual Design
 

@@ -249,6 +249,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "failover" || s.pendingAction == "reschedule-maintenance" {
 			action := s.pendingAction
 			s.pendingAction = ""
+			instName := ""
+			if s.selectedInstance != nil {
+				instName = s.selectedInstance.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+				Name: instName, Action: action, Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -266,6 +278,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.viewState == ViewExport || s.viewState == ViewImport {
+			action := "export"
+			if s.viewState == ViewImport {
+				action = "import"
+			}
+			instName := ""
+			if s.selectedInstance != nil {
+				instName = s.selectedInstance.Name
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+				Name: instName, Action: action, Status: status, Error: errStr,
+			})
 			if msg.err != nil {
 				if s.viewState == ViewExport {
 					s.exportForm.SubmitErr = msg.err.Error()
@@ -276,6 +304,24 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			s.viewState = ViewDetail
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		{
+			action := "create"
+			instName := s.createForm.Value("Instance ID")
+			if s.viewState == ViewUpdate {
+				action = "update"
+				if s.selectedInstance != nil {
+					instName = s.selectedInstance.Name
+				}
+			}
+			status, errStr := core.JobSuccess, ""
+			if msg.err != nil {
+				status, errStr = core.JobFailed, msg.err.Error()
+			}
+			core.RecordJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+				Name: instName, Action: action, Status: status, Error: errStr,
+			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {

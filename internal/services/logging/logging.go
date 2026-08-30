@@ -124,8 +124,10 @@ type metricsMsg []LogMetric
 type bucketsMsg []LogBucket
 type viewsMsg []LogView
 type resourceActionResultMsg struct {
-	err error
-	msg string
+	err    error
+	msg    string
+	action string // e.g. "create", "delete", "grant" -- for job-history recording
+	name   string // resource name/ID -- for job-history recording
 }
 
 func NewService(cache *core.Cache) *Service {
@@ -350,8 +352,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resourceActionResultMsg:
 		s.spinner.Stop()
 		if msg.err != nil {
+			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: msg.name, Action: msg.action, Status: core.JobFailed, Error: msg.err.Error()})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
 		}
+		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: msg.name, Action: msg.action, Status: core.JobSuccess})
 		return s, tea.Batch(
 			func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 			s.fetchResourceTabCmd(s.resourceTab),
@@ -623,9 +627,9 @@ func (s *Service) createResourceCmd() tea.Cmd {
 			err = s.client.CreateLogView(s.viewLocation, s.viewBucketID, name, v["Filter"])
 		}
 		if err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, action: "create", name: name}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Creating %s...", name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Creating %s...", name), action: "create", name: name}
 	}
 }
 
@@ -652,9 +656,9 @@ func (s *Service) deleteResourceCmd() tea.Cmd {
 			err = s.client.DeleteLogView(name)
 		}
 		if err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, action: "delete", name: name}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Deleting %s...", name)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Deleting %s...", name), action: "delete", name: name}
 	}
 }
 
@@ -671,9 +675,9 @@ func (s *Service) grantViewIAMCmd(role, member string) tea.Cmd {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.AddLogViewIAMBinding(fullName, role, member); err != nil {
-			return resourceActionResultMsg{err: err}
+			return resourceActionResultMsg{err: err, action: "grant", name: fullName}
 		}
-		return resourceActionResultMsg{msg: fmt.Sprintf("Granted %s to %s", role, member)}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Granted %s to %s", role, member), action: "grant", name: fullName}
 	}
 }
 
