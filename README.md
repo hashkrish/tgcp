@@ -98,6 +98,8 @@ tgcp
 
 TGCP supports a configuration file at `~/.tgcprc` (YAML format).
 
+The left-side sidebar is hidden by default (toggle it anytime with `Tab`); set `ui.sidebar_visible: true` to have it shown on startup instead.
+
 **Example `~/.tgcprc`:**
 ```yaml
 project: "my-default-project"

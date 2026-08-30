@@ -3,6 +3,8 @@ package cloudrun
 import (
 	"context"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/yogirk/tgcp/internal/demo"
 	"google.golang.org/api/cloudfunctions/v2"
@@ -86,15 +88,87 @@ func (c *Client) ListServices(projectID string) ([]RunService, error) {
 			}
 		}
 
+		var revisions []Revision
+		latestReady, latestCreated := "", ""
+		if item.Status != nil {
+			latestReady = item.Status.LatestReadyRevisionName
+			latestCreated = item.Status.LatestCreatedRevisionName
+			for _, t := range item.Status.Traffic {
+				revisions = append(revisions, Revision{
+					Name:    t.RevisionName,
+					Percent: t.Percent,
+					Latest:  t.LatestRevision,
+					Tag:     t.Tag,
+				})
+			}
+		}
+
 		services = append(services, RunService{
-			Name:   name,
-			Region: region,
-			URL:    url,
-			Status: status,
-			Image:  image,
+			Name:                  name,
+			Region:                region,
+			URL:                   url,
+			Status:                status,
+			Image:                 image,
+			LatestReadyRevision:   latestReady,
+			LatestCreatedRevision: latestCreated,
+			Revisions:             revisions,
 		})
 	}
 	return services, nil
+}
+
+// ListRevisions returns the full revision history for a Cloud Run service
+// (unlike the Revisions embedded in RunService from ListServices, which only
+// covers revisions currently receiving traffic or holding a URL tag).
+// trafficInfo carries the Percent/Latest/Tag data already parsed from the
+// service's Status.Traffic; it's merged onto the matching revisions by name.
+func (c *Client) ListRevisions(projectID, region, serviceName string, trafficInfo []Revision) ([]Revision, error) {
+	if demo.Enabled {
+		return loadDemoRevisions(serviceName), nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("cloud run client not initialized")
+	}
+
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, region)
+	labelSelector := fmt.Sprintf("serving.knative.dev/service=%s", serviceName)
+
+	resp, err := c.service.Projects.Locations.Revisions.List(parent).LabelSelector(labelSelector).Do()
+	if err != nil {
+		return nil, err
+	}
+
+	trafficByName := make(map[string]Revision, len(trafficInfo))
+	for _, t := range trafficInfo {
+		trafficByName[t.Name] = t
+	}
+
+	revisions := make([]Revision, 0, len(resp.Items))
+	for _, item := range resp.Items {
+		rev := Revision{Name: item.Metadata.Name}
+		if item.Spec != nil {
+			if containers := item.Spec.Containers; len(containers) > 0 {
+				rev.Image = containers[0].Image
+			}
+		}
+		if item.Metadata.CreationTimestamp != "" {
+			if created, err := time.Parse(time.RFC3339, item.Metadata.CreationTimestamp); err == nil {
+				rev.Created = created
+			}
+		}
+		if t, ok := trafficByName[rev.Name]; ok {
+			rev.Percent = t.Percent
+			rev.Latest = t.Latest
+			rev.Tag = t.Tag
+		}
+		revisions = append(revisions, rev)
+	}
+
+	sort.Slice(revisions, func(i, j int) bool {
+		return revisions[i].Created.After(revisions[j].Created)
+	})
+
+	return revisions, nil
 }
 
 // CreateService creates a new Cloud Run service running a single container
@@ -143,9 +217,9 @@ func (c *Client) CreateService(projectID, region, name, image string, port int64
 // UpdateServiceImage patches a single field on an existing Cloud Run
 // service: the container image of the first container in the revision
 // template. This is the minimal viable "update" flow for Cloud Run —
-// update-traffic (traffic split management) and full service replace
-// (env vars, resources, concurrency, VPC access, ingress, etc.) are
-// explicitly out of scope and skipped.
+// full service replace (env vars, resources, concurrency, VPC access,
+// ingress, etc.) is explicitly out of scope and skipped. See
+// PromoteRevision/TagRevision below for traffic-split management.
 //
 // The run/v1 API has no field-level PATCH for services, so this reads the
 // current service, mutates only the image, and calls ReplaceService with
@@ -169,6 +243,78 @@ func (c *Client) UpdateServiceImage(projectID, region, name, image string) error
 		return fmt.Errorf("service %s has no container spec to update", name)
 	}
 	svc.Spec.Template.Spec.Containers[0].Image = image
+
+	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
+	return err
+}
+
+// PromoteRevision sends 100% of traffic to a single named revision, matching
+// `gcloud run services update-traffic --to-revisions=REVISION=100`. This
+// replaces the entire traffic split (no partial/N-way splits) -- the
+// simplest, most common traffic-split action: rolling back to (or
+// re-promoting) a specific revision.
+func (c *Client) PromoteRevision(projectID, region, serviceName, revisionName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
+
+	svc, err := c.service.Projects.Locations.Services.Get(fqName).Do()
+	if err != nil {
+		return err
+	}
+	if svc.Spec == nil {
+		return fmt.Errorf("service %s has no spec to update", serviceName)
+	}
+	svc.Spec.Traffic = []*run.TrafficTarget{
+		{RevisionName: revisionName, Percent: 100},
+	}
+
+	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
+	return err
+}
+
+// TagRevision assigns a URL tag to a revision, matching
+// `gcloud run services update-traffic --update-tags=TAG=REVISION`. This
+// only adds/updates the tag on the named revision's traffic target --
+// every other target's traffic split is preserved untouched.
+func (c *Client) TagRevision(projectID, region, serviceName, revisionName, tag string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, serviceName)
+
+	svc, err := c.service.Projects.Locations.Services.Get(fqName).Do()
+	if err != nil {
+		return err
+	}
+	if svc.Spec == nil {
+		return fmt.Errorf("service %s has no spec to update", serviceName)
+	}
+
+	found := false
+	for _, t := range svc.Spec.Traffic {
+		if t.RevisionName == revisionName {
+			t.Tag = tag
+			found = true
+			break
+		}
+	}
+	if !found {
+		svc.Spec.Traffic = append(svc.Spec.Traffic, &run.TrafficTarget{
+			RevisionName: revisionName,
+			Percent:      0,
+			Tag:          tag,
+		})
+	}
 
 	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
 	return err

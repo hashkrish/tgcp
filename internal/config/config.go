@@ -29,7 +29,7 @@ type FeaturesConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		UI: UIConfig{
-			SidebarVisible:  true,
+			SidebarVisible:  false,
 			RefreshInterval: 30,
 			DefaultView:     "home",
 		},

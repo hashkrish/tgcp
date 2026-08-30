@@ -92,6 +92,27 @@ func getActionStyle(action string) actionStyle {
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorInfo).Bold(true),
 			impactText:  "",
 		}
+	case "promote":
+		// Replaces the entire traffic split -- not destructive to the
+		// revision itself, but worth a distinct warning since it's an
+		// all-or-nothing traffic cutover.
+		return actionStyle{
+			icon:        "🚀",
+			title:       "Confirm Promote",
+			borderColor: styles.ColorWarning,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
+			impactText:  "This replaces the current traffic split entirely.",
+		}
+	case "tag":
+		// Adds/updates a URL tag without touching the traffic split --
+		// low-risk, neutral styling.
+		return actionStyle{
+			icon:        "🏷",
+			title:       "Confirm Tag",
+			borderColor: styles.ColorBrandAccent,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true),
+			impactText:  "",
+		}
 	case "grant":
 		// IAM policy writes - cautionary but not destructive; distinct
 		// styling so it's never confused with delete/disable.
@@ -223,6 +244,10 @@ func (m ConfirmationModel) buildActionText() string {
 		verb = "RESET"
 	case "suspend":
 		verb = "SUSPEND"
+	case "promote":
+		verb = "PROMOTE"
+	case "tag":
+		verb = "TAG"
 	default:
 		verb = actionUpper
 	}

@@ -4,27 +4,44 @@
     "region": "us-central1",
     "url": "https://api-gateway-a1b2c3-uc.a.run.app",
     "status": "Ready",
-    "lastModifiedDaysAgo": 2
+    "lastModifiedDaysAgo": 2,
+    "revisions": [
+      { "name": "api-gateway-00042-xyz", "percent": 90, "latest": true, "image": "gcr.io/demo-project/api-gateway:v42", "createdDaysAgo": 2 },
+      { "name": "api-gateway-00041-abc", "percent": 10, "latest": false, "tag": "canary", "image": "gcr.io/demo-project/api-gateway:v41", "createdDaysAgo": 5 },
+      { "name": "api-gateway-00040-uvw", "percent": 0, "latest": false, "image": "gcr.io/demo-project/api-gateway:v40", "createdDaysAgo": 9 },
+      { "name": "api-gateway-00039-rst", "percent": 0, "latest": false, "image": "gcr.io/demo-project/api-gateway:v39", "createdDaysAgo": 15 }
+    ]
   },
   {
     "name": "image-resizer",
     "region": "us-central1",
     "url": "https://image-resizer-a1b2c3-uc.a.run.app",
     "status": "Ready",
-    "lastModifiedDaysAgo": 7
+    "lastModifiedDaysAgo": 7,
+    "revisions": [
+      { "name": "image-resizer-00010-lmn", "percent": 100, "latest": true, "image": "gcr.io/demo-project/image-resizer:v10", "createdDaysAgo": 7 },
+      { "name": "image-resizer-00009-jkl", "percent": 0, "latest": false, "image": "gcr.io/demo-project/image-resizer:v9", "createdDaysAgo": 20 }
+    ]
   },
   {
     "name": "webhook-sink",
     "region": "us-east1",
     "url": "https://webhook-sink-a1b2c3-ue.a.run.app",
     "status": "Ready",
-    "lastModifiedDaysAgo": 1
+    "lastModifiedDaysAgo": 1,
+    "revisions": [
+      { "name": "webhook-sink-00003-pqr", "percent": 100, "latest": true, "image": "gcr.io/demo-project/webhook-sink:v3", "createdDaysAgo": 1 },
+      { "name": "webhook-sink-00002-mno", "percent": 0, "latest": false, "image": "gcr.io/demo-project/webhook-sink:v2", "createdDaysAgo": 30 }
+    ]
   },
   {
     "name": "pdf-render",
     "region": "europe-west1",
     "url": "https://pdf-render-a1b2c3-ew.a.run.app",
     "status": "Ready",
-    "lastModifiedDaysAgo": 14
+    "lastModifiedDaysAgo": 14,
+    "revisions": [
+      { "name": "pdf-render-00007-def", "percent": 100, "latest": true, "image": "gcr.io/demo-project/pdf-render:v7", "createdDaysAgo": 14 }
+    ]
   }
 ]

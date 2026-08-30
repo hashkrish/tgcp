@@ -3,6 +3,7 @@ package cloudrun
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -39,6 +40,9 @@ const (
 	ViewConfirmation
 	ViewCreate
 	ViewUpdate
+	ViewRevisions
+	ViewRevisionDetail
+	ViewTagRevision
 )
 
 // newServiceCreateForm builds the FormModel for creating a new Cloud Run service.
@@ -68,17 +72,52 @@ func newServiceUpdateForm(svc RunService) components.FormModel {
 	})
 }
 
+// revisionTagPattern matches a valid Knative/Cloud Run traffic tag: lowercase
+// alphanumeric, hyphens allowed in the middle, must start with a letter.
+var revisionTagPattern = regexp.MustCompile(`^[a-z]([-a-z0-9]*[a-z0-9])?$`)
+
+func validateRevisionTag(v string) string {
+	if !revisionTagPattern.MatchString(v) {
+		return "must be lowercase alphanumeric/hyphens, starting with a letter"
+	}
+	return ""
+}
+
+// newRevisionTagForm builds the FormModel for assigning a URL tag to a
+// revision, matching `gcloud run services update-traffic --update-tags`.
+func newRevisionTagForm(rev Revision) components.FormModel {
+	return components.NewForm("Tag Revision: "+rev.Name, []components.FormField{
+		{Label: "Tag", Default: rev.Tag, Placeholder: "canary", Required: true, Validate: validateRevisionTag},
+	})
+}
+
 // servicesMsg is the message used to pass fetched data
 type servicesMsg []RunService
 
 // functionsMsg is the message used to pass fetched functions
 type functionsMsg []Function
 
+// revisionsMsg carries the full revision history for one service, fetched
+// on-demand when entering that service's detail view. service guards
+// against applying a stale response after the user has navigated away.
+type revisionsMsg struct {
+	service   string
+	revisions []Revision
+}
+
 // errMsg is the standard error message
 type errMsg error
 
 // actionResultMsg carries the result of an async mutating action (e.g. service creation)
 type actionResultMsg struct {
+	err error
+	msg string
+}
+
+// revisionActionResultMsg carries the result of a revision-scoped mutating
+// action (promote/tag). Unlike actionResultMsg, success re-fetches just the
+// selected service's revisions rather than the whole service list.
+type revisionActionResultMsg struct {
 	err error
 	msg string
 }
@@ -93,6 +132,7 @@ type Service struct {
 	projectID string
 	table     *components.StandardTable // Services Table
 	funcTable *components.StandardTable // Functions Table
+	revTable  *components.StandardTable // Revisions Table (per selected service)
 
 	// Tab Component
 	activeTab Tab
@@ -108,19 +148,24 @@ type Service struct {
 	functions []Function
 	err       error
 
-	viewState       ViewState
-	selectedService *RunService
-	selectedFunc    *Function
+	viewState        ViewState
+	selectedService  *RunService
+	selectedFunc     *Function
+	selectedRevision *Revision
 
 	// Confirmation State
-	pendingAction string    // "delete"
-	actionSource  ViewState // Where to return after confirmation
+	pendingAction   string    // "delete", "promote", "tag"
+	pendingTagValue string    // tag value staged by the tag form, for the "tag" pendingAction
+	actionSource    ViewState // Where to return after confirmation/cancel
 
 	// Create State
 	createForm components.FormModel
 
 	// Update State
 	updateForm components.FormModel
+
+	// Tag Revision State
+	tagForm components.FormModel
 
 	// Cache
 	cache *core.Cache
@@ -147,9 +192,19 @@ func NewService(cache *core.Cache) *Service {
 	}
 	ft := components.NewStandardTable(funcColumns)
 
+	// 1c. Revisions Table Setup
+	revColumns := []table.Column{
+		{Title: "Revision", Width: 30},
+		{Title: "Traffic", Width: 16},
+		{Title: "Tag", Width: 12},
+		{Title: "Created", Width: 12},
+	}
+	rt := components.NewStandardTable(revColumns)
+
 	svc := &Service{
 		table:     t,
 		funcTable: ft,
+		revTable:  rt,
 		activeTab: TabServices,
 		filter:    components.NewFilterWithPlaceholder("Filter services..."),
 		spinner:   components.NewSpinner(),
@@ -181,14 +236,20 @@ func (s *Service) HelpText() string {
 	}
 	if s.viewState == ViewDetail {
 		if s.activeTab == TabServices {
-			return "Esc/q:Back  u:Update  d:Delete"
+			return "Esc/q:Back  v:Revisions  u:Update  d:Delete"
 		}
 		return "Esc/q:Back"
+	}
+	if s.viewState == ViewRevisions {
+		return "Esc/q:Back  Ent:Detail  p:Promote  t:Tag"
+	}
+	if s.viewState == ViewRevisionDetail {
+		return "Esc/q:Back  p:Promote  t:Tag"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewTagRevision {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
 	return ""
@@ -245,9 +306,13 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedService = nil
+	s.selectedRevision = nil
+	s.pendingAction = ""
+	s.pendingTagValue = ""
 	s.err = nil          // CRITICAL: Always clear errors on reset
 	s.table.SetCursor(0) // Reset table position
 	s.funcTable.SetCursor(0)
+	s.revTable.SetCursor(0)
 	s.activeTab = TabServices // Default to Services tab
 	s.filter.ExitFilterMode()
 }
@@ -261,12 +326,14 @@ func (s *Service) IsRootView() bool {
 func (s *Service) Focus() {
 	s.table.Focus()
 	s.funcTable.Focus()
+	s.revTable.Focus()
 }
 
 // Blur handles loss of input focus (Visual Dimming)
 func (s *Service) Blur() {
 	s.table.Blur()
 	s.funcTable.Blur()
+	s.revTable.Blur()
 }
 
 // -----------------------------------------------------------------------------
@@ -308,6 +375,21 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
+	case revisionsMsg:
+		if s.selectedService != nil && s.selectedService.Name == msg.service {
+			s.selectedService.Revisions = msg.revisions
+			for i := range s.services {
+				if s.services[i].Name == msg.service {
+					s.services[i].Revisions = msg.revisions
+					break
+				}
+			}
+			if s.viewState == ViewRevisions {
+				s.updateRevTable(msg.revisions)
+			}
+		}
+		return s, nil
+
 	case functionsMsg:
 		s.spinner.Stop()
 		s.functions = msg
@@ -344,10 +426,28 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return s, s.Refresh()
 
+	case revisionActionResultMsg:
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		var cmds []tea.Cmd
+		if msg.msg != "" {
+			cmds = append(cmds, func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			})
+		}
+		if s.selectedService != nil {
+			cmds = append(cmds, s.fetchRevisionsCmd(*s.selectedService))
+		}
+		return s, tea.Batch(cmds...)
+
 	// 4. Window Resize
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 		s.funcTable.HandleWindowSizeDefault(msg)
+		s.revTable.HandleWindowSizeDefault(msg)
 
 	// 4.5 Mouse Input
 	case tea.MouseMsg:
@@ -362,6 +462,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				updatedTable, cmd = s.funcTable.Update(msg)
 				s.funcTable = updatedTable
 			}
+			return s, cmd
+		}
+		if s.viewState == ViewRevisions {
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.revTable.Update(msg)
+			s.revTable = updatedTable
 			return s, cmd
 		}
 
@@ -416,6 +522,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if idx := s.table.Cursor(); idx >= 0 && idx < len(svcs) {
 							s.selectedService = &svcs[idx]
 							s.viewState = ViewDetail
+							return s, s.fetchRevisionsCmd(*s.selectedService)
 						}
 					}
 				} else {
@@ -488,6 +595,13 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.selectedService = nil
 				s.selectedFunc = nil
 				return s, nil
+			case "v":
+				if s.activeTab == TabServices && s.selectedService != nil {
+					s.updateRevTable(s.selectedService.Revisions)
+					s.revTable.SetCursor(0)
+					s.viewState = ViewRevisions
+				}
+				return s, nil
 			case "u":
 				if s.activeTab == TabServices && s.selectedService != nil {
 					s.updateForm = newServiceUpdateForm(*s.selectedService)
@@ -503,20 +617,115 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			}
 
+		case ViewRevisions:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				s.selectedRevision = nil
+				return s, nil
+			case "enter":
+				if s.selectedService != nil {
+					revs := s.selectedService.Revisions
+					if idx := s.revTable.Cursor(); idx >= 0 && idx < len(revs) {
+						s.selectedRevision = &revs[idx]
+						s.viewState = ViewRevisionDetail
+					}
+				}
+				return s, nil
+			case "p": // Promote selected revision to 100% traffic
+				if s.selectedService != nil {
+					revs := s.selectedService.Revisions
+					if idx := s.revTable.Cursor(); idx >= 0 && idx < len(revs) {
+						s.selectedRevision = &revs[idx]
+						s.pendingAction = "promote"
+						s.actionSource = ViewRevisions
+						s.viewState = ViewConfirmation
+					}
+				}
+				return s, nil
+			case "t": // Tag selected revision
+				if s.selectedService != nil {
+					revs := s.selectedService.Revisions
+					if idx := s.revTable.Cursor(); idx >= 0 && idx < len(revs) {
+						s.selectedRevision = &revs[idx]
+						s.tagForm = newRevisionTagForm(*s.selectedRevision)
+						s.actionSource = ViewRevisions
+						s.viewState = ViewTagRevision
+					}
+				}
+				return s, nil
+			}
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.revTable.Update(msg)
+			s.revTable = updatedTable
+			return s, cmd
+
+		case ViewRevisionDetail:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewRevisions
+				s.selectedRevision = nil
+				return s, nil
+			case "p":
+				if s.selectedService != nil && s.selectedRevision != nil {
+					s.pendingAction = "promote"
+					s.actionSource = ViewRevisionDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "t":
+				if s.selectedService != nil && s.selectedRevision != nil {
+					s.tagForm = newRevisionTagForm(*s.selectedRevision)
+					s.actionSource = ViewRevisionDetail
+					s.viewState = ViewTagRevision
+				}
+				return s, nil
+			}
+
+		case ViewTagRevision:
+			result, fcmd := s.tagForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = s.actionSource
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.tagForm.Values()
+				s.pendingTagValue = vals["Tag"]
+				s.pendingAction = "tag"
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+
 		case ViewConfirmation:
 			switch msg.String() {
 			case "y", "enter":
 				var actionCmd tea.Cmd
-				if s.pendingAction == "delete" && s.selectedService != nil {
-					actionCmd = s.DeleteServiceCmd(*s.selectedService)
+				switch s.pendingAction {
+				case "delete":
+					if s.selectedService != nil {
+						actionCmd = s.DeleteServiceCmd(*s.selectedService)
+					}
+					s.viewState = ViewList
+					s.selectedService = nil
+				case "promote":
+					if s.selectedService != nil && s.selectedRevision != nil {
+						actionCmd = s.PromoteRevisionCmd(*s.selectedService, *s.selectedRevision)
+					}
+					s.viewState = ViewRevisions
+				case "tag":
+					if s.selectedService != nil && s.selectedRevision != nil {
+						actionCmd = s.TagRevisionCmd(*s.selectedService, *s.selectedRevision, s.pendingTagValue)
+					}
+					s.viewState = ViewRevisions
 				}
-				s.viewState = ViewList
-				s.selectedService = nil
 				s.pendingAction = ""
+				s.pendingTagValue = ""
 				return s, actionCmd
 			case "n", "esc", "q":
 				s.viewState = s.actionSource
 				s.pendingAction = ""
+				s.pendingTagValue = ""
 				return s, nil
 			}
 
@@ -571,6 +780,14 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
+	if s.viewState == ViewRevisions {
+		return s.renderRevisionsView()
+	}
+
+	if s.viewState == ViewRevisionDetail {
+		return s.renderRevisionDetailView()
+	}
+
 	if s.viewState == ViewConfirmation {
 		return s.renderConfirmation()
 	}
@@ -581,6 +798,10 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewUpdate {
 		return s.updateForm.View()
+	}
+
+	if s.viewState == ViewTagRevision {
+		return s.tagForm.View()
 	}
 
 	// Default: List View
@@ -662,6 +883,11 @@ func (s *Service) renderDetailView() string {
 		svc.Name,
 	)
 
+	footerHint := "Press 'q' or 'esc' to return"
+	if len(svc.Revisions) > 0 {
+		footerHint = fmt.Sprintf("Press 'v' to view %d revision(s)  |  q Back", len(svc.Revisions))
+	}
+
 	card := components.DetailCard(components.DetailCardOpts{
 		Title: "Service Details",
 		Rows: []components.KeyValue{
@@ -669,24 +895,105 @@ func (s *Service) renderDetailView() string {
 			{Key: "Region", Value: svc.Region},
 			{Key: "Status", Value: components.RenderStatus(string(svc.Status))},
 			{Key: "URL", Value: svc.URL},
+			{Key: "Revision", Value: svc.LatestReadyRevision},
+		},
+		FooterHint: footerHint,
+	})
+
+	return lipgloss.JoinVertical(lipgloss.Left, title, "", card)
+}
+
+// renderRevisionsView renders the scrollable list of a service's revisions.
+func (s *Service) renderRevisionsView() string {
+	if s.selectedService == nil {
+		return "No service selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Services",
+		s.selectedService.Name,
+		"Revisions",
+	)
+
+	if len(s.selectedService.Revisions) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("revisions"))
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.revTable.View())
+}
+
+// renderRevisionDetailView renders full details for a single revision.
+func (s *Service) renderRevisionDetailView() string {
+	if s.selectedService == nil || s.selectedRevision == nil {
+		return "No revision selected"
+	}
+	rev := s.selectedRevision
+
+	title := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Services",
+		s.selectedService.Name,
+		"Revisions",
+		rev.Name,
+	)
+
+	created := ""
+	if !rev.Created.IsZero() {
+		created = rev.Created.Format("2006-01-02 15:04")
+	}
+	tag := rev.Tag
+	if tag == "" {
+		tag = "(none)"
+	}
+
+	card := components.DetailCard(components.DetailCardOpts{
+		Title: "Revision Details",
+		Rows: []components.KeyValue{
+			{Key: "Name", Value: rev.Name},
+			{Key: "Image", Value: rev.Image},
+			{Key: "Traffic", Value: fmt.Sprintf("%d%%", rev.Percent)},
+			{Key: "Latest", Value: fmt.Sprintf("%t", rev.Latest)},
+			{Key: "Tag", Value: tag},
+			{Key: "Created", Value: created},
 		},
 		FooterHint: "Press 'q' or 'esc' to return",
 	})
 
-	return lipgloss.JoinVertical(
-		lipgloss.Left,
-		title,
-		"",
-		card,
-	)
+	return lipgloss.JoinVertical(lipgloss.Left, title, "", card)
 }
 
-// renderConfirmation renders the delete confirmation dialog for services.
+// renderConfirmation renders the confirmation dialog for the pending action:
+// service deletion, or a revision promote/tag.
 func (s *Service) renderConfirmation() string {
-	if s.selectedService == nil {
-		return "Error: No service selected"
+	switch s.pendingAction {
+	case "promote":
+		if s.selectedService == nil || s.selectedRevision == nil {
+			return "Error: No revision selected"
+		}
+		message := fmt.Sprintf(
+			"Send 100%% of traffic on %s to revision %s?",
+			styles.TitleStyle.Render(s.selectedService.Name),
+			styles.TitleStyle.Render(s.selectedRevision.Name),
+		)
+		return components.RenderConfirmationWithMessage("promote", s.selectedRevision.Name, "revision", message)
+	case "tag":
+		if s.selectedService == nil || s.selectedRevision == nil {
+			return "Error: No revision selected"
+		}
+		message := fmt.Sprintf(
+			"Tag revision %s as %q?\n\nThe existing traffic split is preserved.",
+			styles.TitleStyle.Render(s.selectedRevision.Name),
+			s.pendingTagValue,
+		)
+		return components.RenderConfirmationWithMessage("tag", s.selectedRevision.Name, "revision", message)
+	default:
+		if s.selectedService == nil {
+			return "Error: No service selected"
+		}
+		return components.RenderConfirmation(s.pendingAction, s.selectedService.Name, "service")
 	}
-	return components.RenderConfirmation(s.pendingAction, s.selectedService.Name, "service")
 }
 
 func (s *Service) renderFuncDetailView() string {
@@ -766,6 +1073,49 @@ func (s *Service) DeleteServiceCmd(svc RunService) tea.Cmd {
 	}
 }
 
+// PromoteRevisionCmd sends 100% of traffic on svc to rev, replacing the
+// entire traffic split.
+func (s *Service) PromoteRevisionCmd(svc RunService, rev Revision) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.PromoteRevision(s.projectID, svc.Region, svc.Name, rev.Name); err != nil {
+			return revisionActionResultMsg{err: err}
+		}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Promoted revision %s to 100%% traffic", rev.Name)}
+	}
+}
+
+// TagRevisionCmd assigns tag to rev on svc, preserving every other traffic target.
+func (s *Service) TagRevisionCmd(svc RunService, rev Revision, tag string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return revisionActionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.TagRevision(s.projectID, svc.Region, svc.Name, rev.Name, tag); err != nil {
+			return revisionActionResultMsg{err: err}
+		}
+		return revisionActionResultMsg{msg: fmt.Sprintf("Tagged revision %s as %q", rev.Name, tag)}
+	}
+}
+
+// fetchRevisionsCmd fetches the full revision history for svc, merging in
+// the traffic-split info (Percent/Latest/Tag) already parsed from
+// ListServices onto the matching revisions by name.
+func (s *Service) fetchRevisionsCmd(svc RunService) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return core.ToastMsg{Message: "client not initialized", Type: core.ToastError}
+		}
+		revs, err := s.client.ListRevisions(s.projectID, svc.Region, svc.Name, svc.Revisions)
+		if err != nil {
+			return core.ToastMsg{Message: fmt.Sprintf("failed to load revisions: %v", err), Type: core.ToastError}
+		}
+		return revisionsMsg{service: svc.Name, revisions: revs}
+	}
+}
+
 func (s *Service) fetchDataCmd(force bool) tea.Cmd {
 	return func() tea.Msg {
 		key := "cloudrun_services"
@@ -812,6 +1162,27 @@ func (s *Service) updateTable(items []RunService) {
 		}
 	}
 	s.table.SetRows(rows)
+}
+
+func (s *Service) updateRevTable(revisions []Revision) {
+	rows := make([]table.Row, len(revisions))
+	for i, rev := range revisions {
+		traffic := fmt.Sprintf("%d%%", rev.Percent)
+		if rev.Latest {
+			traffic += " (latest)"
+		}
+		created := ""
+		if !rev.Created.IsZero() {
+			created = rev.Created.Format("2006-01-02")
+		}
+		rows[i] = table.Row{
+			rev.Name,
+			traffic,
+			rev.Tag,
+			created,
+		}
+	}
+	s.revTable.SetRows(rows)
 }
 
 func (s *Service) fetchFunctionsCmd(force bool) tea.Cmd {
