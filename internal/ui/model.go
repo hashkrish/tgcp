@@ -439,7 +439,15 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// synthetic KeyMsg (rather than teaching every tabbed
 				// service a new "tab"/"shift+tab" case) keeps this a
 				// one-place change.
-				if m.ViewMode == ViewService && m.CurrentSvc != nil {
+				//
+				// Only do this remapping at the service's root (list) view.
+				// Away from root -- e.g. a create/update form -- Tab already
+				// means "next field" (components.FormModel.Update handles
+				// "tab"/"shift+tab" itself), and remapping it to "]"/"["
+				// there fed the form a synthetic KeyRunes event that its
+				// text input just inserted as a literal character instead
+				// of moving focus.
+				if m.ViewMode == ViewService && m.CurrentSvc != nil && m.CurrentSvc.IsRootView() {
 					key := "]"
 					if msg.String() == "shift+tab" {
 						key = "["
@@ -451,7 +459,10 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, svcCmd
 				}
-				return m, nil
+				// Not at root view (or no active service/service view): let
+				// the real Tab/Shift+Tab key fall through to the normal
+				// service-forwarding path below instead of being consumed
+				// here.
 			}
 		} else {
 			// Palette specific keys (Esc to close)
