@@ -69,12 +69,12 @@
 - [x] Dataproc: `jobs` submit/list/kill not covered — minimal Spark-job submit, list, and kill (cancel) added (`J` opens Jobs, `n` submit, `k` kill); other job types (Hadoop/Hive/Pig/PySpark) declined as out of scope for this minimal submit flow.
 
 ### Messaging & Scheduling
-- [ ] Pub/Sub: subscription-level IAM not covered (topics only)
-- [ ] Pub/Sub: no ack/modify-ack-deadline/seek
-- [ ] Cloud Tasks: no IAM
-- [ ] Cloud Tasks: task-level ops not covered (create/run/delete/list/describe)
-- [ ] Cloud Scheduler: no pubsub/app-engine job variants
-- [ ] Cloud Scheduler: no target/type update
+- [x] Pub/Sub: subscription-level IAM not covered (topics only) — add-only `GetSubscriptionIAMPolicy`/`AddSubscriptionIAMBinding`, mirroring the topic pattern.
+- [x] Pub/Sub: no ack/modify-ack-deadline/seek — `Ack`/`ModifyAckDeadline`/`SeekToTime` added, wired into the pulled-messages view and subscription detail view.
+- [x] Cloud Tasks: no IAM — add-only `GetQueueIAMPolicy`/`AddQueueIAMBinding`.
+- [x] Cloud Tasks: task-level ops not covered (create/run/delete/list/describe) — HTTP-target task create, list, run-now, delete; describe via list→detail view. App Engine-target task creation declined as out of scope, matching this codebase's existing minimal-viable pattern.
+- [x] Cloud Scheduler: no pubsub/app-engine job variants — `CreatePubSubJob`/`CreateAppEngineJob` added alongside the existing HTTP create.
+- [x] Cloud Scheduler: no target/type update — `UpdateJobHTTPTarget`/`UpdateJobPubSubTarget` added. App Engine target update declined: Scheduler's own `UpdateJob` doesn't support type conversion either, matching upstream `gcloud` limits.
 
 ### Security & Identity
 - [x] IAM Service Accounts: no undelete — `UndeleteServiceAccount` added (`U` in list view).
