@@ -822,6 +822,30 @@ func (s *Service) Reset() {
 	s.filter.ExitFilterMode()
 }
 
+// SetActiveTab switches to a specific tab by string key, so the command
+// palette can deep-link directly into a sub-tab (e.g. "Instance Groups")
+// instead of always landing on the service's default tab (see
+// serviceSubTabs in internal/ui/model.go). Returns false for an
+// unrecognized key, which callers treat as a harmless no-op. The returned
+// tea.Cmd (non-nil only for Instance Groups when not yet loaded) mirrors
+// what the '['/']' key handler already does when switching tabs manually --
+// without it this tab's table would stay empty until an unrelated refresh
+// happened to touch it.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	switch tab {
+	case "instances":
+		s.activeTab = TabInstances
+	case "instance-groups":
+		s.activeTab = TabInstanceGroups
+		if s.groups == nil {
+			return true, tea.Batch(s.spinner.Start(""), s.fetchGroupsCmd(false))
+		}
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
 // IsRootView checks if we are in the main list view
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList

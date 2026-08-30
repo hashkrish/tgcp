@@ -22,6 +22,14 @@ type Route struct {
 	View    ViewType
 	Service string // e.g., "gce", "sql"
 	ID      string // resource ID or Project ID
+	// SubTab optionally deep-links into a specific tab within Service
+	// (e.g. "firewalls", "instance-groups") instead of its default tab.
+	// Empty means "use whatever the service defaults to". Each tabbed
+	// service's own tab-key strings are defined alongside its
+	// SetActiveTab method; the palette's sub-service commands (see
+	// serviceSubTabs in internal/ui/model.go) are the only current source
+	// of a non-empty SubTab.
+	SubTab string
 }
 
 // Command represents an actionable command in the palette
@@ -119,14 +127,20 @@ func (m *NavigationModel) RestoreBaseCommands() {
 // fuzzy rank would float "GKE" above "GCE":
 //
 //  1. Prefix match on Name (case-insensitive)
-//  2. Substring match anywhere in Name
+//  2. Substring match anywhere in "Name + Description"
 //  3. Fuzzy match on "Name + Description" for everything else
+//
+// Tier 2 searches Description as well as Name (not just Name) so a service
+// whose sub-resources/tabs are named differently from the service itself
+// (e.g. "firewall" never appears in "VPC Network" the service name, only in
+// its Description via serviceSearchAliases in internal/ui/model.go) still
+// gets a literal-match result rather than only a weaker fuzzy one.
 //
 // Within each tier, results preserve registration order from defaultCommands.
 func (m *NavigationModel) FilterCommands(query string) {
 	m.Query = query
 	if query == "" {
-		m.Suggestions = m.recentSuggestions()
+		m.Suggestions = m.defaultSuggestions()
 		m.Selection = 0
 		return
 	}
@@ -147,13 +161,16 @@ func (m *NavigationModel) FilterCommands(query string) {
 		}
 	}
 
-	// Tier 2: substring match anywhere in Name
+	// Tier 2: substring match anywhere in Name + Description. MatchedIndexes
+	// are positions in the combined "Name Description" string (matching
+	// what highlightMatches in internal/ui/components/palette.go expects),
+	// same convention as tier 3's fuzzy match below.
 	for i, cmd := range m.Commands {
 		if seen[i] {
 			continue
 		}
-		nameLower := strings.ToLower(cmd.Name)
-		if idx := strings.Index(nameLower, queryLower); idx >= 0 {
+		haystack := strings.ToLower(cmd.Name + " " + cmd.Description)
+		if idx := strings.Index(haystack, queryLower); idx >= 0 {
 			suggestions = append(suggestions, SuggestionMatch{
 				Command:        cmd,
 				MatchedIndexes: rangeIndexes(idx, idx+len(query)),
@@ -184,24 +201,39 @@ func (m *NavigationModel) FilterCommands(query string) {
 	m.Selection = 0 // Reset selection
 }
 
-// recentSuggestions builds the default suggestion list shown when the
-// palette opens with no query yet, from RecentNames matched against the
-// currently active Commands (skipping any recent name that no longer
-// resolves, e.g. after a command-set switch triggered by SetCommands).
-func (m *NavigationModel) recentSuggestions() []SuggestionMatch {
-	if len(m.RecentNames) == 0 {
-		return []SuggestionMatch{}
-	}
+// defaultSuggestions builds the suggestion list shown when the palette
+// opens with no query yet: every available command (browsable in full,
+// scrollable via the palette's own scroll window), with any
+// recently-executed ones pinned to the top in recency order so frequent
+// actions surface without having to type anything. Previously this only
+// showed RecentNames (or nothing at all, before recency existed), which
+// looked like most services had vanished from the palette -- the fix is to
+// always show the complete list, recency is just a sort nudge on top of it.
+func (m *NavigationModel) defaultSuggestions() []SuggestionMatch {
+	suggestions := make([]SuggestionMatch, 0, len(m.Commands))
+	shown := make(map[string]bool, len(m.Commands))
+
 	byName := make(map[string]Command, len(m.Commands))
 	for _, cmd := range m.Commands {
 		byName[cmd.Name] = cmd
 	}
-	suggestions := make([]SuggestionMatch, 0, len(m.RecentNames))
 	for _, name := range m.RecentNames {
+		if shown[name] {
+			continue
+		}
 		if cmd, ok := byName[name]; ok {
 			suggestions = append(suggestions, SuggestionMatch{Command: cmd})
+			shown[name] = true
 		}
 	}
+
+	for _, cmd := range m.Commands {
+		if !shown[cmd.Name] {
+			suggestions = append(suggestions, SuggestionMatch{Command: cmd})
+			shown[cmd.Name] = true
+		}
+	}
+
 	return suggestions
 }
 

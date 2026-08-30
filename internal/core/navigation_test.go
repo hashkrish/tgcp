@@ -54,16 +54,66 @@ func TestFilterCommands_SubstringBeatsFuzzy(t *testing.T) {
 	}
 }
 
-func TestFilterCommands_EmptyQueryClearsSuggestions(t *testing.T) {
+// TestFilterCommands_EmptyQueryShowsFullList is a regression test: an empty
+// query must show every available command, not just recently-executed ones
+// (or nothing at all). Showing only recents made most services look like
+// they'd vanished from the palette the moment it was opened without typing
+// anything -- the fix is that recency only reorders the top of the list,
+// it never hides commands from it.
+func TestFilterCommands_EmptyQueryShowsFullList(t *testing.T) {
 	m := NewNavigation()
-	m.SetCommands(fixtureCommands())
-	m.FilterCommands("gce")
-	if len(m.Suggestions) == 0 {
-		t.Fatal("setup: expected matches for 'gce'")
-	}
+	cmds := fixtureCommands()
+	m.SetCommands(cmds)
+
+	// No history yet: empty query must still show every command.
 	m.FilterCommands("")
-	if len(m.Suggestions) != 0 {
-		t.Errorf("empty query should clear suggestions, got %d", len(m.Suggestions))
+	if len(m.Suggestions) != len(cmds) {
+		t.Fatalf("expected all %d commands with no history, got %d", len(cmds), len(m.Suggestions))
+	}
+
+	// Execute one command, then re-open with an empty query: it must be
+	// pinned to the top, but every other command must still be present.
+	m.FilterCommands("gce")
+	m.Selection = 0
+	m.ExecuteSelection()
+	m.FilterCommands("")
+
+	if len(m.Suggestions) != len(cmds) {
+		t.Fatalf("expected all %d commands after recording history, got %d", len(cmds), len(m.Suggestions))
+	}
+	if got := m.Suggestions[0].Name; !strings.HasPrefix(got, "GCE:") {
+		t.Errorf("expected the just-executed GCE command pinned first, got %q", got)
+	}
+	seen := make(map[string]bool)
+	for _, s := range m.Suggestions {
+		seen[s.Name] = true
+	}
+	for _, c := range cmds {
+		if !seen[c.Name] {
+			t.Errorf("command %q missing from the empty-query suggestion list", c.Name)
+		}
+	}
+}
+
+// TestFilterCommands_SubstringMatchesDescriptionToo is a regression test:
+// tier 2 (literal substring) previously only searched Name, so a keyword
+// that only appears in Description (e.g. a service's sub-resources, see
+// serviceSearchAliases in internal/ui/model.go) fell through to the weaker
+// fuzzy tier, or didn't match at all if fuzzy's subsequence matching missed
+// it. It must now be found as a literal substring match.
+func TestFilterCommands_SubstringMatchesDescriptionToo(t *testing.T) {
+	m := NewNavigation()
+	m.SetCommands([]Command{
+		{Name: "VPC Network", Description: "Open VPC Network (net) — subnets, firewall rules", Action: func() Route { return Route{} }},
+		{Name: "Other Service", Description: "Unrelated", Action: func() Route { return Route{} }},
+	})
+	m.FilterCommands("firewall")
+
+	if len(m.Suggestions) != 1 {
+		t.Fatalf("expected exactly 1 match for 'firewall', got %d", len(m.Suggestions))
+	}
+	if got := m.Suggestions[0].Name; got != "VPC Network" {
+		t.Errorf("expected 'VPC Network' matched via its Description, got %q", got)
 	}
 }
 

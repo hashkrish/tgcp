@@ -306,6 +306,37 @@ func (s *Service) Reset() {
 	s.activeTab = TabBackendServices
 }
 
+// SetActiveTab switches to a specific tab by string key, so the command
+// palette can deep-link directly into a sub-tab (e.g. "Health Checks")
+// instead of always landing on the default tab (see serviceSubTabs in
+// internal/ui/model.go). Returns false for an unrecognized key, treated as
+// a harmless no-op by callers. The returned tea.Cmd mirrors what the
+// '['/']' key handler already does when switching tabs manually -- fetch
+// that tab's data if it hasn't been loaded yet -- without it this tab's
+// table would stay empty until an unrelated refresh happened to touch it.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	var t Tab
+	switch tab {
+	case "backend-services":
+		t = TabBackendServices
+	case "health-checks":
+		t = TabHealthChecks
+	case "url-maps":
+		t = TabUrlMaps
+	case "forwarding-rules":
+		t = TabForwardingRules
+	case "ssl-certificates":
+		t = TabSslCertificates
+	default:
+		return false, nil
+	}
+	s.activeTab = t
+	if !s.tabHasData(t) {
+		return true, tea.Batch(s.spinner.Start(""), s.fetchCmdForTab(t, false))
+	}
+	return true, nil
+}
+
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }

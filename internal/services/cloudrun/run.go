@@ -317,6 +317,29 @@ func (s *Service) Reset() {
 	s.filter.ExitFilterMode()
 }
 
+// SetActiveTab switches to a specific tab by string key, so the command
+// palette can deep-link directly into a sub-tab (e.g. "Functions") instead
+// of always landing on the default tab (see serviceSubTabs in
+// internal/ui/model.go). Returns false for an unrecognized key, treated as
+// a harmless no-op by callers. The returned tea.Cmd mirrors what the
+// '['/']' key handler already does when switching to Functions -- a forced
+// refetch plus re-applying its filter session -- without it the Functions
+// table would stay empty/unfiltered until an unrelated refresh touched it.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	switch tab {
+	case "services":
+		s.activeTab = TabServices
+		s.serviceFilterSession.Apply(s.services)
+	case "functions":
+		s.activeTab = TabFunctions
+		s.functionFilterSession.Apply(s.functions)
+		return true, tea.Batch(s.fetchFunctionsCmd(true), s.spinner.Start(""))
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
 // IsRootView returns true if we are at the top-level list
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList

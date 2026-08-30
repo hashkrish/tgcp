@@ -216,6 +216,28 @@ func (s *Service) Reset() {
 	s.networksTable.SetCursor(0)
 }
 
+// SetActiveTab switches to a specific tab by string key, so the command
+// palette can deep-link into a sub-tab (see serviceSubTabs in
+// internal/ui/model.go). Returns false for an unrecognized key, treated as
+// a harmless no-op by callers.
+//
+// Subnets/Firewall Rules are tabs within a selected network's detail view,
+// not top-level list tabs -- there's no specific network to show them for
+// until the user picks one from the Networks list. So this only pre-sets
+// which tab will be active once a network IS selected; it can't jump
+// straight to a firewall-rules view with no network context.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	switch tab {
+	case "subnets":
+		s.activeTab = TabSubnets
+	case "firewalls":
+		s.activeTab = TabFirewalls
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }

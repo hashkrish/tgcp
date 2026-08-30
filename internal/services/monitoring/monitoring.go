@@ -212,6 +212,23 @@ func (s *Service) Reset() {
 	s.alertTable.SetCursor(0)
 }
 
+// SetActiveTab switches to a specific tab by string key, so the command
+// palette can deep-link directly into a sub-tab (e.g. "Alert Policies")
+// instead of always landing on the default tab (see serviceSubTabs in
+// internal/ui/model.go). Returns false for an unrecognized key, treated as
+// a harmless no-op by callers.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	switch tab {
+	case "uptime-checks":
+		s.activeTab = TabUptimeChecks
+	case "alert-policies":
+		s.activeTab = TabAlertPolicies
+	default:
+		return false, nil
+	}
+	return true, nil
+}
+
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }

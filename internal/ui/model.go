@@ -347,7 +347,9 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.ShowHelp = !m.ShowHelp
 				return m, nil
-			case "tab":
+			case "ctrl+b":
+				// Sidebar show/hide -- moved off Tab (see below) since Tab
+				// now cycles the active service's own tabs instead.
 				if m.ViewMode == ViewService {
 					m.Sidebar.Visible = !m.Sidebar.Visible
 					// Adjust focus if hiding active sidebar
@@ -373,6 +375,27 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						return m, svcCmd
 					}
+				}
+				return m, nil
+			case "tab", "shift+tab":
+				// Cycle the active service's own tabs (e.g. Cloud Run's
+				// Services/Functions, Load Balancing's 5 resource tabs) --
+				// exactly equivalent to pressing "]"/"[", which each such
+				// service already handles internally. Forwarding a
+				// synthetic KeyMsg (rather than teaching every tabbed
+				// service a new "tab"/"shift+tab" case) keeps this a
+				// one-place change.
+				if m.ViewMode == ViewService && m.CurrentSvc != nil {
+					key := "]"
+					if msg.String() == "shift+tab" {
+						key = "["
+					}
+					newModel, svcCmd := m.CurrentSvc.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+					if updatedSvc, ok := newModel.(services.Service); ok {
+						m.CurrentSvc = updatedSvc
+						m.ServiceMap[m.CurrentSvc.ShortName()] = updatedSvc
+					}
+					return m, svcCmd
 				}
 				return m, nil
 			}
@@ -436,6 +459,13 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							})
 						} else if svc != nil {
 							svc.Reset()
+							if route.SubTab != "" {
+								if ts, ok := svc.(tabbedService); ok {
+									if _, tabCmd := ts.SetActiveTab(route.SubTab); tabCmd != nil {
+										cmds = append(cmds, tabCmd)
+									}
+								}
+							}
 							m.CurrentSvc = svc
 
 							// Sync Window Size
@@ -471,13 +501,24 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						m.setFocus(FocusPalette)
 						return m, tea.Batch(cmds...)
 					}
-					// Close Palette
-					m.setFocus(m.LastFocus)
-					// If we switched view, we might want to focus something specific?
-					// For now, restore last focus (which might be weird if we changed views)
-					// Actually, if we switched service, we force FocusSidebar above.
-					if route.View == core.ViewHome {
+					// Close Palette. Which focus to restore depends on where we
+					// just navigated to -- NOT always m.LastFocus (the focus
+					// from BEFORE the palette opened): a ViewServiceList route
+					// already set FocusMain above (so its table/detail view
+					// receives keypresses), and clobbering that with
+					// m.LastFocus here was a real bug -- e.g. opening the
+					// palette from the landing page (LastFocus == FocusSidebar)
+					// and jumping straight into a service left the new
+					// service's own view completely unable to receive
+					// up/down/etc., because focus silently reverted to
+					// whatever it was before the palette ever opened.
+					switch route.View {
+					case core.ViewHome:
 						m.setFocus(FocusSidebar) // or menu
+					case core.ViewServiceList:
+						// Already set to FocusMain above; leave it alone.
+					default:
+						m.setFocus(m.LastFocus)
 					}
 
 					m.Navigation.PaletteActive = false
@@ -1038,6 +1079,51 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	})
 }
 
+// tabbedService is implemented by services with more than one tab (see
+// serviceSubTabs below). SetActiveTab returns false for an unrecognized key
+// (callers treat that as a harmless no-op rather than an error, since a
+// mistyped or stale key shouldn't break navigation), plus a tea.Cmd that
+// MUST be run when non-nil -- switching to a tab whose data hasn't been
+// fetched yet needs the same fetch the service's own '['/']' handling
+// triggers (e.g. GCE's Instance Groups, Cloud Run's Functions, every
+// Load Balancing tab past the default); forgetting this leaves the target
+// tab's table permanently empty since nothing else will ever populate it.
+type tabbedService interface {
+	SetActiveTab(tab string) (bool, tea.Cmd)
+}
+
+// subServiceTab names one non-default tab of a tabbed service, so it can get
+// its own independently-searchable/selectable palette command (e.g.
+// "VPC Network: Firewall Rules") instead of only being reachable by first
+// opening the service and then pressing '['/']'/Tab blind. Key is passed to
+// the service's SetActiveTab; Label is appended to "<service name>: " to
+// form the command's Name.
+//
+// Each service's own default tab (whatever Reset() sets activeTab to) is
+// deliberately NOT listed here -- the service's own top-level command
+// already opens on that tab, so adding a redundant "Foo: Default Tab" entry
+// would just be a near-duplicate of "Foo" with no new capability.
+type subServiceTab struct {
+	Key   string
+	Label string
+}
+
+// serviceSubTabs lists the extra (non-default) tabs per service short name.
+// Keys here must match the case strings each service's own SetActiveTab
+// switches on (internal/services/{gce,net,monitoring,loadbalancing,cloudrun}).
+var serviceSubTabs = map[string][]subServiceTab{
+	"gce":        {{Key: "instance-groups", Label: "Instance Groups (MIGs)"}},
+	"net":        {{Key: "firewalls", Label: "Firewall Rules"}},
+	"monitoring": {{Key: "alert-policies", Label: "Alert Policies"}},
+	"loadbalancing": {
+		{Key: "health-checks", Label: "Health Checks"},
+		{Key: "url-maps", Label: "URL Maps"},
+		{Key: "forwarding-rules", Label: "Forwarding Rules"},
+		{Key: "ssl-certificates", Label: "SSL Certificates"},
+	},
+	"run": {{Key: "functions", Label: "Functions"}},
+}
+
 // serviceCommands builds one command-palette entry per registered service,
 // derived directly from the service registry rather than a hand-maintained
 // list — a hardcoded list previously drifted out of sync as new services
@@ -1055,6 +1141,17 @@ func serviceCommands(svcMap map[string]services.Service) []core.Command {
 				return core.Route{View: core.ViewServiceList, Service: short}
 			},
 		})
+
+		for _, sub := range serviceSubTabs[short] {
+			sub := sub
+			cmds = append(cmds, core.Command{
+				Name:        fmt.Sprintf("%s: %s", name, sub.Label),
+				Description: fmt.Sprintf("Open %s under %s (%s)", sub.Label, name, short),
+				Action: func() core.Route {
+					return core.Route{View: core.ViewServiceList, Service: short, SubTab: sub.Key}
+				},
+			})
+		}
 	}
 	sort.Slice(cmds, func(i, j int) bool { return cmds[i].Name < cmds[j].Name })
 	return cmds
