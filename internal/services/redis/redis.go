@@ -28,7 +28,23 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewExport
+	ViewImport
 )
+
+// newExportForm builds the FormModel for exporting an instance's data to GCS.
+func newExportForm(inst Instance) components.FormModel {
+	return components.NewForm("Export Instance: "+inst.Name, []components.FormField{
+		{Label: "Output GCS URI", Placeholder: "gs://my-bucket/dump.rdb", Required: true},
+	})
+}
+
+// newImportForm builds the FormModel for importing a GCS RDB file into an instance.
+func newImportForm(inst Instance) components.FormModel {
+	return components.NewForm("Import Instance: "+inst.Name, []components.FormField{
+		{Label: "Input GCS URI", Placeholder: "gs://my-bucket/dump.rdb", Required: true},
+	})
+}
 
 // newInstanceUpdateForm builds the FormModel for updating a Redis instance's
 // memory size, seeded with the current value. Version "upgrade" and
@@ -55,6 +71,12 @@ type actionResultMsg struct {
 	msg string
 }
 
+// authStringMsg carries the result of a GetAuthString call.
+type authStringMsg struct {
+	authString string
+	err        error
+}
+
 // -----------------------------------------------------------------------------
 // Service Definition
 // -----------------------------------------------------------------------------
@@ -76,9 +98,11 @@ type Service struct {
 
 	createForm components.FormModel
 	updateForm components.FormModel
+	exportForm components.FormModel
+	importForm components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "reschedule-maintenance"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -222,7 +246,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		if s.pendingAction == "delete" || s.pendingAction == "failover" {
+		if s.pendingAction == "delete" || s.pendingAction == "failover" || s.pendingAction == "reschedule-maintenance" {
 			action := s.pendingAction
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -241,6 +265,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.viewState == ViewExport || s.viewState == ViewImport {
+			if msg.err != nil {
+				if s.viewState == ViewExport {
+					s.exportForm.SubmitErr = msg.err.Error()
+				} else {
+					s.importForm.SubmitErr = msg.err.Error()
+				}
+				return s, nil
+			}
+			s.viewState = ViewDetail
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
@@ -256,6 +292,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			},
 			s.Refresh(),
 		)
+
+	case authStringMsg:
+		s.spinner.Stop()
+		return s, func() tea.Msg {
+			if msg.err != nil {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+			return core.ToastMsg{Message: fmt.Sprintf("AUTH string: %s", msg.authString), Type: core.ToastSuccess}
+		}
 
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
@@ -369,7 +414,55 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "M": // Reschedule maintenance to now (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "reschedule-maintenance"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "e": // Export to GCS
+				if s.selectedInstance != nil {
+					s.exportForm = newExportForm(*s.selectedInstance)
+					s.viewState = ViewExport
+				}
+				return s, nil
+			case "i": // Import from GCS
+				if s.selectedInstance != nil {
+					s.importForm = newImportForm(*s.selectedInstance)
+					s.viewState = ViewImport
+				}
+				return s, nil
+			case "a": // Get auth string
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.getAuthStringCmd(*s.selectedInstance), s.spinner.Start(""))
+				}
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewExport {
+			result, formCmd := s.exportForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.exportInstanceCmd(*s.selectedInstance, s.exportForm.Value("Output GCS URI"))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewImport {
+			result, formCmd := s.importForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.importInstanceCmd(*s.selectedInstance, s.importForm.Value("Input GCS URI"))
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
@@ -382,6 +475,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
 					case "failover":
 						actionCmd = s.failoverInstanceCmd(*s.selectedInstance)
+					case "reschedule-maintenance":
+						actionCmd = s.rescheduleMaintenanceCmd(*s.selectedInstance)
 					}
 				}
 				s.viewState = s.actionSource
@@ -439,6 +534,59 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating Redis instance %s...", inst.Name)}
+	}
+}
+
+// rescheduleMaintenanceCmd reschedules inst's pending maintenance to now.
+func (s *Service) rescheduleMaintenanceCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RescheduleMaintenance(s.projectID, inst.Name, inst.Location); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Rescheduling maintenance for %s...", inst.Name)}
+	}
+}
+
+// exportInstanceCmd exports inst's data to gcsURI.
+func (s *Service) exportInstanceCmd(inst Instance, gcsURI string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ExportInstance(s.projectID, inst.Name, inst.Location, gcsURI); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Export of %s to %s started", inst.Name, gcsURI)}
+	}
+}
+
+// importInstanceCmd imports gcsURI into inst.
+func (s *Service) importInstanceCmd(inst Instance, gcsURI string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ImportInstance(s.projectID, inst.Name, inst.Location, gcsURI); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Import into %s from %s started", inst.Name, gcsURI)}
+	}
+}
+
+// getAuthStringCmd fetches inst's current AUTH string.
+func (s *Service) getAuthStringCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return authStringMsg{err: fmt.Errorf("client not initialized")}
+		}
+		authString, err := s.client.GetAuthString(s.projectID, inst.Name, inst.Location)
+		if err != nil {
+			return authStringMsg{err: err}
+		}
+		return authStringMsg{authString: authString}
 	}
 }
 

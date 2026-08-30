@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/yogirk/tgcp/internal/demo"
 	"google.golang.org/api/pubsub/v1"
@@ -282,9 +283,11 @@ func (c *Client) Publish(projectID, topicID, message string) (string, error) {
 }
 
 // PulledMessage is a single message returned by a Pull call, decoded for
-// display. It is never acknowledged.
+// display. It is never acknowledged automatically -- AckID is retained so a
+// later explicit Ack/ModifyAckDeadline call can reference it.
 type PulledMessage struct {
 	MessageID   string
+	AckID       string
 	Data        string
 	PublishTime string
 	Attributes  map[string]string
@@ -323,10 +326,107 @@ func (c *Client) Pull(projectID, subID string, maxMessages int64) ([]PulledMessa
 		}
 		out = append(out, PulledMessage{
 			MessageID:   rm.Message.MessageId,
+			AckID:       rm.AckId,
 			Data:        data,
 			PublishTime: rm.Message.PublishTime,
 			Attributes:  rm.Message.Attributes,
 		})
 	}
 	return out, nil
+}
+
+// Ack acknowledges the given ack IDs on a subscription, matching
+// `gcloud pubsub subscriptions ack`. Only meaningful for messages just
+// obtained via Pull -- ack IDs expire and are subscription-specific.
+func (c *Client) Ack(projectID, subID string, ackIDs []string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("pubsub client not initialized")
+	}
+	if len(ackIDs) == 0 {
+		return nil
+	}
+	name := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	_, err := c.service.Projects.Subscriptions.Acknowledge(name, &pubsub.AcknowledgeRequest{AckIds: ackIDs}).Do()
+	return err
+}
+
+// ModifyAckDeadline extends (or shortens) the ack deadline for the given ack
+// IDs on a subscription, matching
+// `gcloud pubsub subscriptions modify-message-ack-deadline`.
+func (c *Client) ModifyAckDeadline(projectID, subID string, ackIDs []string, ackDeadlineSeconds int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("pubsub client not initialized")
+	}
+	if len(ackIDs) == 0 {
+		return nil
+	}
+	name := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	req := &pubsub.ModifyAckDeadlineRequest{AckIds: ackIDs, AckDeadlineSeconds: ackDeadlineSeconds}
+	_, err := c.service.Projects.Subscriptions.ModifyAckDeadline(name, req).Do()
+	return err
+}
+
+// SeekToTime resets a subscription's delivery cursor to the given time,
+// matching `gcloud pubsub subscriptions seek --time=TIMESTAMP`. All messages
+// published after that time (and any not-yet-expired retained messages
+// before it) become re-deliverable.
+func (c *Client) SeekToTime(projectID, subID string, t time.Time) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("pubsub client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	req := &pubsub.SeekRequest{Time: t.UTC().Format(time.RFC3339)}
+	_, err := c.service.Projects.Subscriptions.Seek(name, req).Do()
+	return err
+}
+
+// GetSubscriptionIAMPolicy reads a subscription's current IAM policy,
+// matching `gcloud pubsub subscriptions get-iam-policy`.
+func (c *Client) GetSubscriptionIAMPolicy(projectID, subID string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("pubsub client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	policy, err := c.service.Projects.Subscriptions.GetIamPolicy(name).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get subscription IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddSubscriptionIAMBinding grants a role to a member on a subscription,
+// matching `gcloud pubsub subscriptions add-iam-policy-binding`. Like
+// AddTopicIAMBinding, this merges into the existing policy and never drops
+// another binding.
+func (c *Client) AddSubscriptionIAMBinding(projectID, subID, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("pubsub client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/subscriptions/%s", projectID, subID)
+	policy, err := c.service.Projects.Subscriptions.GetIamPolicy(name).Do()
+	if err != nil {
+		return fmt.Errorf("get subscription IAM policy: %w", err)
+	}
+	policy.Bindings = mergeIAMBinding(policy.Bindings, role, member)
+	_, err = c.service.Projects.Subscriptions.SetIamPolicy(name, &pubsub.SetIamPolicyRequest{Policy: policy}).Do()
+	return err
 }

@@ -88,9 +88,9 @@ func (c *Client) CreateCluster(projectID, location, name string, nodeCount int64
 }
 
 // ResizeNodePool changes the node count of an existing node pool, matching
-// `gcloud container clusters resize --node-pool`. Cluster/node-pool
-// `upgrade` and `complete-control-plane-upgrade` are separate, higher-risk
-// operations and are intentionally out of scope.
+// `gcloud container clusters resize --node-pool`. See UpgradeMaster/
+// UpgradeNodePool below for version upgrades; `complete-control-plane-upgrade`
+// remains out of scope.
 func (c *Client) ResizeNodePool(projectID, location, clusterName, nodePoolName string, nodeCount int64) error {
 	if demo.Enabled {
 		return nil
@@ -103,6 +103,40 @@ func (c *Client) ResizeNodePool(projectID, location, clusterName, nodePoolName s
 		NodeCount: nodeCount,
 	}
 	_, err := c.service.Projects.Locations.Clusters.NodePools.SetSize(name, req).Do()
+	return err
+}
+
+// UpgradeMaster changes the cluster's control-plane (master) Kubernetes
+// version, matching `gcloud container clusters upgrade --master
+// --cluster-version=VERSION`. version accepts an explicit version or an
+// alias like "latest" (see UpdateMasterRequest.MasterVersion).
+func (c *Client) UpgradeMaster(projectID, location, clusterName, version string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("gke client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/clusters/%s", projectID, location, clusterName)
+	req := &container.UpdateMasterRequest{MasterVersion: version}
+	_, err := c.service.Projects.Locations.Clusters.UpdateMaster(name, req).Do()
+	return err
+}
+
+// UpgradeNodePool changes a node pool's Kubernetes version, matching
+// `gcloud container clusters upgrade --node-pool=POOL
+// --cluster-version=VERSION`. Every other node-pool setting (machine type,
+// image, autoscaling, etc.) is left untouched.
+func (c *Client) UpgradeNodePool(projectID, location, clusterName, nodePoolName, version string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("gke client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/clusters/%s/nodePools/%s", projectID, location, clusterName, nodePoolName)
+	req := &container.UpdateNodePoolRequest{NodeVersion: version}
+	_, err := c.service.Projects.Locations.Clusters.NodePools.Update(name, req).Do()
 	return err
 }
 

@@ -39,6 +39,8 @@ const (
 	ViewDetail
 	ViewCall
 	ViewConfirmation
+	ViewIAM
+	ViewIAMForm
 )
 
 type functionsMsg []Function
@@ -46,6 +48,12 @@ type errMsg error
 type actionResultMsg struct {
 	err error
 	msg string
+}
+
+// iamPolicyMsg carries the result of a GetFunctionIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
 }
 
 // -----------------------------------------------------------------------------
@@ -74,8 +82,16 @@ type Service struct {
 	callData string
 
 	// Confirmation State
-	pendingAction string    // "delete", "call"
+	pendingAction string    // "delete", "call", "grant"
 	actionSource  ViewState // Where to return after confirmation
+
+	// IAM State: current bindings for the selected function, and the
+	// add-binding form. pendingIAMRole/pendingIAMMember are captured at
+	// form-submit time and consumed by the "grant" confirmation.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	cache *core.Cache
 }
@@ -116,10 +132,13 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Ent:Detail  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  c:Call  d:Delete"
+		return "Esc/q:Back  c:Call  i:IAM  d:Delete"
 	}
-	if s.viewState == ViewCall {
+	if s.viewState == ViewCall || s.viewState == ViewIAMForm {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewIAM {
+		return "Esc/q:Back  a:Grant Role"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
@@ -171,6 +190,8 @@ func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedFunc = nil
 	s.err = nil
+	s.pendingAction = ""
+	s.iamBindings = nil
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
 }
@@ -221,11 +242,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
 	case actionResultMsg:
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
+		}
+		if s.viewState == ViewIAM && s.selectedFunc != nil {
+			// A grant just landed -- re-fetch bindings instead of the
+			// service-list refresh below, which wouldn't reflect it.
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchIAMCmd(*s.selectedFunc),
+			)
 		}
 		if msg.msg != "" {
 			return s, tea.Batch(
@@ -324,7 +364,43 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "i": // IAM
+				if s.selectedFunc != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedFunc), s.spinner.Start(""))
+				}
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewIAM {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedFunc != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedFunc.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewIAMForm {
+			result, formCmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedFunc != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
@@ -334,6 +410,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if s.pendingAction == "call" && s.selectedFunc != nil {
 					actionCmd = s.CallFunctionCmd(*s.selectedFunc, s.callData)
 					s.viewState = ViewDetail
+					s.pendingAction = ""
+					return s, actionCmd
+				}
+				if s.pendingAction == "grant" && s.selectedFunc != nil {
+					actionCmd = s.addIAMBindingCmd(*s.selectedFunc, s.pendingIAMRole, s.pendingIAMMember)
+					s.viewState = ViewIAM
 					s.pendingAction = ""
 					return s, actionCmd
 				}
@@ -380,7 +462,35 @@ func (s *Service) View() string {
 		return s.renderConfirmation()
 	}
 
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
 	return s.renderListView()
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// function, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedFunc == nil {
+		return "Error: No function selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Functions",
+		s.selectedFunc.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedFunc.Name, rows)
 }
 
 func (s *Service) renderListView() string {
@@ -505,6 +615,33 @@ func (s *Service) CallFunctionCmd(fn Function, data string) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Called %s: %s", fn.Name, result)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a function.
+func (s *Service) fetchIAMCmd(fn Function) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetFunctionIAMPolicy(fn.FullName)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given function.
+func (s *Service) addIAMBindingCmd(fn Function, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddFunctionIAMBinding(fn.FullName, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on function %s", role, member, fn.Name)}
 	}
 }
 

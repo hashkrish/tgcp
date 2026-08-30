@@ -3,6 +3,8 @@ package gcs
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,15 +37,70 @@ const (
 	ViewUpdate
 	ViewIAM
 	ViewIAMForm
+	ViewMoveObject
+	ViewSignURL
 )
 
 // newBucketUpdateForm builds the FormModel for updating a bucket's default
-// storage class, seeded with its current value. Lifecycle rules, CORS,
-// versioning, retention, and relocate are out of scope for this minimal
-// Update flow.
+// storage class, versioning, retention period, a single CORS rule, and a
+// single age-based lifecycle delete rule, seeded with current values where
+// applicable. Bucket relocate and full multi-rule lifecycle/CORS configs
+// are out of scope for this minimal Update flow.
 func newBucketUpdateForm(b Bucket) components.FormModel {
+	retentionDays := "0"
+	if b.RetentionPeriod > 0 {
+		retentionDays = strconv.FormatInt(int64(b.RetentionPeriod/(24*time.Hour)), 10)
+	}
 	return components.NewForm("Update Bucket: "+b.Name, []components.FormField{
 		{Label: "Storage Class", Default: b.StorageClass, Placeholder: "STANDARD", Required: true},
+		{Label: "Versioning Enabled", Default: strconv.FormatBool(b.VersioningEnabled), Placeholder: "true/false", Required: true, Validate: validateBoolField},
+		{Label: "Retention Days", Default: retentionDays, Placeholder: "0 = disabled", Validate: validateNonNegativeIntField},
+		{Label: "CORS Origins", Placeholder: "https://example.com,https://foo.com (comma-separated, blank = leave CORS unchanged)"},
+		{Label: "CORS Methods", Placeholder: "GET,POST (comma-separated)"},
+		{Label: "Lifecycle Delete After Days", Placeholder: "0 = disabled", Validate: validateNonNegativeIntField},
+	})
+}
+
+func validateBoolField(v string) string {
+	if _, err := strconv.ParseBool(v); err != nil {
+		return "must be true or false"
+	}
+	return ""
+}
+
+func validateNonNegativeIntField(v string) string {
+	if v == "" {
+		return ""
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n < 0 {
+		return "must be a non-negative integer"
+	}
+	return ""
+}
+
+// newMoveObjectForm builds the FormModel for renaming/moving a single
+// object within its bucket, seeded with its current name.
+func newMoveObjectForm(obj Object) components.FormModel {
+	return components.NewForm("Move Object: "+obj.Name, []components.FormField{
+		{Label: "New Name", Default: obj.Name, Placeholder: "path/to/new-name.txt", Required: true},
+	})
+}
+
+// signURLExpiryPattern matches a plain integer count of minutes.
+var signURLExpiryPattern = regexp.MustCompile(`^[0-9]+$`)
+
+// newSignURLForm builds the FormModel for generating a signed GET URL for
+// an object, matching `gcloud storage sign-url --duration`.
+func newSignURLForm(obj Object) components.FormModel {
+	return components.NewForm("Sign URL: "+obj.Name, []components.FormField{
+		{Label: "Service Account Email", Placeholder: "my-sa@project.iam.gserviceaccount.com", Required: true},
+		{Label: "Expiry (minutes)", Default: "60", Required: true, Validate: func(v string) string {
+			if !signURLExpiryPattern.MatchString(v) {
+				return "must be a whole number of minutes"
+			}
+			return ""
+		}},
 	})
 }
 
@@ -121,6 +178,12 @@ type Service struct {
 	pendingIAMRole   string
 	pendingIAMMember string
 
+	// Move (mv): the destination-name form for the currently selected object.
+	moveForm components.FormModel
+
+	// Sign URL: the service-account/expiry form for the currently selected object.
+	signURLForm components.FormModel
+
 	// Cache
 	cache *core.Cache
 }
@@ -174,7 +237,7 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		return "r:Refresh  /:Filter  Ent:Detail  n:New Bucket"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewMoveObject || s.viewState == ViewSignURL {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewDetail {
@@ -184,7 +247,7 @@ func (s *Service) HelpText() string {
 		return "y:Confirm  n:Cancel"
 	}
 	if s.viewState == ViewObjects {
-		return "Enter:Open  d:Delete  c:Download  Esc/q:Back/Up"
+		return "Enter:Open  d:Delete  c:Download  m:Move  g:Sign URL  Esc/q:Back/Up"
 	}
 	if s.viewState == ViewObjectDetail {
 		return "Esc/q:Back"
@@ -382,6 +445,31 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.pendingAction == "move-object" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				s.moveForm.SubmitErr = msg.err.Error()
+				s.viewState = ViewMoveObject
+				return s, nil
+			}
+			s.selectedObject = nil
+			s.viewState = ViewObjects
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchObjectsCmd(),
+			)
+		}
+		if s.pendingAction == "sign-url" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				s.signURLForm.SubmitErr = msg.err.Error()
+				s.viewState = ViewSignURL
+				return s, nil
+			}
+			s.selectedObject = nil
+			s.viewState = ViewObjects
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
@@ -458,6 +546,39 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.actionSource = ViewIAM
 				s.viewState = ViewConfirmation
 				return s, nil
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewMoveObject {
+			result, formCmd := s.moveForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewObjects
+				s.selectedObject = nil
+				return s, nil
+			}
+			if result.Submitted && s.selectedBucket != nil && s.selectedObject != nil {
+				s.pendingAction = "move-object"
+				return s, tea.Batch(s.moveObjectCmd(*s.selectedBucket, *s.selectedObject, s.moveForm.Value("New Name")), s.spinner.Start(""))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewSignURL {
+			result, formCmd := s.signURLForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewObjects
+				s.selectedObject = nil
+				return s, nil
+			}
+			if result.Submitted && s.selectedBucket != nil && s.selectedObject != nil {
+				s.pendingAction = "sign-url"
+				minutes, _ := strconv.Atoi(s.signURLForm.Value("Expiry (minutes)"))
+				expiry := time.Duration(minutes) * time.Minute
+				return s, tea.Batch(
+					s.signURLCmd(*s.selectedBucket, *s.selectedObject, s.signURLForm.Value("Service Account Email"), expiry),
+					s.spinner.Start(""),
+				)
 			}
 			return s, formCmd
 		}
@@ -627,6 +748,28 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				return s, nil
+			case "m": // Move/rename object — data-plane mv (copy + delete source)
+				objs := s.objects
+				if idx := s.objectTable.Cursor(); idx >= 0 && idx < len(objs) {
+					obj := objs[idx]
+					if obj.Type != "Folder" {
+						s.selectedObject = &obj
+						s.moveForm = newMoveObjectForm(obj)
+						s.viewState = ViewMoveObject
+					}
+				}
+				return s, nil
+			case "g": // Generate a signed GET URL — data-plane sign-url
+				objs := s.objects
+				if idx := s.objectTable.Cursor(); idx >= 0 && idx < len(objs) {
+					obj := objs[idx]
+					if obj.Type != "Folder" {
+						s.selectedObject = &obj
+						s.signURLForm = newSignURLForm(obj)
+						s.viewState = ViewSignURL
+					}
+				}
+				return s, nil
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.objectTable.Update(msg)
@@ -690,6 +833,14 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewIAMForm {
 		return s.iamForm.View()
+	}
+
+	if s.viewState == ViewMoveObject {
+		return s.moveForm.View()
+	}
+
+	if s.viewState == ViewSignURL {
+		return s.signURLForm.View()
 	}
 
 	// Default: List View
@@ -973,11 +1124,24 @@ func (s *Service) updateBucketCmd(b Bucket) tea.Cmd {
 	if storageClass == "" {
 		storageClass = b.StorageClass
 	}
+	versioning, _ := strconv.ParseBool(s.updateForm.Value("Versioning Enabled"))
+	retentionDays, _ := strconv.ParseInt(s.updateForm.Value("Retention Days"), 10, 64)
+	lifecycleDeleteAgeDays, _ := strconv.ParseInt(s.updateForm.Value("Lifecycle Delete After Days"), 10, 64)
+	var corsOrigins, corsMethods []string
+	if v := s.updateForm.Value("CORS Origins"); v != "" {
+		corsOrigins = strings.Split(v, ",")
+	}
+	if v := s.updateForm.Value("CORS Methods"); v != "" {
+		corsMethods = strings.Split(v, ",")
+	}
 	return func() tea.Msg {
 		if s.client == nil {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
 		if err := s.client.UpdateBucketStorageClass(b.Name, storageClass); err != nil {
+			return actionResultMsg{err: err}
+		}
+		if err := s.client.UpdateBucketSettings(b.Name, versioning, retentionDays, corsOrigins, corsMethods, lifecycleDeleteAgeDays); err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating bucket %s...", b.Name)}
@@ -1022,6 +1186,33 @@ func (s *Service) deleteObjectCmd(b Bucket, o Object) tea.Cmd {
 
 // downloadObjectCmd downloads a single object's contents to local disk
 // (data-plane cp). Non-destructive, so it runs without a confirmation step.
+// moveObjectCmd renames o within b to newName via copy-then-delete-source.
+func (s *Service) moveObjectCmd(b Bucket, o Object, newName string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.MoveObject(b.Name, o.Name, b.Name, newName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Moved %s to %s", o.Name, newName)}
+	}
+}
+
+// signURLCmd generates a signed GET URL for o, valid for expiry.
+func (s *Service) signURLCmd(b Bucket, o Object, serviceAccountEmail string, expiry time.Duration) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		url, err := s.client.SignURL(b.Name, o.Name, serviceAccountEmail, expiry)
+		if err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Signed URL for %s: %s", o.Name, url)}
+	}
+}
+
 func (s *Service) downloadObjectCmd(b Bucket, o Object) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {

@@ -270,9 +270,7 @@ func (c *Client) SuspendInstance(projectID, zone, instanceName string) error {
 }
 
 // ResumeInstance resumes a previously-suspended instance, matching
-// `gcloud compute instances resume`. perform-maintenance is intentionally
-// out of scope: it only applies to sole-tenant-node-hosted instances and is
-// rarely applicable outside that setup.
+// `gcloud compute instances resume`.
 func (c *Client) ResumeInstance(projectID, zone, instanceName string) error {
 	if demo.Enabled {
 		return nil
@@ -314,6 +312,189 @@ func (c *Client) CreateInstance(projectID, zone, name, machineType, sourceImage,
 	}
 
 	_, err := c.service.Instances.Insert(projectID, zone, inst).Do()
+	return err
+}
+
+// PerformMaintenanceInstance triggers a manual live migration for the given
+// instance, matching `gcloud compute instances perform-maintenance`. Only
+// applicable to sole-tenant-node-hosted instances; on any other instance the
+// API call fails with a clear error surfaced to the caller as-is.
+func (c *Client) PerformMaintenanceInstance(projectID, zone, instanceName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Instances.PerformMaintenance(projectID, zone, instanceName).Do()
+	return err
+}
+
+// GetInstanceIAMPolicy reads a VM instance's current IAM policy, matching
+// `gcloud compute instances get-iam-policy`. Used as the "look before you
+// grant" read step before AddInstanceIAMBinding.
+func (c *Client) GetInstanceIAMPolicy(projectID, zone, instanceName string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("compute client not initialized")
+	}
+	policy, err := c.service.Instances.GetIamPolicy(projectID, zone, instanceName).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get instance IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddInstanceIAMBinding grants role to member on a VM instance, matching
+// `gcloud compute instances add-iam-policy-binding`. Fetches the current
+// policy, merges the binding in, and writes the whole policy back — this
+// never drops any existing binding, unlike a raw set-iam-policy.
+func (c *Client) AddInstanceIAMBinding(projectID, zone, instanceName, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	policy, err := c.service.Instances.GetIamPolicy(projectID, zone, instanceName).Do()
+	if err != nil {
+		return fmt.Errorf("get instance IAM policy: %w", err)
+	}
+	policy.Bindings = mergeComputeIAMBinding(policy.Bindings, role, member)
+	_, err = c.service.Instances.SetIamPolicy(projectID, zone, instanceName, &compute.ZoneSetPolicyRequest{Policy: policy}).Do()
+	return err
+}
+
+// mergeComputeIAMBinding appends member to the existing binding for role if
+// one exists (skipping if already granted), or appends a brand-new role
+// binding otherwise. Shared by instance- and MIG-level IAM grants; never
+// removes or replaces any other binding in the slice.
+func mergeComputeIAMBinding(bindings []*compute.Binding, role, member string) []*compute.Binding {
+	for _, b := range bindings {
+		if b.Role != role {
+			continue
+		}
+		for _, m := range b.Members {
+			if m == member {
+				return bindings
+			}
+		}
+		b.Members = append(b.Members, member)
+		return bindings
+	}
+	return append(bindings, &compute.Binding{Role: role, Members: []string{member}})
+}
+
+// CreateInstanceGroup creates a new zonal Managed Instance Group from an
+// existing instance template, matching `gcloud compute instance-groups
+// managed create`. Regional MIGs are intentionally out of scope for this
+// minimal Create flow.
+func (c *Client) CreateInstanceGroup(projectID, zone, name, baseInstanceName, instanceTemplate string, targetSize int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	mig := &compute.InstanceGroupManager{
+		Name:             name,
+		BaseInstanceName: baseInstanceName,
+		InstanceTemplate: instanceTemplate,
+		TargetSize:       targetSize,
+	}
+	_, err := c.service.InstanceGroupManagers.Insert(projectID, zone, mig).Do()
+	return err
+}
+
+// instanceURLsInGroup lists the member instances of a zonal MIG, returning
+// their URLs for use with StartInstances/StopInstances/ApplyUpdatesToInstances,
+// which (aside from ApplyUpdatesToInstances' AllInstances flag) require
+// explicit instance URLs rather than an "every instance" shortcut.
+func (c *Client) instanceURLsInGroup(projectID, zone, name string) ([]string, error) {
+	var urls []string
+	req := c.service.InstanceGroupManagers.ListManagedInstances(projectID, zone, name)
+	err := req.Pages(context.Background(), func(page *compute.InstanceGroupManagersListManagedInstancesResponse) error {
+		for _, mi := range page.ManagedInstances {
+			urls = append(urls, mi.Instance)
+		}
+		return nil
+	})
+	return urls, err
+}
+
+// StartInstancesInGroup starts every instance currently in the MIG,
+// matching `gcloud compute instance-groups managed start-instances` without
+// an --instances filter.
+func (c *Client) StartInstancesInGroup(projectID, zone, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	urls, err := c.instanceURLsInGroup(projectID, zone, name)
+	if err != nil {
+		return err
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	_, err = c.service.InstanceGroupManagers.StartInstances(projectID, zone, name, &compute.InstanceGroupManagersStartInstancesRequest{Instances: urls}).Do()
+	return err
+}
+
+// StopInstancesInGroup stops every instance currently in the MIG, matching
+// `gcloud compute instance-groups managed stop-instances` without an
+// --instances filter.
+func (c *Client) StopInstancesInGroup(projectID, zone, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	urls, err := c.instanceURLsInGroup(projectID, zone, name)
+	if err != nil {
+		return err
+	}
+	if len(urls) == 0 {
+		return nil
+	}
+	_, err = c.service.InstanceGroupManagers.StopInstances(projectID, zone, name, &compute.InstanceGroupManagersStopInstancesRequest{Instances: urls}).Do()
+	return err
+}
+
+// RollingActionReplaceGroup recreates every instance in the MIG, matching
+// `gcloud compute instance-groups managed rolling-action replace`.
+func (c *Client) RollingActionReplaceGroup(projectID, zone, name string) error {
+	return c.applyUpdatesToGroup(projectID, zone, name, "REPLACE")
+}
+
+// RollingActionRestartGroup restarts every instance in the MIG in place,
+// matching `gcloud compute instance-groups managed rolling-action restart`.
+func (c *Client) RollingActionRestartGroup(projectID, zone, name string) error {
+	return c.applyUpdatesToGroup(projectID, zone, name, "RESTART")
+}
+
+func (c *Client) applyUpdatesToGroup(projectID, zone, name, minimalAction string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	req := &compute.InstanceGroupManagersApplyUpdatesRequest{
+		AllInstances:                true,
+		MinimalAction:               minimalAction,
+		MostDisruptiveAllowedAction: minimalAction,
+	}
+	_, err := c.service.InstanceGroupManagers.ApplyUpdatesToInstances(projectID, zone, name, req).Do()
 	return err
 }
 

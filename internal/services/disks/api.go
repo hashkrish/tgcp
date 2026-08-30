@@ -140,3 +140,91 @@ func (c *Client) ResizeDisk(projectID, zone, name string, newSizeGB int64) error
 	_, err := c.service.Disks.Resize(projectID, zone, name, req).Do()
 	return err
 }
+
+// StartAsyncReplication begins async disk replication from this disk to
+// secondaryDiskURI (a full or partial resource URL to the secondary disk),
+// matching `gcloud compute disks start-async-replication
+// --secondary-disk=SECONDARY_DISK_URI`.
+func (c *Client) StartAsyncReplication(projectID, zone, name, secondaryDiskURI string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	req := &compute.DisksStartAsyncReplicationRequest{
+		AsyncSecondaryDisk: secondaryDiskURI,
+	}
+	_, err := c.service.Disks.StartAsyncReplication(projectID, zone, name, req).Do()
+	return err
+}
+
+// StopAsyncReplication stops async disk replication out of this disk,
+// matching `gcloud compute disks stop-async-replication`.
+func (c *Client) StopAsyncReplication(projectID, zone, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	_, err := c.service.Disks.StopAsyncReplication(projectID, zone, name).Do()
+	return err
+}
+
+// GetDiskIAMPolicy reads a disk's current IAM policy, matching `gcloud
+// compute disks get-iam-policy`. Used as the "look before you grant" read
+// step before AddDiskIAMBinding.
+func (c *Client) GetDiskIAMPolicy(projectID, zone, name string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("compute client not initialized")
+	}
+	policy, err := c.service.Disks.GetIamPolicy(projectID, zone, name).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get disk IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddDiskIAMBinding grants role to member on a disk, matching `gcloud
+// compute disks add-iam-policy-binding`. Fetches the current policy, merges
+// the binding in, and writes the whole policy back — this never drops any
+// existing binding, unlike a raw set-iam-policy.
+func (c *Client) AddDiskIAMBinding(projectID, zone, name, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("compute client not initialized")
+	}
+	policy, err := c.service.Disks.GetIamPolicy(projectID, zone, name).Do()
+	if err != nil {
+		return fmt.Errorf("get disk IAM policy: %w", err)
+	}
+	found := false
+	for _, b := range policy.Bindings {
+		if b.Role != role {
+			continue
+		}
+		found = true
+		for _, m := range b.Members {
+			if m == member {
+				return nil // already granted, nothing to do
+			}
+		}
+		b.Members = append(b.Members, member)
+		break
+	}
+	if !found {
+		policy.Bindings = append(policy.Bindings, &compute.Binding{Role: role, Members: []string{member}})
+	}
+	_, err = c.service.Disks.SetIamPolicy(projectID, zone, name, &compute.ZoneSetPolicyRequest{Policy: policy}).Do()
+	return err
+}

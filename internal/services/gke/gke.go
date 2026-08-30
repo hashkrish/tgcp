@@ -48,12 +48,13 @@ const (
 	ViewConfirmation
 	ViewCreate
 	ViewUpdate
+	ViewMasterUpgrade
+	ViewNodePoolUpgrade
 )
 
 // newNodePoolUpdateForm builds the FormModel for resizing a cluster's first
 // node pool, seeded with its current node count. Multi-node-pool clusters
-// only expose the first pool here; cluster/node-pool version `upgrade` is a
-// separate, higher-risk operation and is out of scope.
+// only expose the first pool here.
 func newNodePoolUpdateForm(cluster Cluster, pool NodePool) components.FormModel {
 	return components.NewForm(fmt.Sprintf("Resize Node Pool: %s (%s)", pool.Name, cluster.Name), []components.FormField{
 		{Label: "Node Count", Default: strconv.FormatInt(pool.InitialNodeCount, 10), Required: true, Validate: func(v string) string {
@@ -63,6 +64,26 @@ func newNodePoolUpdateForm(cluster Cluster, pool NodePool) components.FormModel 
 			}
 			return ""
 		}},
+	})
+}
+
+// newMasterUpgradeForm builds the FormModel for upgrading a cluster's
+// control plane, matching `gcloud container clusters upgrade --master
+// --cluster-version=VERSION`.
+func newMasterUpgradeForm(cluster Cluster) components.FormModel {
+	return components.NewForm("Upgrade Master: "+cluster.Name, []components.FormField{
+		{Label: "Version", Default: "latest", Placeholder: "latest, 1.29, or 1.29.1-gke.100", Required: true},
+	})
+}
+
+// newNodePoolUpgradeForm builds the FormModel for upgrading a cluster's
+// first node pool's Kubernetes version, matching `gcloud container clusters
+// upgrade --node-pool=POOL --cluster-version=VERSION`. Multi-node-pool
+// clusters only expose the first pool here, matching newNodePoolUpdateForm's
+// existing scope limit.
+func newNodePoolUpgradeForm(cluster Cluster, pool NodePool) components.FormModel {
+	return components.NewForm(fmt.Sprintf("Upgrade Node Pool: %s (%s)", pool.Name, cluster.Name), []components.FormField{
+		{Label: "Version", Default: "latest", Placeholder: "latest, 1.29, or 1.29.1-gke.100", Required: true},
 	})
 }
 
@@ -110,6 +131,12 @@ type Service struct {
 	// Update State
 	updateForm components.FormModel
 
+	// Master/Node-Pool Upgrade State. pendingVersion is captured at
+	// form-submit time so the confirmation dialog and the actual API call
+	// use the same value regardless of what the form field holds later.
+	upgradeForm    components.FormModel
+	pendingVersion string
+
 	// Cache
 	cache *core.Cache
 }
@@ -151,12 +178,12 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  K:k9s  l:Logs  Ent:Detail  n:Create"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  K:k9s  u:Update (resize node pool)  d:Delete"
+		return "Esc/q:Back  K:k9s  u:Update (resize node pool)  M:Upgrade Master  N:Upgrade Node Pool  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewMasterUpgrade || s.viewState == ViewNodePoolUpgrade {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
 	return ""
@@ -202,6 +229,8 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedCluster = nil
+	s.pendingAction = ""
+	s.pendingVersion = ""
 	s.err = nil
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
@@ -360,6 +389,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewUpdate
 				}
 				return s, nil
+			case "M": // Upgrade Master
+				if s.selectedCluster != nil {
+					s.upgradeForm = newMasterUpgradeForm(*s.selectedCluster)
+					s.viewState = ViewMasterUpgrade
+				}
+				return s, nil
+			case "N": // Upgrade first node pool
+				if s.selectedCluster != nil && len(s.selectedCluster.NodePools) > 0 {
+					s.upgradeForm = newNodePoolUpgradeForm(*s.selectedCluster, s.selectedCluster.NodePools[0])
+					s.viewState = ViewNodePoolUpgrade
+				}
+				return s, nil
 			case "d": // Delete (Confirm) — double-confirm, this is the most
 				// destructive action in the app: it destroys every node pool
 				// and workload in the cluster with no undo.
@@ -384,12 +425,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return s, nil
 				}
 				var actionCmd tea.Cmd
+				nextView := ViewList
 				if s.pendingAction == "delete-confirm2" && s.selectedCluster != nil {
 					actionCmd = s.DeleteClusterCmd(*s.selectedCluster)
 					s.selectedCluster = nil
+				} else if s.pendingAction == "master-upgrade" && s.selectedCluster != nil {
+					actionCmd = s.UpgradeMasterCmd(*s.selectedCluster, s.pendingVersion)
+					nextView = ViewDetail
+				} else if s.pendingAction == "nodepool-upgrade" && s.selectedCluster != nil && len(s.selectedCluster.NodePools) > 0 {
+					actionCmd = s.UpgradeNodePoolCmd(*s.selectedCluster, s.selectedCluster.NodePools[0], s.pendingVersion)
+					nextView = ViewDetail
 				}
-				s.viewState = ViewList
+				s.viewState = nextView
 				s.pendingAction = ""
+				s.pendingVersion = ""
 				return s, actionCmd
 			case "n", "esc", "q":
 				s.viewState = s.actionSource
@@ -430,6 +479,40 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return s, fcmd
 		}
+
+		// MASTER UPGRADE VIEW
+		if s.viewState == ViewMasterUpgrade {
+			result, fcmd := s.upgradeForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedCluster != nil {
+				s.pendingVersion = s.upgradeForm.Value("Version")
+				s.pendingAction = "master-upgrade"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+		}
+
+		// NODE POOL UPGRADE VIEW
+		if s.viewState == ViewNodePoolUpgrade {
+			result, fcmd := s.upgradeForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedCluster != nil {
+				s.pendingVersion = s.upgradeForm.Value("Version")
+				s.pendingAction = "nodepool-upgrade"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+		}
 	}
 
 	return s, nil
@@ -463,6 +546,10 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewUpdate {
 		return s.updateForm.View()
+	}
+
+	if s.viewState == ViewMasterUpgrade || s.viewState == ViewNodePoolUpgrade {
+		return s.upgradeForm.View()
 	}
 
 	return s.renderListView()
@@ -558,6 +645,32 @@ func (s *Service) ResizeNodePoolCmd(cluster Cluster, pool NodePool, nodeCount in
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Resizing node pool %s to %d nodes...", pool.Name, nodeCount)}
+	}
+}
+
+// UpgradeMasterCmd triggers a control-plane version upgrade for the given cluster.
+func (s *Service) UpgradeMasterCmd(cluster Cluster, version string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpgradeMaster(s.projectID, cluster.Location, cluster.Name, version); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Upgrading master for cluster %s to %s...", cluster.Name, version)}
+	}
+}
+
+// UpgradeNodePoolCmd triggers a version upgrade for the given cluster/pool.
+func (s *Service) UpgradeNodePoolCmd(cluster Cluster, pool NodePool, version string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpgradeNodePool(s.projectID, cluster.Location, cluster.Name, pool.Name, version); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Upgrading node pool %s to %s...", pool.Name, version)}
 	}
 }
 

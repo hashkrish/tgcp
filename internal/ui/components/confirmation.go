@@ -83,7 +83,7 @@ func getActionStyle(action string) actionStyle {
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorError).Bold(true),
 			impactText:  "This immediately drops every task currently queued.",
 		}
-	case "start", "restart", "resume", "enable", "failover", "call", "run", "publish":
+	case "start", "restart", "resume", "enable", "failover", "switchover", "call", "run", "publish":
 		// Safe/expected actions - blue/info
 		return actionStyle{
 			icon:        "▶",
@@ -133,6 +133,17 @@ func getActionStyle(action string) actionStyle {
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true),
 			impactText:  "",
 		}
+	case "set-primary":
+		// Switches which crypto key version new encrypt operations use --
+		// not destructive, but worth a distinct callout since it changes
+		// live behavior immediately.
+		return actionStyle{
+			icon:        "🔁",
+			title:       "Confirm Set Primary Version",
+			borderColor: styles.ColorWarning,
+			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
+			impactText:  "",
+		}
 	case "grant":
 		// IAM policy writes - cautionary but not destructive; distinct
 		// styling so it's never confused with delete/disable.
@@ -143,11 +154,11 @@ func getActionStyle(action string) actionStyle {
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorWarning).Bold(true),
 			impactText:  "Double-check the role and member before confirming.",
 		}
-	case "snapshot", "backup":
+	case "snapshot", "backup", "clone":
 		// Neutral actions - subtle
 		return actionStyle{
 			icon:        "◱",
-			title:       "Confirm Snapshot",
+			title:       "Confirm " + capitalize(action),
 			borderColor: styles.ColorBrandAccent,
 			titleStyle:  lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true),
 			impactText:  "",

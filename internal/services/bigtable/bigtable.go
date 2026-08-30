@@ -30,21 +30,69 @@ const (
 	ViewUpdate
 	ViewConfirmation
 	ViewTables
+	ViewCreateTable
+	ViewIAMForm
+	ViewUndeleteTable
+	ViewRestoreTable
 )
 
-// newClusterUpdateForm builds the FormModel for resizing the first cluster
-// of an instance, seeded with its current node count. Multi-cluster
-// instances only expose the first cluster here — per-cluster selection and
-// autoscaling config are out of scope for this minimal Update flow.
-func newClusterUpdateForm(cluster Cluster) components.FormModel {
-	return components.NewForm("Update Cluster: "+cluster.Name, []components.FormField{
-		{Label: "Num Nodes", Default: strconv.Itoa(cluster.ServeNodes), Required: true, Validate: func(v string) string {
-			n, err := strconv.Atoi(v)
-			if err != nil || n <= 0 {
-				return "must be a positive integer"
-			}
-			return ""
-		}},
+// newUndeleteTableForm builds the FormModel for undeleting a recently
+// deleted table, matching `gcloud bigtable instances tables undelete`.
+func newUndeleteTableForm() components.FormModel {
+	return components.NewForm("Undelete Table", []components.FormField{
+		{Label: "Table ID", Placeholder: "my-deleted-table", Required: true},
+	})
+}
+
+// newRestoreTableForm builds the FormModel for restoring a table from a
+// backup, matching `gcloud bigtable tables restore`. This package has no
+// backup create/list flow, so the backup's fully qualified resource name
+// must be supplied directly.
+func newRestoreTableForm() components.FormModel {
+	return components.NewForm("Restore Table from Backup", []components.FormField{
+		{Label: "New Table ID", Placeholder: "my-restored-table", Required: true},
+		{Label: "Backup Resource Name", Placeholder: "projects/P/instances/I/clusters/C/backups/B", Required: true},
+	})
+}
+
+// newClusterUpdateForm builds the FormModel for resizing/autoscaling a
+// cluster, seeded with the first cluster's current values. Cluster Name
+// lets a multi-cluster instance target a cluster other than the first.
+// Leaving Autoscaling Min Nodes at 0 keeps/sets a fixed node count from Num
+// Nodes instead; setting it >0 switches the cluster to autoscaling using
+// Autoscaling Max Nodes and Autoscaling CPU Target.
+func newClusterUpdateForm(instance Instance, cluster Cluster) components.FormModel {
+	return components.NewForm("Update Cluster: "+instance.Name, []components.FormField{
+		{Label: "Cluster Name", Default: cluster.Name, Required: true},
+		{Label: "Num Nodes", Default: strconv.Itoa(cluster.ServeNodes), Required: true, Validate: validatePositiveInt},
+		{Label: "Autoscaling Min Nodes", Default: strconv.Itoa(cluster.AutoscalingMin), Placeholder: "0 = disabled (use fixed Num Nodes)"},
+		{Label: "Autoscaling Max Nodes", Default: strconv.Itoa(cluster.AutoscalingMax)},
+		{Label: "Autoscaling CPU Target", Default: strconv.Itoa(cluster.AutoscalingCpuTarget), Placeholder: "10-80"},
+		{Label: "Instance Type", Default: instance.Type, Placeholder: "PRODUCTION (upgrade from DEVELOPMENT)"},
+	})
+}
+
+func validatePositiveInt(v string) string {
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return "must be a positive integer"
+	}
+	return ""
+}
+
+// newTableCreateForm builds the FormModel for creating a data-plane table.
+func newTableCreateForm() components.FormModel {
+	return components.NewForm("Create Table", []components.FormField{
+		{Label: "Table ID", Placeholder: "my-table", Required: true},
+		{Label: "Column Families", Placeholder: "cf1,cf2", Required: true},
+	})
+}
+
+// newInstanceIAMForm builds the FormModel for granting an IAM role on an instance.
+func newInstanceIAMForm() components.FormModel {
+	return components.NewForm("Add IAM Binding", []components.FormField{
+		{Label: "Role", Placeholder: "roles/bigtable.user", Required: true},
+		{Label: "Member", Placeholder: "user:name@example.com", Required: true},
 	})
 }
 
@@ -89,12 +137,23 @@ type Service struct {
 
 	viewState        ViewState
 	selectedInstance *Instance
+	selectedTable    *TableInfo
 
-	createForm components.FormModel
-	updateForm components.FormModel
+	createForm        components.FormModel
+	updateForm        components.FormModel
+	tableCreateForm   components.FormModel
+	iamForm           components.FormModel
+	undeleteTableForm components.FormModel
+	restoreTableForm  components.FormModel
+
+	// pendingIAMRole/pendingIAMMember are captured at form-submit time so
+	// the confirmation dialog and the actual API call use the same values
+	// regardless of what the form fields hold later.
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "delete-table", "grant"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -142,17 +201,17 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		return "r:Refresh  /:Filter  Ent:Detail  n:New Instance"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewCreateTable || s.viewState == ViewIAMForm || s.viewState == ViewUndeleteTable || s.viewState == ViewRestoreTable {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  u:Update (resize cluster)  d:Delete  t:Tables"
+		return "Esc/q:Back  u:Update Cluster  d:Delete  t:Tables  i:Add IAM Binding"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
 	if s.viewState == ViewTables {
-		return "Esc/q:Back  /:Filter"
+		return "Esc/q:Back  /:Filter  n:New Table  d:Delete Table  u:Undelete  R:Restore"
 	}
 	return "Esc/q:Back"
 }
@@ -290,6 +349,63 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.pendingAction == "delete-table" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
+			}
+			s.selectedTable = nil
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			if s.selectedInstance != nil {
+				return s, tea.Batch(toast, s.fetchTablesCmd(s.selectedInstance.Name))
+			}
+			return s, toast
+		}
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			return s, func() tea.Msg {
+				if msg.err != nil {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			}
+		}
+		if s.viewState == ViewCreateTable {
+			if msg.err != nil {
+				s.tableCreateForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			s.viewState = ViewTables
+			if s.selectedInstance != nil {
+				return s, tea.Batch(toast, s.fetchTablesCmd(s.selectedInstance.Name))
+			}
+			return s, toast
+		}
+		if s.viewState == ViewUndeleteTable {
+			if msg.err != nil {
+				s.undeleteTableForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			s.viewState = ViewTables
+			if s.selectedInstance != nil {
+				return s, tea.Batch(toast, s.fetchTablesCmd(s.selectedInstance.Name))
+			}
+			return s, toast
+		}
+		if s.viewState == ViewRestoreTable {
+			if msg.err != nil {
+				s.restoreTableForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			s.viewState = ViewTables
+			if s.selectedInstance != nil {
+				return s, tea.Batch(toast, s.fetchTablesCmd(s.selectedInstance.Name))
+			}
+			return s, toast
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
@@ -345,7 +461,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, nil
 			}
 			if result.Submitted && s.selectedInstance != nil && len(s.clusters) > 0 {
-				return s, s.updateClusterCmd(s.selectedInstance.Name, s.clusters[0].Name)
+				return s, s.updateClusterCmd(*s.selectedInstance)
 			}
 			return s, formCmd
 		}
@@ -403,8 +519,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.clusters = nil
 				return s, nil
 			case "u":
-				if len(s.clusters) > 0 {
-					s.updateForm = newClusterUpdateForm(s.clusters[0])
+				if len(s.clusters) > 0 && s.selectedInstance != nil {
+					s.updateForm = newClusterUpdateForm(*s.selectedInstance, s.clusters[0])
 					s.viewState = ViewUpdate
 				}
 				return s, nil
@@ -420,6 +536,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewTables
 					s.tables = nil
 					return s, tea.Batch(s.spinner.Start(""), s.fetchTablesCmd(s.selectedInstance.Name))
+				}
+				return s, nil
+			case "i": // Grant IAM binding
+				if s.selectedInstance != nil {
+					s.iamForm = newInstanceIAMForm()
+					s.viewState = ViewIAMForm
 				}
 				return s, nil
 			}
@@ -441,6 +563,29 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewDetail
 				s.tables = nil
 				return s, nil
+			case "n": // Create table
+				if s.selectedInstance != nil {
+					s.tableCreateForm = newTableCreateForm()
+					s.viewState = ViewCreateTable
+				}
+				return s, nil
+			case "d": // Delete table (Confirm)
+				tables := s.getFilteredTables(s.tables, s.tablesFilter.Value())
+				if idx := s.tablesTable.Cursor(); idx >= 0 && idx < len(tables) {
+					s.selectedTable = &tables[idx]
+					s.pendingAction = "delete-table"
+					s.actionSource = ViewTables
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "u": // Undelete table
+				s.undeleteTableForm = newUndeleteTableForm()
+				s.viewState = ViewUndeleteTable
+				return s, nil
+			case "R": // Restore table from backup
+				s.restoreTableForm = newRestoreTableForm()
+				s.viewState = ViewRestoreTable
+				return s, nil
 			}
 
 			var updatedTable *components.StandardTable
@@ -449,12 +594,69 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, cmd
 		}
 
+		if s.viewState == ViewUndeleteTable {
+			result, formCmd := s.undeleteTableForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewTables
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.undeleteTableCmd(*s.selectedInstance, s.undeleteTableForm.Value("Table ID"))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewRestoreTable {
+			result, formCmd := s.restoreTableForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewTables
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.restoreTableCmd(*s.selectedInstance, s.restoreTableForm.Value("New Table ID"), s.restoreTableForm.Value("Backup Resource Name"))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewCreateTable {
+			result, formCmd := s.tableCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewTables
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				return s, s.createTableCmd(*s.selectedInstance, s.tableCreateForm.Value("Table ID"), strings.Split(s.tableCreateForm.Value("Column Families"), ","))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewIAMForm {
+			result, formCmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
+		}
+
 		if s.viewState == ViewConfirmation {
 			switch msg.String() {
 			case "y", "enter":
 				var actionCmd tea.Cmd
 				if s.pendingAction == "delete" && s.selectedInstance != nil {
 					actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
+				} else if s.pendingAction == "delete-table" && s.selectedInstance != nil && s.selectedTable != nil {
+					actionCmd = s.deleteTableCmd(*s.selectedInstance, *s.selectedTable)
+				} else if s.pendingAction == "grant" && s.selectedInstance != nil {
+					actionCmd = s.addIAMBindingCmd(*s.selectedInstance, s.pendingIAMRole, s.pendingIAMMember)
 				}
 				s.viewState = s.actionSource
 				return s, actionCmd
@@ -499,21 +701,104 @@ func (s *Service) createInstanceCmd() tea.Cmd {
 	}
 }
 
-// updateClusterCmd fires the UpdateClusterNodes API call using the current
-// update-form value, resizing the given cluster within the given instance.
-func (s *Service) updateClusterCmd(instanceID, clusterID string) tea.Cmd {
+// updateClusterCmd fires the node-count/autoscaling/instance-type API calls
+// using the current update-form values: node resize or autoscaling config
+// for the named cluster (Autoscaling Min Nodes > 0 switches to
+// autoscaling), plus an instance-type change (e.g. DEVELOPMENT ->
+// PRODUCTION "upgrade") if that field differs from the instance's current type.
+func (s *Service) updateClusterCmd(inst Instance) tea.Cmd {
+	clusterID := s.updateForm.Value("Cluster Name")
 	numNodes, err := strconv.Atoi(s.updateForm.Value("Num Nodes"))
 	if err != nil || numNodes <= 0 {
 		numNodes = 1
 	}
+	autoMin, _ := strconv.Atoi(s.updateForm.Value("Autoscaling Min Nodes"))
+	autoMax, _ := strconv.Atoi(s.updateForm.Value("Autoscaling Max Nodes"))
+	autoCPU, _ := strconv.Atoi(s.updateForm.Value("Autoscaling CPU Target"))
+	instanceType := s.updateForm.Value("Instance Type")
+
 	return func() tea.Msg {
 		if s.client == nil {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
-		if err := s.client.UpdateClusterNodes(s.projectID, instanceID, clusterID, numNodes); err != nil {
+		if autoMin > 0 {
+			if err := s.client.SetClusterAutoscaling(s.projectID, inst.Name, clusterID, autoMin, autoMax, autoCPU); err != nil {
+				return actionResultMsg{err: err}
+			}
+		} else if err := s.client.UpdateClusterNodes(s.projectID, inst.Name, clusterID, numNodes); err != nil {
 			return actionResultMsg{err: err}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Resizing cluster %s to %d nodes...", clusterID, numNodes)}
+		if instanceType != "" && instanceType != inst.Type {
+			if err := s.client.UpdateInstanceType(s.projectID, inst.Name, instanceType); err != nil {
+				return actionResultMsg{err: err}
+			}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updating cluster %s...", clusterID)}
+	}
+}
+
+// createTableCmd fires the CreateTable API call.
+func (s *Service) createTableCmd(inst Instance, tableID string, columnFamilies []string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateTable(s.projectID, inst.Name, tableID, columnFamilies); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Table %s created", tableID)}
+	}
+}
+
+// deleteTableCmd fires the DeleteTable API call.
+func (s *Service) deleteTableCmd(inst Instance, t TableInfo) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteTable(s.projectID, inst.Name, t.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting table %s...", t.Name)}
+	}
+}
+
+// undeleteTableCmd fires the UndeleteTable API call.
+func (s *Service) undeleteTableCmd(inst Instance, tableID string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UndeleteTable(s.projectID, inst.Name, tableID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Undeleting table %s...", tableID)}
+	}
+}
+
+// restoreTableCmd fires the RestoreTable API call.
+func (s *Service) restoreTableCmd(inst Instance, newTableID, backupName string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RestoreTable(s.projectID, inst.Name, newTableID, backupName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Restoring table %s from backup...", newTableID)}
+	}
+}
+
+// addIAMBindingCmd fires the AddInstanceIAMBinding API call.
+func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddInstanceIAMBinding(s.projectID, inst.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on %s", role, member, inst.Name)}
 	}
 }
 

@@ -166,6 +166,117 @@ func (c *Client) CreateHTTPJob(projectID, location, name, schedule, uri string) 
 	return err
 }
 
+// CreatePubSubJob creates a new Cloud Scheduler job with a Pub/Sub target,
+// matching `gcloud scheduler jobs create pubsub`. topicName is the short
+// topic name in the same project.
+func (c *Client) CreatePubSubJob(projectID, location, name, schedule, topicName, message string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("scheduler client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)
+	jobName := fmt.Sprintf("%s/jobs/%s", parent, name)
+	topic := fmt.Sprintf("projects/%s/topics/%s", projectID, topicName)
+	job := &schedulerpb.Job{
+		Name:     jobName,
+		Schedule: schedule,
+		Target: &schedulerpb.Job_PubsubTarget{
+			PubsubTarget: &schedulerpb.PubsubTarget{
+				TopicName: topic,
+				Data:      []byte(message),
+			},
+		},
+	}
+	_, err := c.client.CreateJob(context.Background(), &schedulerpb.CreateJobRequest{
+		Parent: parent,
+		Job:    job,
+	})
+	return err
+}
+
+// CreateAppEngineJob creates a new Cloud Scheduler job with an App Engine
+// HTTP target, matching `gcloud scheduler jobs create app-engine`. Routing
+// is left at the App Engine default service/version -- this MVP doesn't
+// expose service/version/instance overrides.
+func (c *Client) CreateAppEngineJob(projectID, location, name, schedule, relativeURI string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("scheduler client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s/locations/%s", projectID, location)
+	jobName := fmt.Sprintf("%s/jobs/%s", parent, name)
+	job := &schedulerpb.Job{
+		Name:     jobName,
+		Schedule: schedule,
+		Target: &schedulerpb.Job_AppEngineHttpTarget{
+			AppEngineHttpTarget: &schedulerpb.AppEngineHttpTarget{
+				RelativeUri: relativeURI,
+				HttpMethod:  schedulerpb.HttpMethod_POST,
+			},
+		},
+	}
+	_, err := c.client.CreateJob(context.Background(), &schedulerpb.CreateJobRequest{
+		Parent: parent,
+		Job:    job,
+	})
+	return err
+}
+
+// UpdateJobHTTPTarget replaces a job's HTTP target URI, matching
+// `gcloud scheduler jobs update http --uri`. Only meaningful on jobs that
+// already have an HTTP target -- changing a job's target *type* (e.g.
+// HTTP -> Pub/Sub) isn't supported by the Scheduler API's UpdateJob either;
+// you delete and recreate for that.
+func (c *Client) UpdateJobHTTPTarget(projectID, location, name, uri string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("scheduler client not initialized")
+	}
+	jobName := fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, location, name)
+	job := &schedulerpb.Job{
+		Name: jobName,
+		Target: &schedulerpb.Job_HttpTarget{
+			HttpTarget: &schedulerpb.HttpTarget{Uri: uri},
+		},
+	}
+	_, err := c.client.UpdateJob(context.Background(), &schedulerpb.UpdateJobRequest{
+		Job:        job,
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"http_target.uri"}},
+	})
+	return err
+}
+
+// UpdateJobPubSubTarget replaces a job's Pub/Sub target topic and message
+// body, matching `gcloud scheduler jobs update pubsub`. Only meaningful on
+// jobs that already have a Pub/Sub target.
+func (c *Client) UpdateJobPubSubTarget(projectID, location, name, topicName, message string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("scheduler client not initialized")
+	}
+	jobName := fmt.Sprintf("projects/%s/locations/%s/jobs/%s", projectID, location, name)
+	topic := fmt.Sprintf("projects/%s/topics/%s", projectID, topicName)
+	job := &schedulerpb.Job{
+		Name: jobName,
+		Target: &schedulerpb.Job_PubsubTarget{
+			PubsubTarget: &schedulerpb.PubsubTarget{TopicName: topic, Data: []byte(message)},
+		},
+	}
+	_, err := c.client.UpdateJob(context.Background(), &schedulerpb.UpdateJobRequest{
+		Job:        job,
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"pubsub_target.topic_name", "pubsub_target.data"}},
+	})
+	return err
+}
+
 // DeleteJob deletes a Cloud Scheduler job, matching
 // `gcloud scheduler jobs delete`.
 func (c *Client) DeleteJob(projectID, location, name string) error {

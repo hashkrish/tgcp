@@ -46,6 +46,10 @@ func (s *Service) View() string {
 		return s.renderConfirmation()
 	}
 
+	if s.viewState == ViewUpdateOptions {
+		return s.updateOptionsForm.View()
+	}
+
 	// Filter Bar
 	var content strings.Builder
 	content.WriteString(components.Breadcrumb(

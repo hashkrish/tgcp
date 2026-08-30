@@ -23,6 +23,22 @@ func (s *Service) renderConfirmation() string {
 			fmt.Sprintf("FINAL WARNING: this will permanently destroy cluster %s and every node pool/workload running on it.", s.selectedCluster.Name),
 		)
 	}
+	if s.pendingAction == "master-upgrade" {
+		return components.RenderConfirmationWithMessage(
+			"master-upgrade",
+			s.selectedCluster.Name,
+			"cluster",
+			fmt.Sprintf("Upgrade the control plane of cluster %s to %s?", s.selectedCluster.Name, s.pendingVersion),
+		)
+	}
+	if s.pendingAction == "nodepool-upgrade" && len(s.selectedCluster.NodePools) > 0 {
+		return components.RenderConfirmationWithMessage(
+			"nodepool-upgrade",
+			s.selectedCluster.NodePools[0].Name,
+			"node pool",
+			fmt.Sprintf("Upgrade node pool %s to %s?", s.selectedCluster.NodePools[0].Name, s.pendingVersion),
+		)
+	}
 	return components.RenderConfirmation(s.pendingAction, s.selectedCluster.Name, "cluster")
 }
 

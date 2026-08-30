@@ -3,6 +3,7 @@ package dataflow
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,7 +28,18 @@ const (
 	ViewDetail
 	ViewCreate
 	ViewConfirmation
+	ViewUpdateOptions
 )
+
+// newUpdateOptionsForm builds the FormModel for updating a running
+// Streaming Engine job's autoscaling bounds, matching `gcloud dataflow jobs
+// update-options --min-num-workers --max-num-workers`.
+func newUpdateOptionsForm(job Job) components.FormModel {
+	return components.NewForm("Update Options: "+job.Name, []components.FormField{
+		{Label: "Min Num Workers", Placeholder: "1 (blank = unchanged)"},
+		{Label: "Max Num Workers", Placeholder: "10 (blank = unchanged)"},
+	})
+}
 
 type jobsMsg []Job
 type errMsg error
@@ -57,10 +69,11 @@ type Service struct {
 	viewState   ViewState
 	selectedJob *Job
 
-	createForm components.FormModel
+	createForm        components.FormModel
+	updateOptionsForm components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "archive"
+	pendingAction string    // "archive", "cancel", "drain"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -99,14 +112,14 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		return "r:Refresh  /:Filter  Ent:Detail  n:Run Job"
 	}
-	if s.viewState == ViewCreate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdateOptions {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  c:Cancel  x:Drain  d:Archive"
+		return "Esc/q:Back  c:Cancel  x:Drain  d:Archive  o:Update Options"
 	}
 	return "Esc/q:Back"
 }
@@ -222,6 +235,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.viewState == ViewUpdateOptions {
+			if msg.err != nil {
+				s.updateOptionsForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			s.viewState = ViewDetail
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
 		if msg.err != nil {
 			s.createForm.SubmitErr = msg.err.Error()
 			return s, nil
@@ -327,7 +348,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "o": // Update autoscaling options
+				if s.selectedJob != nil {
+					s.updateOptionsForm = newUpdateOptionsForm(*s.selectedJob)
+					s.viewState = ViewUpdateOptions
+				}
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewUpdateOptions {
+			result, formCmd := s.updateOptionsForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedJob != nil {
+				minW, _ := strconv.ParseInt(s.updateOptionsForm.Value("Min Num Workers"), 10, 64)
+				maxW, _ := strconv.ParseInt(s.updateOptionsForm.Value("Max Num Workers"), 10, 64)
+				return s, s.updateJobOptionsCmd(*s.selectedJob, minW, maxW)
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
@@ -414,6 +455,19 @@ func (s *Service) drainJobCmd(job Job) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Draining job %s...", job.Name)}
+	}
+}
+
+// updateJobOptionsCmd updates job's autoscaling bounds.
+func (s *Service) updateJobOptionsCmd(job Job, minWorkers, maxWorkers int64) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateJobOptions(s.projectID, job.Location, job.ID, minWorkers, maxWorkers); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updated autoscaling options for %s", job.Name)}
 	}
 }
 

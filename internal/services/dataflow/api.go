@@ -3,6 +3,7 @@ package dataflow
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/yogirk/tgcp/internal/demo"
 	dataflow "google.golang.org/api/dataflow/v1b3"
@@ -100,6 +101,37 @@ func (c *Client) DrainJob(projectID, region, jobID string) error {
 	}
 	_, err := c.service.Projects.Jobs.Update(projectID, jobID, job).
 		Location(region).
+		Do()
+	return err
+}
+
+// UpdateJobOptions updates a running Streaming Engine job's autoscaling
+// bounds, matching `gcloud dataflow jobs update-options
+// --min-num-workers --max-num-workers`. minWorkers/maxWorkers of 0 leaves
+// that bound unchanged (the API only applies fields present in the update
+// mask). Other RuntimeUpdatableParams (latency tier, worker utilization
+// hint) are out of scope for this minimal update flow.
+func (c *Client) UpdateJobOptions(projectID, region, jobID string, minWorkers, maxWorkers int64) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dataflow client not initialized")
+	}
+	params := &dataflow.RuntimeUpdatableParams{}
+	var maskFields []string
+	if minWorkers > 0 {
+		params.MinNumWorkers = minWorkers
+		maskFields = append(maskFields, "runtime_updatable_params.min_num_workers")
+	}
+	if maxWorkers > 0 {
+		params.MaxNumWorkers = maxWorkers
+		maskFields = append(maskFields, "runtime_updatable_params.max_num_workers")
+	}
+	job := &dataflow.Job{RuntimeUpdatableParams: params}
+	_, err := c.service.Projects.Jobs.Update(projectID, jobID, job).
+		Location(region).
+		UpdateMask(strings.Join(maskFields, ",")).
 		Do()
 	return err
 }

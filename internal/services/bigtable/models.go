@@ -29,4 +29,7 @@ type Cluster struct {
 type TableInfo struct {
 	Name           string
 	ColumnFamilies []string
+	// Granularity is the table's timestamp granularity (e.g. "MILLIS"),
+	// populated only by DescribeTable.
+	Granularity string
 }

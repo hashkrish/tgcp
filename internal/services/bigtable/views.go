@@ -10,8 +10,26 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
-// renderConfirmation renders the instance-delete confirmation dialog.
+// renderConfirmation renders the instance/table-delete and IAM-grant
+// confirmation dialogs.
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "delete-table" {
+		if s.selectedTable == nil {
+			return "Error: No table selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedTable.Name, "table")
+	}
+	if s.pendingAction == "grant" {
+		if s.selectedInstance == nil {
+			return "Error: No instance selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"grant",
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("Grant %s to %s on instance %s?", s.pendingIAMRole, s.pendingIAMMember, s.selectedInstance.Name),
+		)
+	}
 	if s.selectedInstance == nil {
 		return "Error: No instance selected"
 	}
@@ -51,6 +69,22 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewConfirmation {
 		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewCreateTable {
+		return s.tableCreateForm.View()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
+	if s.viewState == ViewUndeleteTable {
+		return s.undeleteTableForm.View()
+	}
+
+	if s.viewState == ViewRestoreTable {
+		return s.restoreTableForm.View()
 	}
 
 	// Filter Bar

@@ -3,6 +3,7 @@ package bigquery
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -29,7 +30,48 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewCreateTable
+	ViewQuery
+	ViewQueryResult
 )
+
+// newCreateTableForm builds the FormModel for creating a new table, with a
+// simple "name:TYPE,name:TYPE" schema shorthand (all fields NULLABLE) --
+// full mode/description-per-field configuration is out of scope.
+func newCreateTableForm() components.FormModel {
+	return components.NewForm("Create Table", []components.FormField{
+		{Label: "Table ID", Placeholder: "my_table", Required: true},
+		{Label: "Schema", Placeholder: "id:STRING,age:INTEGER", Required: true, Validate: validateSchemaShorthand},
+	})
+}
+
+func validateSchemaShorthand(v string) string {
+	if _, errMsg := parseSchemaShorthand(v); errMsg != "" {
+		return errMsg
+	}
+	return ""
+}
+
+// parseSchemaShorthand parses "name:TYPE,name:TYPE" into SchemaField values.
+func parseSchemaShorthand(v string) ([]SchemaField, string) {
+	parts := strings.Split(v, ",")
+	fields := make([]SchemaField, 0, len(parts))
+	for _, part := range parts {
+		nameType := strings.SplitN(strings.TrimSpace(part), ":", 2)
+		if len(nameType) != 2 || nameType[0] == "" || nameType[1] == "" {
+			return nil, fmt.Sprintf("invalid field %q, expected name:TYPE", strings.TrimSpace(part))
+		}
+		fields = append(fields, SchemaField{Name: nameType[0], Type: strings.ToUpper(nameType[1]), Mode: "NULLABLE"})
+	}
+	return fields, ""
+}
+
+// newQueryForm builds the FormModel for running an ad-hoc SQL query.
+func newQueryForm() components.FormModel {
+	return components.NewForm("Run Query", []components.FormField{
+		{Label: "SQL", Placeholder: "SELECT * FROM dataset.table LIMIT 10", Required: true},
+	})
+}
 
 // newDatasetUpdateForm builds the FormModel for updating a dataset's
 // description, seeded with its current value. Labels, access, and default
@@ -49,6 +91,12 @@ type errMsg error
 type actionResultMsg struct {
 	err error
 	msg string
+}
+
+// queryResultMsg carries the result of an ad-hoc SQL query (see RunQuery).
+type queryResultMsg struct {
+	result *QueryResult
+	err    error
 }
 
 // -----------------------------------------------------------------------------
@@ -75,11 +123,18 @@ type Service struct {
 	selectedDataset *Dataset
 	selectedTable   *Table
 
-	createForm components.FormModel
-	updateForm components.FormModel
+	createForm      components.FormModel
+	updateForm      components.FormModel
+	createTableForm components.FormModel
+
+	// Query (data-plane): the SQL form, the last result, and a table built
+	// fresh per query since result columns are dynamic.
+	queryForm   components.FormModel
+	queryResult *QueryResult
+	resultTable *components.StandardTable
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "delete-table"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -131,10 +186,10 @@ func (s *Service) ShortName() string { return "bq" }
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewDatasets {
-		return "Ent:Select  r:Refresh  n:New Dataset  u:Update  d:Delete"
+		return "Ent:Select  r:Refresh  n:New Dataset  u:Update  d:Delete  Q:Run Query"
 	}
 	if s.viewState == ViewTables {
-		return "Ent:Schema  Esc/q:Back"
+		return "Ent:Schema  n:New Table  d:Delete Table  Q:Run Query  Esc/q:Back"
 	}
 	if s.viewState == ViewSchema {
 		return "Esc/q:Back"
@@ -142,8 +197,11 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewCreateTable || s.viewState == ViewQuery {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewQueryResult {
+		return "Esc/q:Back"
 	}
 	return ""
 }
@@ -208,12 +266,18 @@ func (s *Service) Focus() {
 	s.datasetTable.Focus()
 	s.tableTable.Focus()
 	s.schemaTable.Focus()
+	if s.resultTable != nil {
+		s.resultTable.Focus()
+	}
 }
 
 func (s *Service) Blur() {
 	s.datasetTable.Blur()
 	s.tableTable.Blur()
 	s.schemaTable.Blur()
+	if s.resultTable != nil {
+		s.resultTable.Blur()
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -274,6 +338,29 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.pendingAction == "delete-table" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
+			}
+			s.selectedTable = nil
+			s.viewState = ViewTables
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.Refresh(),
+			)
+		}
+		if s.viewState == ViewCreateTable {
+			if msg.err != nil {
+				s.createTableForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			s.viewState = ViewTables
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.Refresh(),
+			)
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
@@ -289,6 +376,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			},
 			s.Refresh(),
 		)
+
+	case queryResultMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			s.err = nil
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
+		}
+		s.queryResult = msg.result
+		cols := make([]table.Column, 0, len(msg.result.Columns))
+		for _, c := range msg.result.Columns {
+			cols = append(cols, table.Column{Title: c, Width: 20})
+		}
+		s.resultTable = components.NewStandardTable(cols)
+		rows := make([]table.Row, 0, len(msg.result.Rows))
+		for _, r := range msg.result.Rows {
+			rows = append(rows, table.Row(r))
+		}
+		s.resultTable.SetRows(rows)
+		s.resultTable.Focus()
+		s.viewState = ViewQueryResult
+		return s, nil
 
 	case tea.WindowSizeMsg:
 		s.datasetTable.HandleWindowSizeDefault(msg)
@@ -341,6 +449,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var actionCmd tea.Cmd
 				if s.pendingAction == "delete" && s.selectedDataset != nil {
 					actionCmd = s.deleteDatasetCmd(*s.selectedDataset)
+				} else if s.pendingAction == "delete-table" && s.selectedDataset != nil && s.selectedTable != nil {
+					actionCmd = s.deleteTableCmd(*s.selectedDataset, *s.selectedTable)
 				}
 				s.viewState = s.actionSource
 				return s, actionCmd
@@ -352,9 +462,53 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, nil
 		}
 
+		if s.viewState == ViewCreateTable {
+			result, formCmd := s.createTableForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewTables
+				return s, nil
+			}
+			if result.Submitted && s.selectedDataset != nil {
+				schema, _ := parseSchemaShorthand(s.createTableForm.Value("Schema"))
+				return s, s.createTableCmd(*s.selectedDataset, s.createTableForm.Value("Table ID"), schema)
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewQuery {
+			result, formCmd := s.queryForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = s.actionSource
+				return s, nil
+			}
+			if result.Submitted {
+				return s, tea.Batch(s.runQueryCmd(s.queryForm.Value("SQL")), s.spinner.Start(""))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewQueryResult {
+			switch msg.String() {
+			case "esc", "q":
+				s.viewState = s.actionSource
+				return s, nil
+			}
+			if s.resultTable != nil {
+				var updatedTable *components.StandardTable
+				updatedTable, cmd = s.resultTable.Update(msg)
+				s.resultTable = updatedTable
+			}
+			return s, cmd
+		}
+
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+		case "Q": // Run ad-hoc SQL query (data-plane)
+			s.queryForm = newQueryForm()
+			s.actionSource = s.viewState
+			s.viewState = ViewQuery
+			return s, nil
 		}
 
 		if s.viewState == ViewDatasets {
@@ -410,6 +564,22 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewSchema
 					return s, tea.Batch(s.fetchSchemaCmd(), s.spinner.Start(""))
 				}
+			}
+			if msg.String() == "n" {
+				if s.selectedDataset != nil {
+					s.createTableForm = newCreateTableForm()
+					s.viewState = ViewCreateTable
+				}
+				return s, nil
+			}
+			if msg.String() == "d" {
+				if s.tableTable.Cursor() >= 0 && s.tableTable.Cursor() < len(s.tables) {
+					s.selectedTable = &s.tables[s.tableTable.Cursor()]
+					s.pendingAction = "delete-table"
+					s.actionSource = ViewTables
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
 			}
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.tableTable.Update(msg)
@@ -480,12 +650,39 @@ func (s *Service) View() string {
 			"Schema",
 		)
 		return lipgloss.JoinVertical(lipgloss.Left, header, s.schemaTable.View())
+	case ViewCreateTable:
+		return s.createTableForm.View()
+	case ViewQuery:
+		return s.queryForm.View()
+	case ViewQueryResult:
+		header := components.Breadcrumb(
+			fmt.Sprintf("Project %s", s.projectID),
+			s.Name(),
+			"Query Result",
+		)
+		summary := ""
+		if s.queryResult != nil {
+			summary = fmt.Sprintf("%d row(s) returned", s.queryResult.RowCount)
+			if s.queryResult.Truncated {
+				summary += fmt.Sprintf(" (showing first %d)", queryResultRowLimit)
+			}
+		}
+		if s.resultTable == nil {
+			return lipgloss.JoinVertical(lipgloss.Left, header, summary)
+		}
+		return lipgloss.JoinVertical(lipgloss.Left, header, summary, "", s.resultTable.View())
 	}
 	return ""
 }
 
-// renderConfirmation renders the dataset-delete confirmation dialog.
+// renderConfirmation renders the dataset/table-delete confirmation dialog.
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "delete-table" {
+		if s.selectedTable == nil {
+			return "Error: No table selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedTable.ID, "table")
+	}
 	if s.selectedDataset == nil {
 		return "Error: No dataset selected"
 	}
@@ -493,7 +690,7 @@ func (s *Service) renderConfirmation() string {
 		s.pendingAction,
 		s.selectedDataset.ID,
 		"dataset",
-		fmt.Sprintf("Are you sure you want to DELETE dataset %s? Only empty datasets can be deleted — this app does not support deleting tables.", s.selectedDataset.ID),
+		fmt.Sprintf("Are you sure you want to DELETE dataset %s? Only empty datasets can be deleted.", s.selectedDataset.ID),
 	)
 }
 
@@ -546,6 +743,47 @@ func (s *Service) updateDatasetCmd(ds Dataset) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating dataset %s...", ds.ID)}
+	}
+}
+
+// createTableCmd fires the CreateTable API call.
+func (s *Service) createTableCmd(ds Dataset, tableID string, schema []SchemaField) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateTable(ds.ID, tableID, schema); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Table %s created", tableID)}
+	}
+}
+
+// deleteTableCmd fires the DeleteTable API call.
+func (s *Service) deleteTableCmd(ds Dataset, t Table) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteTable(ds.ID, t.ID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting table %s...", t.ID)}
+	}
+}
+
+// runQueryCmd executes sql as a BigQuery job and returns its result --
+// the data-plane entry point for insert/show-rows/copy/jobs (see RunQuery).
+func (s *Service) runQueryCmd(sql string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return queryResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		result, err := s.client.RunQuery(s.projectID, sql)
+		if err != nil {
+			return queryResultMsg{err: err}
+		}
+		return queryResultMsg{result: result}
 	}
 }
 

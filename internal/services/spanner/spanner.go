@@ -28,7 +28,39 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewIAMForm
+	ViewQuery
+	ViewQueryResult
 )
+
+// newQueryForm builds the FormModel for the read-only "Execute SQL"
+// data-plane feature: a database ID and a single SQL statement. The
+// statement is re-validated with validateReadOnlySQL on submit so only
+// SELECT/WITH statements can ever be sent.
+func newQueryForm(inst Instance) components.FormModel {
+	return components.NewForm("Execute SQL (read-only): "+inst.Name, []components.FormField{
+		{Label: "Database ID", Placeholder: "my-database", Required: true},
+		{
+			Label:       "SQL Statement",
+			Placeholder: "SELECT * FROM MyTable LIMIT 10",
+			Required:    true,
+			Validate: func(value string) string {
+				if err := validateReadOnlySQL(value); err != nil {
+					return err.Error()
+				}
+				return ""
+			},
+		},
+	})
+}
+
+// newInstanceIAMForm builds the FormModel for granting an IAM role on a Spanner instance.
+func newInstanceIAMForm() components.FormModel {
+	return components.NewForm("Add IAM Binding", []components.FormField{
+		{Label: "Role", Placeholder: "roles/spanner.databaseUser", Required: true},
+		{Label: "Member", Placeholder: "user:name@example.com", Required: true},
+	})
+}
 
 // newInstanceUpdateForm builds the FormModel for updating a Spanner
 // instance's node count, seeded with its current value. DDL update and
@@ -47,6 +79,12 @@ func newInstanceUpdateForm(inst Instance) components.FormModel {
 
 type instancesMsg []Instance
 type errMsg error
+
+// queryResultMsg carries the result of an ExecuteQuery call.
+type queryResultMsg struct {
+	result *QueryResult
+	err    error
+}
 
 // actionResultMsg carries the result of an async action (e.g. instance creation)
 type actionResultMsg struct {
@@ -75,9 +113,22 @@ type Service struct {
 
 	createForm components.FormModel
 	updateForm components.FormModel
+	iamForm    components.FormModel
+
+	// Query State (read-only "Execute SQL" data-plane feature)
+	queryForm   components.FormModel
+	queryResult *QueryResult
+	queryErr    error
+	queryTable  *components.StandardTable
+
+	// pendingIAMRole/pendingIAMMember are captured at form-submit time so
+	// the confirmation dialog and the actual API call use the same values
+	// regardless of what the form fields hold later.
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "grant"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -116,14 +167,17 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		return "r:Refresh  /:Filter  Ent:Detail  n:New Instance"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewIAMForm || s.viewState == ViewQuery {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  u:Update  d:Delete"
+		return "Esc/q:Back  u:Update  d:Delete  i:Add IAM Binding  e:Execute SQL"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
+	}
+	if s.viewState == ViewQueryResult {
+		return "Esc/q:Back"
 	}
 	return "Esc/q:Back"
 }
@@ -168,6 +222,8 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedInstance = nil
+	s.queryResult = nil
+	s.queryErr = nil
 	s.err = nil
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
@@ -219,6 +275,16 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case queryResultMsg:
+		s.spinner.Stop()
+		s.queryResult = msg.result
+		s.queryErr = msg.err
+		if msg.err == nil {
+			s.updateQueryTable(msg.result)
+		}
+		s.viewState = ViewQueryResult
+		return s, nil
+
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
@@ -235,6 +301,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				},
 				s.Refresh(),
 			)
+		}
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			return s, func() tea.Msg {
+				if msg.err != nil {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			}
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
@@ -349,7 +424,66 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "i": // Grant IAM binding
+				if s.selectedInstance != nil {
+					s.iamForm = newInstanceIAMForm()
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			case "e": // Execute SQL (read-only, data-plane)
+				if s.selectedInstance != nil {
+					s.queryForm = newQueryForm(*s.selectedInstance)
+					s.viewState = ViewQuery
+				}
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewQuery {
+			result, formCmd := s.queryForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				database := s.queryForm.Value("Database ID")
+				stmt := s.queryForm.Value("SQL Statement")
+				return s, tea.Batch(s.executeQueryCmd(*s.selectedInstance, database, stmt), s.spinner.Start(""))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewQueryResult {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				s.queryResult = nil
+				s.queryErr = nil
+				return s, nil
+			}
+			if s.queryTable != nil {
+				var updatedTable *components.StandardTable
+				updatedTable, cmd = s.queryTable.Update(msg)
+				s.queryTable = updatedTable
+				return s, cmd
+			}
+		}
+
+		if s.viewState == ViewIAMForm {
+			result, formCmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
@@ -358,6 +492,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var actionCmd tea.Cmd
 				if s.pendingAction == "delete" && s.selectedInstance != nil {
 					actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
+				} else if s.pendingAction == "grant" && s.selectedInstance != nil {
+					actionCmd = s.addIAMBindingCmd(*s.selectedInstance, s.pendingIAMRole, s.pendingIAMMember)
 				}
 				s.viewState = s.actionSource
 				return s, actionCmd
@@ -411,6 +547,63 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating instance %s to %d nodes...", inst.Name, nodeCount)}
 	}
+}
+
+// addIAMBindingCmd fires the AddInstanceIAMBinding API call.
+func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddInstanceIAMBinding(s.projectID, inst.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on %s", role, member, inst.Name)}
+	}
+}
+
+// executeQueryCmd runs a read-only SQL statement against database on inst.
+func (s *Service) executeQueryCmd(inst Instance, database, sqlStatement string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return queryResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		result, err := s.client.ExecuteQuery(s.projectID, inst.Name, database, sqlStatement)
+		if err != nil {
+			return queryResultMsg{err: err}
+		}
+		return queryResultMsg{result: result}
+	}
+}
+
+// updateQueryTable rebuilds s.queryTable's columns and rows from a query
+// result. A fresh StandardTable is created per query since the column set
+// varies with the statement.
+func (s *Service) updateQueryTable(result *QueryResult) {
+	if result == nil {
+		s.queryTable = nil
+		return
+	}
+	columns := make([]table.Column, len(result.Columns))
+	for i, name := range result.Columns {
+		width := len(name) + 4
+		if width < 12 {
+			width = 12
+		}
+		if width > 30 {
+			width = 30
+		}
+		columns[i] = table.Column{Title: name, Width: width}
+	}
+
+	rows := make([]table.Row, len(result.Rows))
+	for i, r := range result.Rows {
+		rows[i] = table.Row(r.Values)
+	}
+
+	t := components.NewStandardTable(columns)
+	t.SetRows(rows)
+	s.queryTable = t
 }
 
 // deleteInstanceCmd triggers deletion of the given Spanner instance

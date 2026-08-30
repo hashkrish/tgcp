@@ -34,6 +34,8 @@ const (
 	ViewIAMForm
 	ViewPublishForm
 	ViewPulledMessages
+	ViewModifyAckDeadlineForm
+	ViewSeekForm
 )
 
 // newPublishForm builds the FormModel for publishing a single text message
@@ -41,6 +43,37 @@ const (
 func newPublishForm(topic Topic) components.FormModel {
 	return components.NewForm("Publish to Topic: "+topic.Name, []components.FormField{
 		{Label: "Message", Placeholder: "message body", Required: true},
+	})
+}
+
+// newModifyAckDeadlineForm builds the FormModel for extending/shortening the
+// ack deadline on the currently-pulled messages of a subscription.
+func newModifyAckDeadlineForm(sub Subscription) components.FormModel {
+	return components.NewForm("Modify Ack Deadline: "+sub.Name, []components.FormField{
+		{Label: "Ack Deadline Seconds", Placeholder: "60", Required: true, Validate: func(v string) string {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || n > 600 {
+				return "must be 0-600"
+			}
+			return ""
+		}},
+	})
+}
+
+// newSeekForm builds the FormModel for seeking a subscription's delivery
+// cursor to a point in time, matching `gcloud pubsub subscriptions seek
+// --time=TIMESTAMP`.
+func newSeekForm(sub Subscription) components.FormModel {
+	return components.NewForm("Seek Subscription: "+sub.Name, []components.FormField{
+		{Label: "Time (RFC3339, or 'now')", Placeholder: "now", Default: "now", Required: true, Validate: func(v string) string {
+			if v == "now" {
+				return ""
+			}
+			if _, err := time.Parse(time.RFC3339, v); err != nil {
+				return "must be RFC3339 (e.g. 2024-01-02T15:04:05Z) or 'now'"
+			}
+			return ""
+		}},
 	})
 }
 
@@ -120,15 +153,20 @@ type Service struct {
 	updateForm components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "grant", "publish", "ack", "modify-ack-deadline", "seek"
 	actionSource  ViewState // Where to return after confirmation
 
-	// IAM: current bindings for the selected topic, and the add-binding
-	// form. pendingIAMRole/pendingIAMMember are captured at form-submit
-	// time so the confirmation dialog and the actual API call use the same
-	// values regardless of what the form fields hold later.
+	// IAM: current bindings for the selected topic or subscription, and the
+	// add-binding form. iamResourceType/iamResourceName record which
+	// resource ViewIAM/ViewIAMForm is currently scoped to ("topic" or
+	// "subscription") since both share the same views. pendingIAMRole/
+	// pendingIAMMember are captured at form-submit time so the confirmation
+	// dialog and the actual API call use the same values regardless of what
+	// the form fields hold later.
 	iamBindings      []IAMBinding
 	iamForm          components.FormModel
+	iamResourceType  string // "topic" or "subscription"
+	iamResourceName  string
 	pendingIAMRole   string
 	pendingIAMMember string
 
@@ -140,6 +178,14 @@ type Service struct {
 	pendingPublishText  string
 	pulledMessages      []PulledMessage
 	pulledMessagesTopic string // subscription name the pulled messages came from
+
+	// Ack-deadline modification form + pending value.
+	modifyAckDeadlineForm components.FormModel
+	pendingAckDeadline    int64
+
+	// Seek form + pending target time.
+	seekForm     components.FormModel
+	pendingSeekT string
 
 	cache *core.Cache
 }
@@ -184,7 +230,7 @@ func (s *Service) HelpText() string {
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	if s.viewState == ViewDetailSub {
-		return "Esc/q:Back  u:Update  x:Detach  d:Delete  P:Pull (no ack)"
+		return "Esc/q:Back  u:Update  x:Detach  d:Delete  i:IAM  P:Pull (no ack)  S:Seek"
 	}
 	if s.viewState == ViewDetailTopic {
 		return "Esc/q:Back  d:Delete  i:IAM  p:Publish"
@@ -195,11 +241,11 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewIAM {
 		return "a:Add Binding  q/Esc:Back"
 	}
-	if s.viewState == ViewIAMForm || s.viewState == ViewPublishForm {
+	if s.viewState == ViewIAMForm || s.viewState == ViewPublishForm || s.viewState == ViewModifyAckDeadlineForm || s.viewState == ViewSeekForm {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewPulledMessages {
-		return "Esc/q:Back (messages not acknowledged)"
+		return "Esc/q:Back  a:Ack All  m:Modify Ack Deadline"
 	}
 	return "Esc/q:Back"
 }
@@ -362,11 +408,42 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			if s.selectedTopic != nil {
+			if s.iamResourceName != "" {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
-					s.fetchIAMCmd(*s.selectedTopic),
+					s.fetchIAMCmd(s.iamResourceType, s.iamResourceName),
 				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "ack" {
+			s.pendingAction = ""
+			s.viewState = ViewDetailSub
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.pulledMessages = nil
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "modify-ack-deadline" {
+			s.pendingAction = ""
+			s.viewState = ViewPulledMessages
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "seek" {
+			s.pendingAction = ""
+			s.viewState = ViewDetailSub
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
 			}
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
@@ -460,11 +537,44 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewIAM
 				return s, nil
 			}
-			if result.Submitted && s.selectedTopic != nil {
+			if result.Submitted && s.iamResourceName != "" {
 				s.pendingIAMRole = s.iamForm.Value("Role")
 				s.pendingIAMMember = s.iamForm.Value("Member")
 				s.pendingAction = "grant"
 				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewModifyAckDeadlineForm {
+			result, formCmd := s.modifyAckDeadlineForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewPulledMessages
+				return s, nil
+			}
+			if result.Submitted && s.selectedSub != nil {
+				n, _ := strconv.Atoi(s.modifyAckDeadlineForm.Value("Ack Deadline Seconds"))
+				s.pendingAckDeadline = int64(n)
+				s.pendingAction = "modify-ack-deadline"
+				s.actionSource = ViewPulledMessages
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewSeekForm {
+			result, formCmd := s.seekForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetailSub
+				return s, nil
+			}
+			if result.Submitted && s.selectedSub != nil {
+				s.pendingSeekT = s.seekForm.Value("Time (RFC3339, or 'now')")
+				s.pendingAction = "seek"
+				s.actionSource = ViewDetailSub
 				s.viewState = ViewConfirmation
 				return s, nil
 			}
@@ -491,6 +601,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc", "q":
 				s.viewState = ViewDetailSub
+			case "a": // Ack all pulled messages
+				if s.selectedSub != nil && len(s.pulledMessages) > 0 {
+					s.pendingAction = "ack"
+					s.actionSource = ViewPulledMessages
+					s.viewState = ViewConfirmation
+				}
+			case "m": // Modify ack deadline of all pulled messages
+				if s.selectedSub != nil && len(s.pulledMessages) > 0 {
+					s.modifyAckDeadlineForm = newModifyAckDeadlineForm(*s.selectedSub)
+					s.viewState = ViewModifyAckDeadlineForm
+				}
 			}
 			return s, nil
 		}
@@ -609,9 +730,16 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
-			case "i": // View IAM bindings — topics only
+			case "i": // View IAM bindings — topics and subscriptions
 				if s.viewState == ViewDetailTopic && s.selectedTopic != nil {
-					return s, tea.Batch(s.fetchIAMCmd(*s.selectedTopic), s.spinner.Start(""))
+					s.iamResourceType = "topic"
+					s.iamResourceName = s.selectedTopic.Name
+					return s, tea.Batch(s.fetchIAMCmd(s.iamResourceType, s.iamResourceName), s.spinner.Start(""))
+				}
+				if s.viewState == ViewDetailSub && s.selectedSub != nil {
+					s.iamResourceType = "subscription"
+					s.iamResourceName = s.selectedSub.Name
+					return s, tea.Batch(s.fetchIAMCmd(s.iamResourceType, s.iamResourceName), s.spinner.Start(""))
 				}
 				return s, nil
 			case "p": // Publish message — topics only
@@ -625,17 +753,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return s, tea.Batch(s.pullCmd(*s.selectedSub), s.spinner.Start(""))
 				}
 				return s, nil
+			case "S": // Seek — subscriptions only
+				if s.viewState == ViewDetailSub && s.selectedSub != nil {
+					s.seekForm = newSeekForm(*s.selectedSub)
+					s.viewState = ViewSeekForm
+				}
+				return s, nil
 			}
 		}
 
 		if s.viewState == ViewIAM {
 			switch msg.String() {
 			case "q", "esc":
-				s.viewState = ViewDetailTopic
+				if s.iamResourceType == "subscription" {
+					s.viewState = ViewDetailSub
+				} else {
+					s.viewState = ViewDetailTopic
+				}
 				return s, nil
 			case "a":
-				if s.selectedTopic != nil {
-					s.iamForm = components.NewIAMAddBindingForm(s.selectedTopic.Name)
+				if s.iamResourceName != "" {
+					s.iamForm = components.NewIAMAddBindingForm(s.iamResourceName)
 					s.viewState = ViewIAMForm
 				}
 				return s, nil
@@ -654,10 +792,16 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				} else if s.pendingAction == "detach" && s.selectedSub != nil {
 					actionCmd = s.detachSubCmd(*s.selectedSub)
-				} else if s.pendingAction == "grant" && s.selectedTopic != nil {
-					actionCmd = s.addIAMBindingCmd(*s.selectedTopic, s.pendingIAMRole, s.pendingIAMMember)
+				} else if s.pendingAction == "grant" && s.iamResourceName != "" {
+					actionCmd = s.addIAMBindingCmd(s.iamResourceType, s.iamResourceName, s.pendingIAMRole, s.pendingIAMMember)
 				} else if s.pendingAction == "publish" && s.selectedTopic != nil {
 					actionCmd = s.publishCmd(*s.selectedTopic, s.pendingPublishText)
+				} else if s.pendingAction == "ack" && s.selectedSub != nil {
+					actionCmd = s.ackCmd(*s.selectedSub, s.pulledAckIDs())
+				} else if s.pendingAction == "modify-ack-deadline" && s.selectedSub != nil {
+					actionCmd = s.modifyAckDeadlineCmd(*s.selectedSub, s.pulledAckIDs(), s.pendingAckDeadline)
+				} else if s.pendingAction == "seek" && s.selectedSub != nil {
+					actionCmd = s.seekCmd(*s.selectedSub, s.pendingSeekT)
 				}
 				// Stay on the originating detail view (and keep
 				// pendingAction "delete") until actionResultMsg arrives —
@@ -769,13 +913,22 @@ func (s *Service) detachSubCmd(sub Subscription) tea.Cmd {
 	}
 }
 
-// fetchIAMCmd fetches the current IAM policy for a topic.
-func (s *Service) fetchIAMCmd(topic Topic) tea.Cmd {
+// fetchIAMCmd fetches the current IAM policy for a topic or subscription,
+// dispatching on resourceType ("topic" or "subscription").
+func (s *Service) fetchIAMCmd(resourceType, name string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
 			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
 		}
-		bindings, err := s.client.GetTopicIAMPolicy(s.projectID, topic.Name)
+		var (
+			bindings []IAMBinding
+			err      error
+		)
+		if resourceType == "subscription" {
+			bindings, err = s.client.GetSubscriptionIAMPolicy(s.projectID, name)
+		} else {
+			bindings, err = s.client.GetTopicIAMPolicy(s.projectID, name)
+		}
 		if err != nil {
 			return iamPolicyMsg{err: err}
 		}
@@ -783,16 +936,81 @@ func (s *Service) fetchIAMCmd(topic Topic) tea.Cmd {
 	}
 }
 
-// addIAMBindingCmd grants role to member on the given topic.
-func (s *Service) addIAMBindingCmd(topic Topic, role, member string) tea.Cmd {
+// addIAMBindingCmd grants role to member on the given topic or subscription.
+func (s *Service) addIAMBindingCmd(resourceType, name, role, member string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
-		if err := s.client.AddTopicIAMBinding(s.projectID, topic.Name, role, member); err != nil {
+		var err error
+		if resourceType == "subscription" {
+			err = s.client.AddSubscriptionIAMBinding(s.projectID, name, role, member)
+		} else {
+			err = s.client.AddTopicIAMBinding(s.projectID, name, role, member)
+		}
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on topic %s", role, member, topic.Name)}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on %s %s", role, member, resourceType, name)}
+	}
+}
+
+// pulledAckIDs returns the ack IDs of the currently-displayed Pull result.
+func (s *Service) pulledAckIDs() []string {
+	ids := make([]string, 0, len(s.pulledMessages))
+	for _, m := range s.pulledMessages {
+		if m.AckID != "" {
+			ids = append(ids, m.AckID)
+		}
+	}
+	return ids
+}
+
+// ackCmd acknowledges every currently-pulled message on sub.
+func (s *Service) ackCmd(sub Subscription, ackIDs []string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.Ack(s.projectID, sub.Name, ackIDs); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Acknowledged %d message(s) on %s", len(ackIDs), sub.Name)}
+	}
+}
+
+// modifyAckDeadlineCmd extends/shortens the ack deadline of every
+// currently-pulled message on sub.
+func (s *Service) modifyAckDeadlineCmd(sub Subscription, ackIDs []string, deadline int64) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ModifyAckDeadline(s.projectID, sub.Name, ackIDs, deadline); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Set ack deadline to %ds for %d message(s)", deadline, len(ackIDs))}
+	}
+}
+
+// seekCmd resets sub's delivery cursor to the given time ("now" or RFC3339).
+func (s *Service) seekCmd(sub Subscription, targetTime string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		t := time.Now()
+		if targetTime != "now" {
+			parsed, err := time.Parse(time.RFC3339, targetTime)
+			if err != nil {
+				return actionResultMsg{err: fmt.Errorf("invalid time: %w", err)}
+			}
+			t = parsed
+		}
+		if err := s.client.SeekToTime(s.projectID, sub.Name, t); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Seeked %s to %s", sub.Name, t.Format(time.RFC3339))}
 	}
 }
 

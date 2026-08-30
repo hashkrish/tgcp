@@ -485,3 +485,66 @@ func (c *Client) DeleteService(projectID, region, name string) error {
 	_, err := c.service.Projects.Locations.Services.Delete(fqName).Do()
 	return err
 }
+
+// GetServiceIAMPolicy reads a Cloud Run service's current IAM policy,
+// matching `gcloud run services get-iam-policy`.
+func (c *Client) GetServiceIAMPolicy(projectID, region, name string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("cloud run client not initialized")
+	}
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, name)
+	policy, err := c.service.Projects.Locations.Services.GetIamPolicy(fqName).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get service IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddServiceIAMBinding grants a role to a member on a Cloud Run service,
+// matching `gcloud run services add-iam-policy-binding`. It fetches the
+// current policy, merges the new binding into it, and writes the whole
+// policy back -- this never drops any existing binding, unlike a raw
+// set-iam-policy.
+func (c *Client) AddServiceIAMBinding(projectID, region, name, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("cloud run client not initialized")
+	}
+	fqName := fmt.Sprintf("projects/%s/locations/%s/services/%s", projectID, region, name)
+	policy, err := c.service.Projects.Locations.Services.GetIamPolicy(fqName).Do()
+	if err != nil {
+		return fmt.Errorf("get service IAM policy: %w", err)
+	}
+	found := false
+	for _, b := range policy.Bindings {
+		if b.Role != role {
+			continue
+		}
+		found = true
+		alreadyMember := false
+		for _, m := range b.Members {
+			if m == member {
+				alreadyMember = true
+				break
+			}
+		}
+		if !alreadyMember {
+			b.Members = append(b.Members, member)
+		}
+		break
+	}
+	if !found {
+		policy.Bindings = append(policy.Bindings, &run.Binding{Role: role, Members: []string{member}})
+	}
+	_, err = c.service.Projects.Locations.Services.SetIamPolicy(fqName, &run.SetIamPolicyRequest{Policy: policy}).Do()
+	return err
+}

@@ -54,3 +54,9 @@ type InstanceGroup struct {
 	AutoscalingOn    bool
 	Status           string // "Stable" or "Updating" (derived from Status.IsStable)
 }
+
+// IAMBinding is a single role -> members pair from a VM instance's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}

@@ -86,6 +86,12 @@ type Revision struct {
 	Conditions []string
 }
 
+// IAMBinding is one role -> members grant from a service's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}
+
 // TrafficSplitEntry pairs a revision name with the percentage of traffic it
 // should receive, for an N-way traffic split (`gcloud run services
 // update-traffic --to-revisions=REV1=P1,REV2=P2,...`).

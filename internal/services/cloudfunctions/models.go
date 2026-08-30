@@ -31,3 +31,9 @@ type Function struct {
 	URL        string // HTTP endpoint, if any (Gen2 services / HTTP-triggered functions)
 	UpdateTime time.Time
 }
+
+// IAMBinding is one role -> members grant from a function's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}

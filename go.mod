@@ -11,8 +11,9 @@ require (
 	cloud.google.com/go/filestore v1.10.3
 	cloud.google.com/go/iam v1.11.0
 	cloud.google.com/go/kms v1.33.0
-	cloud.google.com/go/monitoring v1.24.3
+	cloud.google.com/go/monitoring v1.29.0
 	cloud.google.com/go/scheduler v1.16.0
+	cloud.google.com/go/spanner v1.88.0
 	cloud.google.com/go/storage v1.59.2
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
@@ -35,6 +36,7 @@ require (
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/grafeas v0.3.17 // indirect
 	cloud.google.com/go/longrunning v1.2.0 // indirect
+	github.com/GoogleCloudPlatform/grpc-gcp-go/grpcgcp v1.6.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.32.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.54.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.54.0 // indirect
@@ -75,6 +77,7 @@ require (
 	github.com/spiffe/go-spiffe/v2 v2.6.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
+	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.43.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.67.0 // indirect

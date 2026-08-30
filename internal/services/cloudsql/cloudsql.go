@@ -28,7 +28,30 @@ const (
 	ViewUpdate
 	ViewQuery       // Entering a read-only SQL statement to run (Data-plane)
 	ViewQueryResult // Showing the result of a submitted query
+	ViewDatabases
+	ViewDatabaseCreate
+	ViewUsers
+	ViewUserCreate
+	ViewBackups
+	ViewClone
 )
+
+// newDatabaseCreateForm builds the FormModel for creating a new database on
+// a Cloud SQL instance, matching `gcloud sql databases create`.
+func newDatabaseCreateForm(inst Instance) components.FormModel {
+	return components.NewForm("Create Database: "+inst.Name, []components.FormField{
+		{Label: "Name", Placeholder: "my_database", Required: true},
+	})
+}
+
+// newUserCreateForm builds the FormModel for creating a new database user
+// on a Cloud SQL instance, matching `gcloud sql users create`.
+func newUserCreateForm(inst Instance) components.FormModel {
+	return components.NewForm("Create User: "+inst.Name, []components.FormField{
+		{Label: "Name", Placeholder: "my_user", Required: true},
+		{Label: "Password", Required: true},
+	})
+}
 
 // newInstanceUpdateForm builds the FormModel for updating a Cloud SQL
 // instance's machine tier, seeded with its current value. This is the
@@ -59,6 +82,18 @@ func newQueryForm(inst Instance) components.FormModel {
 				return ""
 			},
 		},
+	})
+}
+
+// newCloneForm builds the FormModel for cloning a Cloud SQL instance,
+// matching `gcloud sql instances clone SOURCE DEST [--point-in-time=...]`.
+// Point In Time is optional (RFC 3339); leaving it blank clones the
+// instance's current state -- there is no separate PITR-restore RPC in the
+// Cloud SQL Admin API, just a clone with CloneContext.PointInTime set.
+func newCloneForm(inst Instance) components.FormModel {
+	return components.NewForm("Clone Instance: "+inst.Name, []components.FormField{
+		{Label: "Destination Name", Placeholder: inst.Name + "-clone", Required: true},
+		{Label: "Point In Time (optional, RFC3339)", Placeholder: "2024-01-15T00:00:00Z"},
 	})
 }
 
@@ -107,6 +142,27 @@ type Service struct {
 	queryErr    error
 	queryTable  *components.StandardTable
 
+	// Databases sub-view state
+	databases        []Database
+	dbTable          *components.StandardTable
+	dbCreateForm     components.FormModel
+	selectedDatabase *Database
+
+	// Users sub-view state
+	users          []DBUser
+	userTable      *components.StandardTable
+	userCreateForm components.FormModel
+	selectedDBUser *DBUser
+
+	// Backups sub-view state (read-only)
+	backups     []Backup
+	backupTable *components.StandardTable
+
+	// Clone state
+	cloneForm        components.FormModel
+	pendingCloneDest string
+	pendingClonePITR string
+
 	// Cache
 	cache *core.Cache
 }
@@ -124,12 +180,33 @@ func NewService(cache *core.Cache) *Service {
 
 	t := components.NewStandardTable(columns)
 
+	dbTable := components.NewStandardTable([]table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Charset", Width: 15},
+		{Title: "Collation", Width: 20},
+	})
+	userTable := components.NewStandardTable([]table.Column{
+		{Title: "Name", Width: 30},
+		{Title: "Host", Width: 20},
+		{Title: "Type", Width: 15},
+	})
+	backupTable := components.NewStandardTable([]table.Column{
+		{Title: "ID", Width: 15},
+		{Title: "Status", Width: 15},
+		{Title: "Type", Width: 15},
+		{Title: "Start Time", Width: 22},
+		{Title: "End Time", Width: 22},
+	})
+
 	svc := &Service{
-		table:     t,
-		filter:    components.NewFilterWithPlaceholder("Filter instances..."),
-		spinner:   components.NewSpinner(),
-		viewState: ViewList,
-		cache:     cache,
+		table:       t,
+		dbTable:     dbTable,
+		userTable:   userTable,
+		backupTable: backupTable,
+		filter:      components.NewFilterWithPlaceholder("Filter instances..."),
+		spinner:     components.NewSpinner(),
+		viewState:   ViewList,
+		cache:       cache,
 	}
 	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredInstances, svc.updateTable)
 	return svc
@@ -148,16 +225,22 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  s:Start  x:Stop  t:Restart  l:Logs  Ent:Detail  n:Create  u:Update  e:Execute SQL  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  s:Start  x:Stop  t:Restart  u:Update  e:Execute SQL  d:Delete"
+		return "Esc/q:Back  s:Start  x:Stop  t:Restart  F:Failover  P:Promote Replica  S:Switchover  C:Clone  D:Databases  U:Users  B:Backups  u:Update  e:Execute SQL  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewQuery {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewQuery || s.viewState == ViewDatabaseCreate || s.viewState == ViewUserCreate || s.viewState == ViewClone {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
-	if s.viewState == ViewQueryResult {
+	if s.viewState == ViewQueryResult || s.viewState == ViewBackups {
 		return "Esc/q:Back"
+	}
+	if s.viewState == ViewDatabases {
+		return "Esc/q:Back  r:Refresh  n:Create  d:Delete"
+	}
+	if s.viewState == ViewUsers {
+		return "Esc/q:Back  r:Refresh  n:Create  d:Delete"
 	}
 	return ""
 }
@@ -207,6 +290,18 @@ type queryResultMsg struct {
 	result *QueryResult
 	err    error
 }
+type databasesMsg struct {
+	databases []Database
+	err       error
+}
+type usersMsg struct {
+	users []DBUser
+	err   error
+}
+type backupsMsg struct {
+	backups []Backup
+	err     error
+}
 
 func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
@@ -248,7 +343,75 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return s, nil
 
+	case databasesMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.databases = msg.databases
+		s.updateDatabaseTable(msg.databases)
+		s.viewState = ViewDatabases
+		return s, nil
+
+	case usersMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.users = msg.users
+		s.updateUserTable(msg.users)
+		s.viewState = ViewUsers
+		return s, nil
+
+	case backupsMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.backups = msg.backups
+		s.updateBackupTable(msg.backups)
+		s.viewState = ViewBackups
+		return s, nil
+
 	case actionResultMsg:
+		// Databases/Users sub-view actions re-fetch just that sub-list on
+		// success instead of the generic instance-list Refresh() below.
+		if s.pendingAction == "db-create" || s.pendingAction == "db-delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedInstance != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchDatabasesCmd(*s.selectedInstance),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "user-create" || s.pendingAction == "user-delete" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedInstance != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchUsersCmd(*s.selectedInstance),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
 		if msg.err != nil {
 			s.err = msg.err
 			return s, func() tea.Msg {
@@ -411,7 +574,163 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewQuery
 				}
 				return s, nil
+			case "F": // Failover (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "failover"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "P": // Promote Replica (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "promote-replica"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "S": // Switchover (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "switchover"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "C": // Clone
+				if s.selectedInstance != nil {
+					s.cloneForm = newCloneForm(*s.selectedInstance)
+					s.viewState = ViewClone
+				}
+				return s, nil
+			case "D": // Databases sub-view
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchDatabasesCmd(*s.selectedInstance))
+				}
+				return s, nil
+			case "U": // Users sub-view
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchUsersCmd(*s.selectedInstance))
+				}
+				return s, nil
+			case "B": // Backups sub-view (read-only)
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchBackupsCmd(*s.selectedInstance))
+				}
+				return s, nil
 			}
+
+		case ViewDatabases:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "r":
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchDatabasesCmd(*s.selectedInstance))
+				}
+			case "n": // Create
+				if s.selectedInstance != nil {
+					s.dbCreateForm = newDatabaseCreateForm(*s.selectedInstance)
+					s.viewState = ViewDatabaseCreate
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if idx := s.dbTable.Cursor(); idx >= 0 && idx < len(s.databases) {
+					s.selectedDatabase = &s.databases[idx]
+					s.pendingAction = "db-delete"
+					s.actionSource = ViewDatabases
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.dbTable.Update(msg)
+			s.dbTable = updatedTable
+			return s, cmd
+
+		case ViewDatabaseCreate:
+			result, fcmd := s.dbCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDatabases
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingAction = "db-create"
+				s.viewState = ViewDatabases
+				return s, s.createDatabaseCmd(*s.selectedInstance, s.dbCreateForm.Value("Name"))
+			}
+			return s, fcmd
+
+		case ViewUsers:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "r":
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchUsersCmd(*s.selectedInstance))
+				}
+			case "n": // Create
+				if s.selectedInstance != nil {
+					s.userCreateForm = newUserCreateForm(*s.selectedInstance)
+					s.viewState = ViewUserCreate
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if idx := s.userTable.Cursor(); idx >= 0 && idx < len(s.users) {
+					s.selectedDBUser = &s.users[idx]
+					s.pendingAction = "user-delete"
+					s.actionSource = ViewUsers
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+			var updatedUserTable *components.StandardTable
+			updatedUserTable, cmd = s.userTable.Update(msg)
+			s.userTable = updatedUserTable
+			return s, cmd
+
+		case ViewUserCreate:
+			result, fcmd := s.userCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewUsers
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingAction = "user-create"
+				s.viewState = ViewUsers
+				return s, s.createUserCmd(*s.selectedInstance, s.userCreateForm.Value("Name"), s.userCreateForm.Value("Password"))
+			}
+			return s, fcmd
+
+		case ViewBackups:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "r":
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchBackupsCmd(*s.selectedInstance))
+				}
+			}
+			var updatedBackupTable *components.StandardTable
+			updatedBackupTable, cmd = s.backupTable.Update(msg)
+			s.backupTable = updatedBackupTable
+			return s, cmd
+
+		case ViewClone:
+			result, fcmd := s.cloneForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingCloneDest = s.cloneForm.Value("Destination Name")
+				s.pendingClonePITR = s.cloneForm.Value("Point In Time (optional, RFC3339)")
+				s.pendingAction = "clone"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, fcmd
 
 		case ViewConfirmation:
 			switch msg.String() {
@@ -437,9 +756,34 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.actionSource = ViewList
 				case "restart":
 					actionCmd = s.restartInstanceCmd(*s.selectedInstance)
+				case "failover":
+					actionCmd = s.failoverInstanceCmd(*s.selectedInstance)
+				case "promote-replica":
+					actionCmd = s.promoteReplicaCmd(*s.selectedInstance)
+				case "switchover":
+					actionCmd = s.switchoverInstanceCmd(*s.selectedInstance)
+				case "clone":
+					if s.selectedInstance != nil {
+						actionCmd = s.cloneInstanceCmd(*s.selectedInstance, s.pendingCloneDest, s.pendingClonePITR)
+					}
+					s.pendingCloneDest = ""
+					s.pendingClonePITR = ""
+				case "db-delete":
+					if s.selectedInstance != nil && s.selectedDatabase != nil {
+						actionCmd = s.deleteDatabaseCmd(*s.selectedInstance, *s.selectedDatabase)
+					}
+				case "user-delete":
+					if s.selectedInstance != nil && s.selectedDBUser != nil {
+						actionCmd = s.deleteUserCmd(*s.selectedInstance, *s.selectedDBUser)
+					}
 				}
 				s.viewState = s.actionSource
-				s.pendingAction = ""
+				// "db-delete"/"user-delete" are reset by the actionResultMsg
+				// handler once the async call resolves, so it knows to
+				// re-fetch that sub-list on success.
+				if s.pendingAction != "db-delete" && s.pendingAction != "user-delete" {
+					s.pendingAction = ""
+				}
 				return s, actionCmd
 
 			case "n", "esc", "q":
@@ -548,6 +892,30 @@ func (s *Service) View() string {
 		return s.renderQueryResult()
 	}
 
+	if s.viewState == ViewDatabases {
+		return s.renderDatabasesView()
+	}
+
+	if s.viewState == ViewDatabaseCreate {
+		return s.dbCreateForm.View()
+	}
+
+	if s.viewState == ViewUsers {
+		return s.renderUsersView()
+	}
+
+	if s.viewState == ViewUserCreate {
+		return s.userCreateForm.View()
+	}
+
+	if s.viewState == ViewBackups {
+		return s.renderBackupsView()
+	}
+
+	if s.viewState == ViewClone {
+		return s.cloneForm.View()
+	}
+
 	// Default: List View
 	var content strings.Builder
 	content.WriteString(components.Breadcrumb(
@@ -618,6 +986,11 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedInstance = nil
+	s.selectedDatabase = nil
+	s.selectedDBUser = nil
+	s.pendingAction = ""
+	s.pendingCloneDest = ""
+	s.pendingClonePITR = ""
 	s.err = nil // Fix: Clear previous errors on reset
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
@@ -647,6 +1020,30 @@ func (s *Service) updateTable(instances []Instance) {
 		}
 	}
 	s.table.SetRows(rows)
+}
+
+func (s *Service) updateDatabaseTable(dbs []Database) {
+	rows := make([]table.Row, len(dbs))
+	for i, d := range dbs {
+		rows[i] = table.Row{d.Name, d.Charset, d.Collation}
+	}
+	s.dbTable.SetRows(rows)
+}
+
+func (s *Service) updateUserTable(users []DBUser) {
+	rows := make([]table.Row, len(users))
+	for i, u := range users {
+		rows[i] = table.Row{u.Name, u.Host, u.Type}
+	}
+	s.userTable.SetRows(rows)
+}
+
+func (s *Service) updateBackupTable(backups []Backup) {
+	rows := make([]table.Row, len(backups))
+	for i, b := range backups {
+		rows[i] = table.Row{fmt.Sprintf("%d", b.ID), b.Status, b.Type, b.StartTime, b.EndTime}
+	}
+	s.backupTable.SetRows(rows)
 }
 
 // getFilteredInstances returns filtered instances based on the query string
@@ -767,5 +1164,140 @@ func (s *Service) restartInstanceCmd(i Instance) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Restarting instance %s...", i.Name)}
+	}
+}
+
+func (s *Service) failoverInstanceCmd(i Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.FailoverInstance(s.projectID, i.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Failing over instance %s...", i.Name)}
+	}
+}
+
+func (s *Service) promoteReplicaCmd(i Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.PromoteReplica(s.projectID, i.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Promoting replica %s...", i.Name)}
+	}
+}
+
+func (s *Service) switchoverInstanceCmd(i Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.SwitchoverInstance(s.projectID, i.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Switching over instance %s...", i.Name)}
+	}
+}
+
+func (s *Service) cloneInstanceCmd(i Instance, destName, pointInTime string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CloneInstance(s.projectID, i.Name, destName, pointInTime); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Cloning instance %s to %s...", i.Name, destName)}
+	}
+}
+
+func (s *Service) fetchDatabasesCmd(i Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return databasesMsg{err: fmt.Errorf("client not initialized")}
+		}
+		dbs, err := s.client.ListDatabases(s.projectID, i.Name)
+		if err != nil {
+			return databasesMsg{err: err}
+		}
+		return databasesMsg{databases: dbs}
+	}
+}
+
+func (s *Service) createDatabaseCmd(i Instance, name string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateDatabase(s.projectID, i.Name, name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating database %s...", name)}
+	}
+}
+
+func (s *Service) deleteDatabaseCmd(i Instance, db Database) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteDatabase(s.projectID, i.Name, db.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting database %s...", db.Name)}
+	}
+}
+
+func (s *Service) fetchUsersCmd(i Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return usersMsg{err: fmt.Errorf("client not initialized")}
+		}
+		users, err := s.client.ListUsers(s.projectID, i.Name)
+		if err != nil {
+			return usersMsg{err: err}
+		}
+		return usersMsg{users: users}
+	}
+}
+
+func (s *Service) createUserCmd(i Instance, name, password string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateUser(s.projectID, i.Name, name, password); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating user %s...", name)}
+	}
+}
+
+func (s *Service) deleteUserCmd(i Instance, u DBUser) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteUser(s.projectID, i.Name, u.Name, u.Host); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleting user %s...", u.Name)}
+	}
+}
+
+func (s *Service) fetchBackupsCmd(i Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return backupsMsg{err: fmt.Errorf("client not initialized")}
+		}
+		backups, err := s.client.ListBackups(s.projectID, i.Name)
+		if err != nil {
+			return backupsMsg{err: err}
+		}
+		return backupsMsg{backups: backups}
 	}
 }

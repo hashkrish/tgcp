@@ -16,3 +16,23 @@ type Queue struct {
 	MaxAttempts      int32
 	MaxRetryDuration string
 }
+
+// IAMBinding is a single role -> members pair from a queue's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}
+
+// Task represents a single Cloud Tasks task (read-only view). Only the
+// HTTP-target request shape is covered -- App Engine-target tasks are
+// deliberately out of scope for the Create flow, matching this codebase's
+// general minimal-viable-scope pattern.
+type Task struct {
+	Name         string // Short task ID
+	URL          string // HTTP target URL, if this is an HTTP task
+	HTTPMethod   string
+	ScheduleTime string
+	CreateTime   string
+	DispatchCnt  int32
+	ResponseCnt  int32
+}

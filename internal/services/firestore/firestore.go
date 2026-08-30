@@ -30,7 +30,47 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewExport
+	ViewImport
+	ViewClone
+	ViewRestore
 )
+
+// newExportForm builds the FormModel for exporting a database to GCS.
+func newExportForm(db Database) components.FormModel {
+	return components.NewForm("Export Database: "+db.Name, []components.FormField{
+		{Label: "Output GCS URI", Placeholder: "gs://my-bucket/exports", Required: true},
+	})
+}
+
+// newImportForm builds the FormModel for importing a prior export back into a database.
+func newImportForm(db Database) components.FormModel {
+	return components.NewForm("Import Database: "+db.Name, []components.FormField{
+		{Label: "Input GCS URI", Placeholder: "gs://my-bucket/exports/2024-01-01T00:00:00_00001", Required: true},
+	})
+}
+
+// newCloneForm builds the FormModel for cloning a database from a
+// point-in-time snapshot, matching `gcloud firestore databases clone
+// --source-database --snapshot-time`. Requires the source database to have
+// PITR enabled and retain that snapshot.
+func newCloneForm(db Database) components.FormModel {
+	return components.NewForm("Clone Database: "+db.Name, []components.FormField{
+		{Label: "New Database ID", Placeholder: db.Name + "-clone", Required: true},
+		{Label: "Snapshot Time (RFC3339)", Placeholder: "2024-01-15T00:00:00Z", Required: true},
+	})
+}
+
+// newRestoreForm builds the FormModel for restoring a database from a
+// backup, matching `gcloud firestore databases restore --source-backup`.
+// This package has no backup create/list flow, so the backup's fully
+// qualified resource name must be supplied directly.
+func newRestoreForm() components.FormModel {
+	return components.NewForm("Restore Database from Backup", []components.FormField{
+		{Label: "New Database ID", Placeholder: "my-restored-db", Required: true},
+		{Label: "Backup Resource Name", Placeholder: "projects/P/locations/L/backups/B", Required: true},
+	})
+}
 
 // newDatabaseUpdateForm builds the FormModel for toggling a database's
 // delete protection state, seeded with its current value. Concurrency
@@ -95,11 +135,15 @@ type Service struct {
 	nsTable           *components.StandardTable
 	kindTable         *components.StandardTable
 
-	createForm components.FormModel
-	updateForm components.FormModel
+	createForm  components.FormModel
+	updateForm  components.FormModel
+	exportForm  components.FormModel
+	importForm  components.FormModel
+	cloneForm   components.FormModel
+	restoreForm components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "bulk-delete"
 	actionSource  ViewState // Where to return after confirmation
 
 	cache *core.Cache
@@ -156,10 +200,10 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  Ent:Kinds  Esc/q:Back"
 	case ViewKinds:
 		return "Esc/q:Back"
-	case ViewCreate, ViewUpdate:
+	case ViewCreate, ViewUpdate, ViewExport, ViewImport, ViewClone, ViewRestore:
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	case ViewDetail:
-		return "Esc/q:Back  u:Update  d:Delete"
+		return "Esc/q:Back  u:Update  d:Delete  e:Export  i:Import  B:Bulk-Delete Docs  C:Clone  R:Restore"
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
 	default:
@@ -300,6 +344,42 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.pendingAction == "bulk-delete" {
+			s.pendingAction = ""
+			return s, func() tea.Msg {
+				if msg.err != nil {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			}
+		}
+		if s.viewState == ViewExport || s.viewState == ViewImport {
+			if msg.err != nil {
+				if s.viewState == ViewExport {
+					s.exportForm.SubmitErr = msg.err.Error()
+				} else {
+					s.importForm.SubmitErr = msg.err.Error()
+				}
+				return s, nil
+			}
+			s.viewState = ViewDetail
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.viewState == ViewClone || s.viewState == ViewRestore {
+			if msg.err != nil {
+				if s.viewState == ViewClone {
+					s.cloneForm.SubmitErr = msg.err.Error()
+				} else {
+					s.restoreForm.SubmitErr = msg.err.Error()
+				}
+				return s, nil
+			}
+			s.viewState = ViewList
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.Refresh(),
+			)
+		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
@@ -426,7 +506,84 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "e": // Export to GCS
+				if s.selectedDB != nil {
+					s.exportForm = newExportForm(*s.selectedDB)
+					s.viewState = ViewExport
+				}
+				return s, nil
+			case "i": // Import from GCS
+				if s.selectedDB != nil {
+					s.importForm = newImportForm(*s.selectedDB)
+					s.viewState = ViewImport
+				}
+				return s, nil
+			case "B": // Bulk-delete all documents (Confirm)
+				if s.selectedDB != nil {
+					s.pendingAction = "bulk-delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "C": // Clone from a point-in-time snapshot
+				if s.selectedDB != nil {
+					s.cloneForm = newCloneForm(*s.selectedDB)
+					s.viewState = ViewClone
+				}
+				return s, nil
+			case "R": // Restore from a backup
+				s.restoreForm = newRestoreForm()
+				s.viewState = ViewRestore
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewClone {
+			result, formCmd := s.cloneForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedDB != nil {
+				return s, s.cloneDatabaseCmd(*s.selectedDB, s.cloneForm.Value("New Database ID"), s.cloneForm.Value("Snapshot Time (RFC3339)"))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewRestore {
+			result, formCmd := s.restoreForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.restoreDatabaseCmd(s.restoreForm.Value("New Database ID"), s.restoreForm.Value("Backup Resource Name"))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewExport {
+			result, formCmd := s.exportForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedDB != nil {
+				return s, s.exportDatabaseCmd(*s.selectedDB, s.exportForm.Value("Output GCS URI"))
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewImport {
+			result, formCmd := s.importForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedDB != nil {
+				return s, s.importDatabaseCmd(*s.selectedDB, s.importForm.Value("Input GCS URI"))
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
@@ -435,6 +592,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				var actionCmd tea.Cmd
 				if s.pendingAction == "delete" && s.selectedDB != nil {
 					actionCmd = s.deleteDatabaseCmd(*s.selectedDB)
+				} else if s.pendingAction == "bulk-delete" && s.selectedDB != nil {
+					actionCmd = s.bulkDeleteDocumentsCmd(*s.selectedDB)
 				}
 				s.viewState = s.actionSource
 				return s, actionCmd
@@ -522,6 +681,74 @@ func (s *Service) deleteDatabaseCmd(db Database) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting database %s...", db.Name)}
+	}
+}
+
+// exportDatabaseCmd starts an export of db to outputURI.
+func (s *Service) exportDatabaseCmd(db Database, outputURI string) tea.Cmd {
+	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ExportDocuments(fullName, outputURI); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Export of %s to %s started", db.Name, outputURI)}
+	}
+}
+
+// importDatabaseCmd starts an import of a prior export at inputURI into db.
+func (s *Service) importDatabaseCmd(db Database, inputURI string) tea.Cmd {
+	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.ImportDocuments(fullName, inputURI); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Import into %s from %s started", db.Name, inputURI)}
+	}
+}
+
+// cloneDatabaseCmd clones db into a new database from a PITR snapshot.
+func (s *Service) cloneDatabaseCmd(db Database, newDatabaseID, snapshotTime string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CloneDatabase(db.ProjectID, db.Name, newDatabaseID, snapshotTime); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Cloning %s to %s...", db.Name, newDatabaseID)}
+	}
+}
+
+// restoreDatabaseCmd restores backupName into a new database.
+func (s *Service) restoreDatabaseCmd(newDatabaseID, backupName string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RestoreDatabase(s.projectID, newDatabaseID, backupName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Restoring %s from backup...", newDatabaseID)}
+	}
+}
+
+// bulkDeleteDocumentsCmd starts a bulk delete of every document in db.
+func (s *Service) bulkDeleteDocumentsCmd(db Database) tea.Cmd {
+	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.BulkDeleteDocuments(fullName); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Bulk delete of all documents in %s started", db.Name)}
 	}
 }
 

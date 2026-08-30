@@ -45,6 +45,8 @@ const (
 	ViewRevisionDetail
 	ViewTagRevision
 	ViewSplitTraffic
+	ViewIAM
+	ViewIAMForm
 )
 
 // newServiceCreateForm builds the FormModel for creating a new Cloud Run service.
@@ -177,6 +179,12 @@ type revisionActionResultMsg struct {
 	msg string
 }
 
+// iamPolicyMsg carries the result of a GetServiceIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
+}
+
 // -----------------------------------------------------------------------------
 // Service Definition
 // -----------------------------------------------------------------------------
@@ -225,6 +233,14 @@ type Service struct {
 
 	// Traffic Split State
 	splitForm components.FormModel
+
+	// IAM State (Services only): current bindings for the selected service,
+	// and the add-binding form. pendingIAMRole/pendingIAMMember are captured
+	// at form-submit time and consumed by the "grant" confirmation.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	// Cache
 	cache *core.Cache
@@ -295,7 +311,7 @@ func (s *Service) HelpText() string {
 	}
 	if s.viewState == ViewDetail {
 		if s.activeTab == TabServices {
-			return "Esc/q:Back  v:Revisions  u:Update  d:Delete"
+			return "Esc/q:Back  v:Revisions  u:Update  i:IAM  d:Delete"
 		}
 		return "Esc/q:Back"
 	}
@@ -305,10 +321,13 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewRevisionDetail {
 		return "Esc/q:Back  p:Promote  t:Tag  T:Untag  d:Delete"
 	}
+	if s.viewState == ViewIAM {
+		return "Esc/q:Back  a:Grant Role"
+	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewTagRevision || s.viewState == ViewSplitTraffic {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewTagRevision || s.viewState == ViewSplitTraffic || s.viewState == ViewIAMForm {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
 	}
 	return ""
@@ -369,6 +388,7 @@ func (s *Service) Reset() {
 	s.pendingAction = ""
 	s.pendingTagValue = ""
 	s.pendingSplit = nil
+	s.iamBindings = nil
 	s.err = nil          // CRITICAL: Always clear errors on reset
 	s.table.SetCursor(0) // Reset table position
 	s.funcTable.SetCursor(0)
@@ -493,11 +513,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
 	case actionResultMsg:
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
+		}
+		if s.viewState == ViewIAM && s.selectedService != nil {
+			// A grant just landed -- re-fetch bindings instead of the
+			// service-list refresh below, which wouldn't reflect it.
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchIAMCmd(*s.selectedService),
+			)
 		}
 		if msg.msg != "" {
 			return s, tea.Batch(
@@ -698,7 +737,41 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "i":
+				if s.activeTab == TabServices && s.selectedService != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedService), s.spinner.Start(""))
+				}
+				return s, nil
 			}
+
+		case ViewIAM:
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedService != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedService.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+
+		case ViewIAMForm:
+			result, fcmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedService != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
 
 		case ViewRevisions:
 			switch msg.String() {
@@ -903,6 +976,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						actionCmd = s.SetTrafficSplitCmd(*s.selectedService, s.pendingSplit)
 					}
 					s.viewState = ViewRevisions
+				case "grant":
+					if s.selectedService != nil {
+						actionCmd = s.addIAMBindingCmd(*s.selectedService, s.pendingIAMRole, s.pendingIAMMember)
+					}
+					s.viewState = ViewIAM
 				}
 				s.pendingAction = ""
 				s.pendingTagValue = ""
@@ -995,8 +1073,36 @@ func (s *Service) View() string {
 		return s.splitForm.View()
 	}
 
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
 	// Default: List View
 	return s.renderWithTabs()
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// service, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedService == nil {
+		return "Error: No service selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Services",
+		s.selectedService.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedService.Name, rows)
 }
 
 func (s *Service) renderWithTabs() string {
@@ -1387,6 +1493,33 @@ func (s *Service) SetTrafficSplitCmd(svc RunService, split []TrafficSplitEntry) 
 			return revisionActionResultMsg{err: err}
 		}
 		return revisionActionResultMsg{msg: fmt.Sprintf("Updated traffic split for %s", svc.Name)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a Cloud Run service.
+func (s *Service) fetchIAMCmd(svc RunService) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetServiceIAMPolicy(s.projectID, svc.Region, svc.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given Cloud Run service.
+func (s *Service) addIAMBindingCmd(svc RunService, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddServiceIAMBinding(s.projectID, svc.Region, svc.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on service %s", role, member, svc.Name)}
 	}
 }
 

@@ -139,6 +139,75 @@ func (c *Client) FailoverInstance(projectID, instanceID, region string) error {
 	return err
 }
 
+// RescheduleMaintenance reschedules an instance's pending maintenance to
+// happen immediately, matching
+// `gcloud redis instances reschedule-maintenance --reschedule-type=IMMEDIATE`.
+// Scheduling to a specific future time (SPECIFIC_TIME) is out of scope for
+// this minimal flow -- immediate and next-available-window (the other
+// common case) cover the vast majority of real usage.
+func (c *Client) RescheduleMaintenance(projectID, instanceID, region string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("redis client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, region, instanceID)
+	_, err := c.service.Projects.Locations.Instances.RescheduleMaintenance(name, &redis.RescheduleMaintenanceRequest{
+		RescheduleType: "IMMEDIATE",
+	}).Do()
+	return err
+}
+
+// ExportInstance exports an instance's data to a GCS RDB file, matching
+// `gcloud redis instances export gs://bucket/file.rdb`.
+func (c *Client) ExportInstance(projectID, instanceID, region, gcsURI string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("redis client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, region, instanceID)
+	_, err := c.service.Projects.Locations.Instances.Export(name, &redis.ExportInstanceRequest{
+		OutputConfig: &redis.OutputConfig{GcsDestination: &redis.GcsDestination{Uri: gcsURI}},
+	}).Do()
+	return err
+}
+
+// ImportInstance imports a GCS RDB file into an instance, matching
+// `gcloud redis instances import gs://bucket/file.rdb`.
+func (c *Client) ImportInstance(projectID, instanceID, region, gcsURI string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("redis client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, region, instanceID)
+	_, err := c.service.Projects.Locations.Instances.Import(name, &redis.ImportInstanceRequest{
+		InputConfig: &redis.InputConfig{GcsSource: &redis.GcsSource{Uri: gcsURI}},
+	}).Do()
+	return err
+}
+
+// GetAuthString reads an AUTH-enabled instance's current auth string,
+// matching `gcloud redis instances get-auth-string`.
+func (c *Client) GetAuthString(projectID, instanceID, region string) (string, error) {
+	if demo.Enabled {
+		return "demo-auth-string", nil
+	}
+	if c.service == nil {
+		return "", fmt.Errorf("redis client not initialized")
+	}
+	name := fmt.Sprintf("projects/%s/locations/%s/instances/%s", projectID, region, instanceID)
+	resp, err := c.service.Projects.Locations.Instances.GetAuthString(name).Do()
+	if err != nil {
+		return "", err
+	}
+	return resp.AuthString, nil
+}
+
 // DeleteInstance deletes a Memorystore Redis instance, matching
 // `gcloud redis instances delete`.
 func (c *Client) DeleteInstance(projectID, instanceID, region string) error {

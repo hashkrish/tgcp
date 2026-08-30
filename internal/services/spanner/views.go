@@ -8,10 +8,18 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
-// renderConfirmation renders the instance-delete confirmation dialog.
+// renderConfirmation renders the instance delete/IAM-grant confirmation dialog.
 func (s *Service) renderConfirmation() string {
 	if s.selectedInstance == nil {
 		return "Error: No instance selected"
+	}
+	if s.pendingAction == "grant" {
+		return components.RenderConfirmationWithMessage(
+			"grant",
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("Grant %s to %s on instance %s?", s.pendingIAMRole, s.pendingIAMMember, s.selectedInstance.Name),
+		)
 	}
 	return components.RenderConfirmationWithMessage(
 		s.pendingAction,
@@ -19,6 +27,42 @@ func (s *Service) renderConfirmation() string {
 		"instance",
 		fmt.Sprintf("Are you sure you want to DELETE instance %s? This destroys every database in it.", s.selectedInstance.Name),
 	)
+}
+
+// renderQueryResult renders the outcome of the read-only "Execute SQL"
+// data-plane feature: either an error, or the returned rows in a table.
+func (s *Service) renderQueryResult() string {
+	instName := ""
+	if s.selectedInstance != nil {
+		instName = s.selectedInstance.Name
+	}
+
+	doc := strings.Builder{}
+	doc.WriteString(components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		instName,
+		"Execute SQL",
+	))
+	doc.WriteString("\n\n")
+
+	if s.queryErr != nil {
+		doc.WriteString(components.RenderError(s.queryErr, s.Name(), "Execute SQL"))
+		return doc.String()
+	}
+
+	if s.queryResult == nil || len(s.queryResult.Columns) == 0 || s.queryTable == nil {
+		doc.WriteString(components.EmptyState("results"))
+		return doc.String()
+	}
+
+	if s.queryResult.Truncated {
+		fmt.Fprintf(&doc, "Showing first %d rows.\n\n", queryRowLimit)
+	}
+
+	doc.WriteString(s.queryTable.View())
+	doc.WriteString("\n")
+	return doc.String()
 }
 
 func (s *Service) View() string {
@@ -45,6 +89,18 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewConfirmation {
 		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
+	if s.viewState == ViewQuery {
+		return s.queryForm.View()
+	}
+
+	if s.viewState == ViewQueryResult {
+		return s.renderQueryResult()
 	}
 
 	// Filter Bar

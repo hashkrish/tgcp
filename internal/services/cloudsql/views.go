@@ -98,8 +98,51 @@ func renderMaintenanceWindow(day, hour int64) string {
 }
 
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "db-delete" {
+		if s.selectedDatabase == nil {
+			return "Error: No database selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedDatabase.Name, "database")
+	}
+	if s.pendingAction == "user-delete" {
+		if s.selectedDBUser == nil {
+			return "Error: No user selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedDBUser.Name, "user")
+	}
 	if s.selectedInstance == nil {
 		return "Error: No instance selected"
+	}
+	if s.pendingAction == "failover" {
+		return components.RenderConfirmationWithMessage(
+			"failover",
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("Fail over instance %s to its standby? Only applicable to REGIONAL (HA) instances.", s.selectedInstance.Name),
+		)
+	}
+	if s.pendingAction == "promote-replica" {
+		return components.RenderConfirmationWithMessage(
+			"promote-replica",
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("Promote replica %s to a standalone primary? This is irreversible.", s.selectedInstance.Name),
+		)
+	}
+	if s.pendingAction == "switchover" {
+		return components.RenderConfirmationWithMessage(
+			"switchover",
+			s.selectedInstance.Name,
+			"instance",
+			fmt.Sprintf("Switch over instance %s with its cross-region replica? Only applicable to instances configured for replication.", s.selectedInstance.Name),
+		)
+	}
+	if s.pendingAction == "clone" {
+		msg := fmt.Sprintf("Clone instance %s to new instance %q?", s.selectedInstance.Name, s.pendingCloneDest)
+		if s.pendingClonePITR != "" {
+			msg = fmt.Sprintf("Clone instance %s to new instance %q as of %s (point-in-time)?", s.selectedInstance.Name, s.pendingCloneDest, s.pendingClonePITR)
+		}
+		return components.RenderConfirmationWithMessage("clone", s.selectedInstance.Name, "instance", msg)
 	}
 	if s.pendingAction == "delete-confirm2" {
 		return components.RenderConfirmationWithMessage(
@@ -115,6 +158,61 @@ func (s *Service) renderConfirmation() string {
 
 func renderState(state InstanceState) string {
 	return components.RenderStatus(string(state))
+}
+
+// renderDatabasesView renders the list of databases on the selected instance.
+func (s *Service) renderDatabasesView() string {
+	if s.selectedInstance == nil {
+		return "Error: No instance selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Instances",
+		s.selectedInstance.Name,
+		"Databases",
+	)
+	if len(s.databases) == 0 {
+		return strings.Join([]string{breadcrumb, "", components.EmptyState("databases")}, "\n")
+	}
+	return strings.Join([]string{breadcrumb, "", s.dbTable.View()}, "\n")
+}
+
+// renderUsersView renders the list of database users on the selected instance.
+func (s *Service) renderUsersView() string {
+	if s.selectedInstance == nil {
+		return "Error: No instance selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Instances",
+		s.selectedInstance.Name,
+		"Users",
+	)
+	if len(s.users) == 0 {
+		return strings.Join([]string{breadcrumb, "", components.EmptyState("users")}, "\n")
+	}
+	return strings.Join([]string{breadcrumb, "", s.userTable.View()}, "\n")
+}
+
+// renderBackupsView renders the read-only list of backup runs on the
+// selected instance.
+func (s *Service) renderBackupsView() string {
+	if s.selectedInstance == nil {
+		return "Error: No instance selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Instances",
+		s.selectedInstance.Name,
+		"Backups",
+	)
+	if len(s.backups) == 0 {
+		return strings.Join([]string{breadcrumb, "", components.EmptyState("backups")}, "\n")
+	}
+	return strings.Join([]string{breadcrumb, "", s.backupTable.View()}, "\n")
 }
 
 // renderQueryResult renders the outcome of the read-only "Execute SQL"

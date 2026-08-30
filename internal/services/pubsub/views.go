@@ -24,14 +24,47 @@ func (s *Service) renderConfirmation() string {
 		)
 	}
 	if s.pendingAction == "grant" {
-		if s.selectedTopic == nil {
-			return "Error: No topic selected"
+		if s.iamResourceName == "" {
+			return "Error: No resource selected"
 		}
 		return components.RenderConfirmationWithMessage(
 			"grant",
-			s.selectedTopic.Name,
-			"topic",
-			components.IAMConfirmMessage("topic", s.selectedTopic.Name, s.pendingIAMRole, s.pendingIAMMember),
+			s.iamResourceName,
+			s.iamResourceType,
+			components.IAMConfirmMessage(s.iamResourceType, s.iamResourceName, s.pendingIAMRole, s.pendingIAMMember),
+		)
+	}
+	if s.pendingAction == "ack" {
+		if s.selectedSub == nil {
+			return "Error: No subscription selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"ack",
+			s.selectedSub.Name,
+			"subscription",
+			fmt.Sprintf("Acknowledge all %d pulled message(s) on %s?", len(s.pulledMessages), s.selectedSub.Name),
+		)
+	}
+	if s.pendingAction == "modify-ack-deadline" {
+		if s.selectedSub == nil {
+			return "Error: No subscription selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"modify-ack-deadline",
+			s.selectedSub.Name,
+			"subscription",
+			fmt.Sprintf("Set ack deadline to %ds for all %d pulled message(s) on %s?", s.pendingAckDeadline, len(s.pulledMessages), s.selectedSub.Name),
+		)
+	}
+	if s.pendingAction == "seek" {
+		if s.selectedSub == nil {
+			return "Error: No subscription selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"seek",
+			s.selectedSub.Name,
+			"subscription",
+			fmt.Sprintf("Seek subscription %s to %s? This may cause redelivery of already-processed messages.", s.selectedSub.Name, s.pendingSeekT),
 		)
 	}
 	if s.actionSource == ViewDetailTopic {
@@ -52,23 +85,28 @@ func (s *Service) renderConfirmation() string {
 }
 
 // renderIAMView renders the current IAM policy bindings for the selected
-// topic, the safety-net read step before allowing an add-binding write.
+// topic or subscription, the safety-net read step before allowing an
+// add-binding write.
 func (s *Service) renderIAMView() string {
-	if s.selectedTopic == nil {
-		return "Error: No topic selected"
+	if s.iamResourceName == "" {
+		return "Error: No resource selected"
+	}
+	listLabel := "Topics"
+	if s.iamResourceType == "subscription" {
+		listLabel = "Subscriptions"
 	}
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project %s", s.projectID),
 		s.Name(),
-		"Topics",
-		s.selectedTopic.Name,
+		listLabel,
+		s.iamResourceName,
 		"IAM",
 	)
 	rows := make([]components.IAMBindingRow, len(s.iamBindings))
 	for i, b := range s.iamBindings {
 		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
 	}
-	return components.RenderIAMBindings(breadcrumb, s.selectedTopic.Name, rows)
+	return components.RenderIAMBindings(breadcrumb, s.iamResourceName, rows)
 }
 
 // renderPulledMessages renders the messages returned by the most recent
@@ -151,6 +189,12 @@ func (s *Service) View() string {
 	}
 	if s.viewState == ViewPulledMessages {
 		return s.renderPulledMessages()
+	}
+	if s.viewState == ViewModifyAckDeadlineForm {
+		return s.modifyAckDeadlineForm.View()
+	}
+	if s.viewState == ViewSeekForm {
+		return s.seekForm.View()
 	}
 
 	// Filter Bar

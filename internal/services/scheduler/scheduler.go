@@ -26,7 +26,10 @@ const (
 	ViewList ViewState = iota
 	ViewDetail
 	ViewCreate
+	ViewCreatePubSub
+	ViewCreateAppEngine
 	ViewUpdate
+	ViewUpdateTarget
 	ViewConfirmation
 )
 
@@ -36,6 +39,45 @@ const (
 func newJobUpdateForm(job Job) components.FormModel {
 	return components.NewForm("Update Job Schedule: "+job.Name, []components.FormField{
 		{Label: "Schedule (cron)", Default: job.Schedule, Placeholder: "*/5 * * * *", Required: true},
+	})
+}
+
+// newPubSubCreateForm builds the FormModel for creating a job with a
+// Pub/Sub target.
+func newPubSubCreateForm() components.FormModel {
+	return components.NewForm("New Job (Pub/Sub target)", []components.FormField{
+		{Label: "Name", Placeholder: "my-job", Required: true},
+		{Label: "Region", Placeholder: "us-central1", Required: true},
+		{Label: "Schedule (cron)", Default: "*/5 * * * *", Required: true},
+		{Label: "Topic", Placeholder: "my-topic", Required: true},
+		{Label: "Message", Placeholder: "message body"},
+	})
+}
+
+// newAppEngineCreateForm builds the FormModel for creating a job with an
+// App Engine target (default service/version).
+func newAppEngineCreateForm() components.FormModel {
+	return components.NewForm("New Job (App Engine target)", []components.FormField{
+		{Label: "Name", Placeholder: "my-job", Required: true},
+		{Label: "Region", Placeholder: "us-central1", Required: true},
+		{Label: "Schedule (cron)", Default: "*/5 * * * *", Required: true},
+		{Label: "Relative URI", Placeholder: "/tasks/handler", Required: true},
+	})
+}
+
+// newUpdateTargetForm builds the FormModel for replacing a job's target
+// destination (not its type -- HTTP jobs get a URI field, Pub/Sub jobs get
+// topic/message fields; App Engine target updates aren't supported by this
+// minimal flow).
+func newUpdateTargetForm(job Job) components.FormModel {
+	if job.TargetType == "Pub/Sub" {
+		return components.NewForm("Update Target: "+job.Name, []components.FormField{
+			{Label: "Topic", Default: job.TargetSummary, Required: true},
+			{Label: "Message", Placeholder: "message body"},
+		})
+	}
+	return components.NewForm("Update Target: "+job.Name, []components.FormField{
+		{Label: "Target URI", Default: job.TargetSummary, Required: true},
 	})
 }
 
@@ -110,12 +152,12 @@ func (s *Service) ShortName() string {
 
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
-		return "r:Refresh  /:Filter  n:New Job (HTTP)  u:Update  Ent:Detail"
+		return "r:Refresh  /:Filter  n:New Job (HTTP)  p:New (Pub/Sub)  a:New (App Engine)  u:Update  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  u:Update  p:Pause  R:Resume  x:Run Now  d:Delete"
+		return "Esc/q:Back  u:Update Schedule  T:Update Target  p:Pause  R:Resume  x:Run Now  d:Delete"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewCreatePubSub || s.viewState == ViewCreateAppEngine || s.viewState == ViewUpdate || s.viewState == ViewUpdateTarget {
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	if s.viewState == ViewConfirmation {
@@ -228,12 +270,19 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if msg.err != nil {
-			if s.viewState == ViewUpdate {
+			if s.viewState == ViewUpdate || s.viewState == ViewUpdateTarget {
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
+		}
+		if s.viewState == ViewUpdateTarget {
+			s.viewState = ViewDetail
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.Refresh(),
+			)
 		}
 		s.viewState = ViewList
 		if msg.msg != "" {
@@ -270,6 +319,30 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, formCmd
 		}
 
+		if s.viewState == ViewCreatePubSub {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.submitCreatePubSubCmd()
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewCreateAppEngine {
+			result, formCmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				return s, s.submitCreateAppEngineCmd()
+			}
+			return s, formCmd
+		}
+
 		if s.viewState == ViewUpdate {
 			result, formCmd := s.updateForm.Update(msg)
 			if result.Cancelled {
@@ -278,6 +351,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if result.Submitted && s.selectedJob != nil {
 				return s, s.submitUpdateCmd(*s.selectedJob)
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewUpdateTarget {
+			result, formCmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedJob != nil {
+				return s, s.submitUpdateTargetCmd(*s.selectedJob)
 			}
 			return s, formCmd
 		}
@@ -307,6 +392,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					{Label: "Target URI", Placeholder: "https://example.com/handler", Required: true},
 				})
 				s.viewState = ViewCreate
+				return s, nil
+			case "p":
+				s.createForm = newPubSubCreateForm()
+				s.viewState = ViewCreatePubSub
+				return s, nil
+			case "a":
+				s.createForm = newAppEngineCreateForm()
+				s.viewState = ViewCreateAppEngine
 				return s, nil
 			case "enter":
 				jobs := s.getFilteredJobs(s.jobs, s.filter.Value())
@@ -339,6 +432,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if s.selectedJob != nil {
 					s.updateForm = newJobUpdateForm(*s.selectedJob)
 					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "T": // Update target (Confirm not needed -- form submit applies directly, like schedule update)
+				if s.selectedJob != nil && s.selectedJob.TargetType != "App Engine" && s.selectedJob.TargetType != "Unknown" {
+					s.updateForm = newUpdateTargetForm(*s.selectedJob)
+					s.viewState = ViewUpdateTarget
 				}
 				return s, nil
 			case "p": // Pause (Confirm)
@@ -418,11 +517,11 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
-	if s.viewState == ViewCreate {
+	if s.viewState == ViewCreate || s.viewState == ViewCreatePubSub || s.viewState == ViewCreateAppEngine {
 		return s.createForm.View()
 	}
 
-	if s.viewState == ViewUpdate {
+	if s.viewState == ViewUpdate || s.viewState == ViewUpdateTarget {
 		return s.updateForm.View()
 	}
 
@@ -476,6 +575,72 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Job %s created in %s", name, region)}
+	}
+}
+
+// submitCreatePubSubCmd fires the CreatePubSubJob API call using the
+// Pub/Sub create form's current values.
+func (s *Service) submitCreatePubSubCmd() tea.Cmd {
+	name := s.createForm.Value("Name")
+	region := s.createForm.Value("Region")
+	schedule := s.createForm.Value("Schedule (cron)")
+	topic := s.createForm.Value("Topic")
+	message := s.createForm.Value("Message")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreatePubSubJob(s.projectID, region, name, schedule, topic, message); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Job %s created in %s", name, region)}
+	}
+}
+
+// submitCreateAppEngineCmd fires the CreateAppEngineJob API call using the
+// App Engine create form's current values.
+func (s *Service) submitCreateAppEngineCmd() tea.Cmd {
+	name := s.createForm.Value("Name")
+	region := s.createForm.Value("Region")
+	schedule := s.createForm.Value("Schedule (cron)")
+	uri := s.createForm.Value("Relative URI")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateAppEngineJob(s.projectID, region, name, schedule, uri); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Job %s created in %s", name, region)}
+	}
+}
+
+// submitUpdateTargetCmd fires the appropriate UpdateJob*Target API call
+// based on job's current target type, using the update-target form's
+// current values.
+func (s *Service) submitUpdateTargetCmd(job Job) tea.Cmd {
+	if job.TargetType == "Pub/Sub" {
+		topic := s.updateForm.Value("Topic")
+		message := s.updateForm.Value("Message")
+		return func() tea.Msg {
+			if s.client == nil {
+				return actionResultMsg{err: fmt.Errorf("client not initialized")}
+			}
+			if err := s.client.UpdateJobPubSubTarget(s.projectID, job.Location, job.Name, topic, message); err != nil {
+				return actionResultMsg{err: err}
+			}
+			return actionResultMsg{msg: fmt.Sprintf("Updated target for job %s", job.Name)}
+		}
+	}
+	uri := s.updateForm.Value("Target URI")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateJobHTTPTarget(s.projectID, job.Location, job.Name, uri); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Updated target for job %s", job.Name)}
 	}
 }
 

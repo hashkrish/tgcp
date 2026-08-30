@@ -79,7 +79,7 @@ func (s *Service) renderDetailView() string {
 			{Key: "Internal IP", Value: i.InternalIP},
 			{Key: "External IP", Value: i.ExternalIP},
 		},
-		FooterHint: "s Start | x Stop | R Reset | z Suspend | Z Resume | h SSH | u Update | d Delete | q Back",
+		FooterHint: "s Start | x Stop | R Reset | z Suspend | Z Resume | M Maintenance | h SSH | i IAM | u Update | d Delete | q Back",
 	})
 
 	doc.WriteString(card)
@@ -93,17 +93,65 @@ func renderStatus(state InstanceState) string {
 
 // renderConfirmation renders a confirmation dialog
 func (s *Service) renderConfirmation() string {
-	if s.pendingAction == "delete-mig" {
+	switch s.pendingAction {
+	case "delete-mig":
 		if s.selectedGroup == nil {
 			return "Error: No instance group selected"
 		}
 		return components.RenderConfirmation("delete", s.selectedGroup.Name, "instance group")
+	case "mig-start":
+		if s.selectedGroup == nil {
+			return "Error: No instance group selected"
+		}
+		return components.RenderConfirmation("start", s.selectedGroup.Name, "instance group")
+	case "mig-stop":
+		if s.selectedGroup == nil {
+			return "Error: No instance group selected"
+		}
+		return components.RenderConfirmation("stop", s.selectedGroup.Name, "instance group")
+	case "mig-replace":
+		if s.selectedGroup == nil {
+			return "Error: No instance group selected"
+		}
+		return components.RenderConfirmationWithMessage("replace", s.selectedGroup.Name, "instance group",
+			fmt.Sprintf("Recreate every instance in MIG %s?", styles.TitleStyle.Render(s.selectedGroup.Name)))
+	case "mig-restart":
+		if s.selectedGroup == nil {
+			return "Error: No instance group selected"
+		}
+		return components.RenderConfirmation("restart", s.selectedGroup.Name, "instance group")
+	case "grant":
+		if s.selectedInstance == nil {
+			return "Error: No instance selected"
+		}
+		return components.RenderConfirmationWithMessage("grant", s.selectedInstance.Name, "instance",
+			components.IAMConfirmMessage("instance", s.selectedInstance.Name, s.pendingIAMRole, s.pendingIAMMember))
 	}
 	if s.selectedInstance == nil {
 		return "Error: No instance selected"
 	}
 
 	return components.RenderConfirmation(s.pendingAction, s.selectedInstance.Name, "instance")
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// VM instance, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedInstance == nil {
+		return "Error: No instance selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Instances",
+		s.selectedInstance.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedInstance.Name, rows)
 }
 
 // renderListView renders the main list view, dispatching to whichever tab

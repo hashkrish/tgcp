@@ -24,3 +24,9 @@ func (d Disk) ShortType() string {
 	parts := strings.Split(d.Type, "/")
 	return parts[len(parts)-1]
 }
+
+// IAMBinding is a single role -> members pair from a disk's IAM policy.
+type IAMBinding struct {
+	Role    string
+	Members []string
+}

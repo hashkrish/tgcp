@@ -29,7 +29,19 @@ const (
 	ViewConfirmation
 	ViewCreate
 	ViewUpdate
+	ViewStartReplication
+	ViewIAM
+	ViewIAMForm
 )
+
+// newStartReplicationForm builds the FormModel for starting async disk
+// replication to a secondary disk, matching `gcloud compute disks
+// start-async-replication --secondary-disk=SECONDARY_DISK_URI`.
+func newStartReplicationForm(disk Disk) components.FormModel {
+	return components.NewForm("Start Async Replication: "+disk.Name, []components.FormField{
+		{Label: "Secondary Disk URI", Placeholder: "projects/PROJECT/zones/ZONE/disks/DISK", Required: true},
+	})
+}
 
 // newDiskUpdateForm builds the FormModel for resizing a disk, seeded with
 // its current size. The Compute API only supports growing a disk, never
@@ -49,6 +61,12 @@ func newDiskUpdateForm(disk Disk) components.FormModel {
 
 type disksMsg []Disk
 type errMsg error
+
+// iamPolicyMsg carries the result of a GetDiskIAMPolicy fetch.
+type iamPolicyMsg struct {
+	err      error
+	bindings []IAMBinding
+}
 
 // actionResultMsg carries the result of an async disk action (e.g. snapshot creation)
 type actionResultMsg struct {
@@ -76,14 +94,26 @@ type Service struct {
 	selectedDisk *Disk
 
 	// Confirmation State
-	pendingAction string    // "snapshot"
-	actionSource  ViewState // Where to return after confirmation
+	pendingAction    string    // "snapshot", "delete", "stop-replication", "start-replication", "grant"
+	actionSource     ViewState // Where to return after confirmation
+	pendingSecondary string    // secondary disk URI staged by the start-replication form
 
 	// Create State
 	createForm components.FormModel
 
 	// Update State
 	updateForm components.FormModel
+
+	// Start Async Replication State
+	startReplicationForm components.FormModel
+
+	// IAM State. pendingIAMRole/pendingIAMMember are captured at
+	// form-submit time so the confirmation dialog and the actual API call
+	// use the same values regardless of what the form fields hold later.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
 
 	cache *core.Cache
 }
@@ -124,13 +154,16 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Ent:Detail  n:Create  u:Update  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  s:Snapshot  u:Update  d:Delete"
+		return "Esc/q:Back  s:Snapshot  a:Start Replication  A:Stop Replication  i:IAM  u:Update  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewStartReplication || s.viewState == ViewIAMForm {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewIAM {
+		return "a:Add Binding  q/Esc:Back"
 	}
 	return ""
 }
@@ -191,6 +224,8 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedDisk = nil
+	s.pendingAction = ""
+	s.iamBindings = nil
 	s.err = nil
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
@@ -234,7 +269,33 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
 	case actionResultMsg:
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedDisk != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedDisk),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -328,6 +389,24 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "a": // Start Async Replication
+				if s.selectedDisk != nil {
+					s.startReplicationForm = newStartReplicationForm(*s.selectedDisk)
+					s.viewState = ViewStartReplication
+				}
+				return s, nil
+			case "A": // Stop Async Replication (Confirm)
+				if s.selectedDisk != nil {
+					s.pendingAction = "stop-replication"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "i": // View IAM bindings
+				if s.selectedDisk != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedDisk), s.spinner.Start(""))
+				}
+				return s, nil
 			case "u": // Update (resize)
 				if s.selectedDisk != nil {
 					s.updateForm = newDiskUpdateForm(*s.selectedDisk)
@@ -353,6 +432,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if s.selectedDisk != nil {
 						actionCmd = s.CreateSnapshotCmd(*s.selectedDisk)
 					}
+				case "stop-replication":
+					if s.selectedDisk != nil {
+						actionCmd = s.StopAsyncReplicationCmd(*s.selectedDisk)
+					}
+				case "start-replication":
+					if s.selectedDisk != nil {
+						actionCmd = s.StartAsyncReplicationCmd(*s.selectedDisk, s.pendingSecondary)
+					}
+				case "grant":
+					if s.selectedDisk != nil {
+						actionCmd = s.addIAMBindingCmd(*s.selectedDisk, s.pendingIAMRole, s.pendingIAMMember)
+					}
 				case "delete":
 					if s.selectedDisk != nil {
 						actionCmd = s.DeleteDiskCmd(*s.selectedDisk)
@@ -364,13 +455,65 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					s.viewState = s.actionSource
 				}
-				s.pendingAction = ""
+				// "grant" is reset by the actionResultMsg handler once the
+				// async call resolves, so it can decide whether to re-fetch
+				// the IAM policy on success.
+				if s.pendingAction != "grant" {
+					s.pendingAction = ""
+				}
 				return s, actionCmd
 			case "n", "esc", "q": // Cancel
 				s.viewState = s.actionSource
 				s.pendingAction = ""
 				return s, nil
 			}
+		}
+
+		if s.viewState == ViewStartReplication {
+			result, fcmd := s.startReplicationForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewDetail
+				return s, nil
+			}
+			if result.Submitted && s.selectedDisk != nil {
+				s.pendingSecondary = s.startReplicationForm.Value("Secondary Disk URI")
+				s.pendingAction = "start-replication"
+				s.actionSource = ViewDetail
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+		}
+
+		if s.viewState == ViewIAM {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedDisk != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedDisk.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewIAMForm {
+			result, fcmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedDisk != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
 		}
 
 		if s.viewState == ViewCreate {
@@ -437,6 +580,18 @@ func (s *Service) View() string {
 		return s.updateForm.View()
 	}
 
+	if s.viewState == ViewStartReplication {
+		return s.startReplicationForm.View()
+	}
+
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
 	return s.renderListView()
 }
 
@@ -476,6 +631,59 @@ func (s *Service) CreateSnapshotCmd(disk Disk) tea.Cmd {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s for disk %s...", snapshotName, disk.Name)}
+	}
+}
+
+// StartAsyncReplicationCmd begins async replication from disk to secondaryDiskURI.
+func (s *Service) StartAsyncReplicationCmd(disk Disk, secondaryDiskURI string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.StartAsyncReplication(s.projectID, disk.Zone, disk.Name, secondaryDiskURI); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Starting async replication for disk %s...", disk.Name)}
+	}
+}
+
+// StopAsyncReplicationCmd stops async replication out of disk.
+func (s *Service) StopAsyncReplicationCmd(disk Disk) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.StopAsyncReplication(s.projectID, disk.Zone, disk.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Stopping async replication for disk %s...", disk.Name)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a disk.
+func (s *Service) fetchIAMCmd(disk Disk) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetDiskIAMPolicy(s.projectID, disk.Zone, disk.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given disk.
+func (s *Service) addIAMBindingCmd(disk Disk, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddDiskIAMBinding(s.projectID, disk.Zone, disk.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on disk %s", role, member, disk.Name)}
 	}
 }
 

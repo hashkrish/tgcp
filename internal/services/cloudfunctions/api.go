@@ -206,6 +206,67 @@ func (c *Client) DeleteFunction(fullName string) error {
 	return err
 }
 
+// GetFunctionIAMPolicy reads a function's current IAM policy, matching
+// `gcloud functions get-iam-policy`. Used as the "look before you grant"
+// read step before AddFunctionIAMBinding.
+func (c *Client) GetFunctionIAMPolicy(fullName string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("client not initialized")
+	}
+	policy, err := c.service.Projects.Locations.Functions.GetIamPolicy(fullName).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get function IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddFunctionIAMBinding grants a role to a member on a function, matching
+// `gcloud functions add-iam-policy-binding`. It fetches the current policy,
+// merges the new binding into it, and writes the whole policy back -- this
+// never drops any existing binding, unlike a raw set-iam-policy.
+func (c *Client) AddFunctionIAMBinding(fullName, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	policy, err := c.service.Projects.Locations.Functions.GetIamPolicy(fullName).Do()
+	if err != nil {
+		return fmt.Errorf("get function IAM policy: %w", err)
+	}
+	found := false
+	for _, b := range policy.Bindings {
+		if b.Role != role {
+			continue
+		}
+		found = true
+		alreadyMember := false
+		for _, m := range b.Members {
+			if m == member {
+				alreadyMember = true
+				break
+			}
+		}
+		if !alreadyMember {
+			b.Members = append(b.Members, member)
+		}
+		break
+	}
+	if !found {
+		policy.Bindings = append(policy.Bindings, &cloudfunctions.Binding{Role: role, Members: []string{member}})
+	}
+	_, err = c.service.Projects.Locations.Functions.SetIamPolicy(fullName, &cloudfunctions.SetIamPolicyRequest{Policy: policy}).Do()
+	return err
+}
+
 // extractRegion pulls the location segment out of a fully qualified
 // function name: projects/{project}/locations/{location}/functions/{name}
 func extractRegion(fullName string) string {

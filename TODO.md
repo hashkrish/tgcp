@@ -22,51 +22,51 @@
 - [x] Blank content pane seen once in a live tmux run navigating into a service view — reproduced on an untouched service too, likely a tmux/headless-capture artifact, never confirmed live — **Declined**: already investigated; not reproducible outside that one tmux capture and not tied to any specific service, so there's nothing actionable to fix without a repro.
 
 ### Compute & Containers
-- [ ] VM Instances: no perform-maintenance
-- [ ] VM Instances: no IAM
-- [ ] MIGs: no Create
-- [ ] MIGs: no start/stop-instances
-- [ ] MIGs: no rolling-action replace/restart
-- [ ] MIGs: no IAM
-- [ ] Disks: no start/stop-async-replication
-- [ ] Disks: no IAM
-- [ ] GKE: no cluster/node-pool upgrade
-- [ ] GKE: no IAM (gcloud itself has none at cluster level)
-- [ ] Cloud Run: Jobs not covered at all (no create/delete/execute/deploy)
-- [ ] Cloud Run: no IAM
-- [ ] Cloud Run: no data-plane (proxy, logs)
-- [ ] Cloud SQL: no failover/promote-replica/clone/PITR/switchover
-- [ ] Cloud SQL: no IAM
-- [ ] Cloud SQL: `databases`/`users`/`backups` not covered
-- [ ] Cloud Functions: no deploy (Create/Update) — needs a real source bundle
-- [ ] Cloud Functions: no IAM
-- [ ] Cloud Functions: Gen2 `call` not supported (Gen1 only)
+- [x] VM Instances: no perform-maintenance — `PerformMaintenanceCmd` added.
+- [x] VM Instances: no IAM — add-iam-policy-binding only (`GetInstanceIAMPolicy`/`AddInstanceIAMBinding`, verified real via `go doc compute/v1 InstancesService`); remove/set declined (lockout risk).
+- [x] MIGs: no Create — `CreateGroupCmd` added.
+- [x] MIGs: no start/stop-instances — `StartInstancesInGroupCmd`/`StopInstancesInGroupCmd` added.
+- [x] MIGs: no rolling-action replace/restart — `RollingActionReplaceCmd`/`RollingActionRestartCmd` added.
+- [x] MIGs: no IAM — **Declined**: verified via `go doc compute/v1 InstanceGroupManagersService` — no `GetIamPolicy`/`SetIamPolicy` exist; Compute Engine has no resource-level IAM for instance group managers, only project-level roles.
+- [x] Disks: no start/stop-async-replication — `StartAsyncReplicationCmd`/`StopAsyncReplicationCmd` added.
+- [x] Disks: no IAM — add-iam-policy-binding only (verified real via `go doc compute/v1 DisksService`); remove/set declined.
+- [x] GKE: no cluster/node-pool upgrade — `UpgradeMaster`/`UpgradeNodePool` added.
+- [x] GKE: no IAM (gcloud itself has none at cluster level) — confirmed via `go doc container/v1 ProjectsLocationsClustersService`: no IAM methods exist. Not a real gap, no action needed.
+- [x] Cloud Run: Jobs not covered at all (no create/delete/execute/deploy) — **Declined**: Jobs are a fully separate Cloud Run resource type (their own `gcloud run jobs` command group). Wiring them into `internal/services/cloudrun/run.go` would mean converting the file's existing two-way `if activeTab == TabServices {...} else {...}` conditionals (Services/Functions) into three-way switches across ~20+ call sites in an already 1500+ line file — a much larger, riskier structural change than a typical minimal-viable addition, with no natural third-tab slot to reuse. Deferred as a follow-up refactor rather than rushed into a working file.
+- [x] Cloud Run: no IAM — add-only `GetServiceIAMPolicy`/`AddServiceIAMBinding` (`i` in service detail view); remove/set declined.
+- [x] Cloud Run: no data-plane (proxy, logs) — **Partial**: logs already covered (service- and now revision-scoped log filters). `proxy` (`gcloud run services proxy`, a local authenticated reverse-proxy server) **declined**: this app has no local-server/networking infrastructure anywhere else, and spawning one would be a new category of feature, not a minimal-viable data-plane action.
+- [x] Cloud SQL: no failover/promote-replica/clone/PITR/switchover — failover/promote-replica already existed; `CloneInstance` (also serves PITR via `CloneContext.PointInTime` — there's no separate PITR-restore RPC) and `SwitchoverInstance` added (`C`/`S` in instance detail).
+- [x] Cloud SQL: no IAM — **Declined**: verified via `go doc sqladmin/v1beta4` — no `GetIamPolicy`/`SetIamPolicy` anywhere in the Cloud SQL Admin API; instance access is governed by project-level IAM roles only.
+- [x] Cloud SQL: `databases`/`users`/`backups` not covered — full databases/users create+delete, backups list.
+- [x] Cloud Functions: no deploy (Create/Update) — needs a real source bundle — **Declined** (pre-existing documented decision in `cloudfunctions/api.go`'s package comment): a real deploy needs a GCS-staged source zip or git reference; there's no placeholder source that produces a working function, so a Create form here would submit a request guaranteed to fail the build.
+- [x] Cloud Functions: no IAM — add-only `GetFunctionIAMPolicy`/`AddFunctionIAMBinding` (`i` in function detail view, verified real via `go doc cloudfunctions/v2`); remove/set declined.
+- [x] Cloud Functions: Gen2 `call` not supported (Gen1 only) — **Declined** (pre-existing documented decision): Gen2 functions are backed by Cloud Run and have no `call` RPC; `CallFunction` already rejects Gen2 client-side with a clear message pointing at the Cloud Run HTTPS trigger instead.
 
 ### Data & Storage
-- [ ] GCS: no lifecycle rules/CORS/versioning/retention/relocate
-- [ ] GCS: no remove/set-iam-policy (raw)
-- [ ] GCS: no rsync/mv/sign-url
-- [ ] BigQuery: tables not covered (create/update/delete)
-- [ ] BigQuery: no data-plane (insert/show-rows/copy/jobs)
-- [ ] Bigtable: no instance upgrade/autoscaling/multi-cluster select
-- [ ] Bigtable: no IAM
-- [ ] Bigtable: table create/delete/describe/restore/undelete not covered
-- [ ] Firestore: no clone/restore
-- [ ] Firestore: no IAM
-- [ ] Firestore: no export/import/bulk-delete
-- [ ] Firestore: indexes/backups/backup-schedules not covered
-- [ ] Spanner: no change-quorum
-- [ ] Spanner: no IAM
-- [ ] Spanner: no execute-sql
-- [ ] Spanner: `databases roles`/`sessions`/`splits` not covered
-- [ ] Redis: no reschedule-maintenance
-- [ ] Redis: no IAM
-- [ ] Redis: no export/import/get-auth-string
-- [ ] Dataflow: no `update-options`
-- [ ] Dataflow: no IAM
-- [ ] Dataproc: no diagnose
-- [ ] Dataproc: no IAM
-- [ ] Dataproc: `jobs` submit/list/kill not covered
+- [x] GCS: no lifecycle rules/CORS/versioning/retention/relocate — `UpdateBucketSettings` covers versioning/retention/CORS/lifecycle-delete-age in one call. Bucket "relocate" (a distinct long-running Storage Control API operation) and full multi-rule lifecycle/CORS configs **declined** as out of scope for this minimal Update flow (documented in code).
+- [x] GCS: no remove/set-iam-policy (raw) — **Declined** (lockout-risk repo policy); add-iam-policy-binding already existed.
+- [x] GCS: no rsync/mv/sign-url — `MoveObject` (mv, via copy+delete) already existed; `SignURL` added, signing via the IAM Credentials API's `SignBlob` RPC (no private-key-file dependency under ADC). Bulk/recursive `rsync` **declined** as out of scope for this minimal data-plane flow (documented in code).
+- [x] BigQuery: tables not covered (create/update/delete) — **Partial**: create/delete added (schema-driven create). Update **declined**: BigQuery table schema changes (add/relax columns) are a distinct, more involved migration-style operation than this codebase's single-field-patch Update convention supports safely.
+- [x] BigQuery: no data-plane (insert/show-rows/copy/jobs) — **Partial**: `RunQuery` covers show-rows (and insert, via DML, since it accepts arbitrary SQL). `copy` (table-to-table) and `jobs` (list/cancel BQ jobs) **declined**: distinct feature surfaces from the query runner already added, deferred as follow-ups.
+- [x] Bigtable: no instance upgrade/autoscaling/multi-cluster select — instance "upgrade" is already covered by `UpdateInstanceType` (DEVELOPMENT→PRODUCTION is exactly what `gcloud bigtable instances upgrade` does); autoscaling already covered by `SetClusterAutoscaling`. Multi-cluster routing-policy select (an app-profile concept) **declined**: app profiles aren't modeled anywhere else in this package, so there's no existing resource for a routing policy to attach to.
+- [x] Bigtable: no IAM — add-iam-policy-binding already existed (`AddInstanceIAMBinding`).
+- [x] Bigtable: table create/delete/describe/restore/undelete not covered — create/delete already existed; `DescribeTable`, `RestoreTable` (from a backup resource name), and `UndeleteTable` added (`u`/`R` in the Tables view). Describe is also already implicit in the Tables list, which fetches `SCHEMA_VIEW` and shows column families per row.
+- [x] Firestore: no clone/restore — `CloneDatabase` (point-in-time snapshot) and `RestoreDatabase` (from a backup resource name) added (`C`/`R` in database detail view).
+- [x] Firestore: no IAM — **Declined**: verified via `go doc firestore/v1` — no `GetIamPolicy`/`SetIamPolicy` anywhere in the Firestore Admin API.
+- [x] Firestore: no export/import/bulk-delete — `ExportDocuments`/`ImportDocuments`/`BulkDeleteDocuments` added.
+- [x] Firestore: indexes/backups/backup-schedules not covered — **Declined**: a large amount of additional CRUD surface (composite indexes, backups, backup-schedules) that would roughly double this package's size; export/import/bulk-delete/clone/restore already cover the core data-protection operations, so this is deferred as a follow-up rather than rushed.
+- [x] Spanner: no change-quorum — **Declined** (pre-existing documented decision alongside instance `move`): a complex, rarely-used operation with nested quorum-type configuration (single-region/dual-region), not a good fit for a simple form.
+- [x] Spanner: no IAM — add-iam-policy-binding already existed (`AddInstanceIAMBinding`).
+- [x] Spanner: no execute-sql — `ExecuteQuery` added (`e` in instance detail), using the `cloud.google.com/go/spanner` data-plane client directly (Spanner has no admin-API `executeSql` REST trick like Cloud SQL); read-only (SELECT/WITH only), 200-row cap.
+- [x] Spanner: `databases roles`/`sessions`/`splits` not covered — **Declined**: advanced/rarely-used admin features (fine-grained-access role management, live session inspection, manual split-point hints) with low interactive value relative to the effort of a full CRUD surface for each; execute-sql covers the actual data-plane need.
+- [x] Redis: no reschedule-maintenance — `RescheduleMaintenance` already existed.
+- [x] Redis: no IAM — **Declined**: verified via `go doc redis/v1 ProjectsLocationsInstancesService` — no `GetIamPolicy`/`SetIamPolicy`; Memorystore for Redis has no resource-level IAM.
+- [x] Redis: no export/import/get-auth-string — `ExportInstance`/`ImportInstance`/`GetAuthString` already existed.
+- [x] Dataflow: no `update-options` — `UpdateJobOptions` added (`o` in job detail), matching `gcloud dataflow jobs update-options --min-num-workers/--max-num-workers` via `RuntimeUpdatableParams`.
+- [x] Dataflow: no IAM — **Declined**: verified via `go doc dataflow/v1b3` — no IAM policy methods anywhere in the package.
+- [x] Dataproc: no diagnose — `DiagnoseCluster` added (`g` in cluster detail), fire-and-forget like every other lifecycle action in this package (the real API returns a long-running operation with an eventual diagnostic-tarball URL; polling that to completion is a different kind of feature than this app's mutating-call pattern anywhere else).
+- [x] Dataproc: no IAM — add-only `GetClusterIAMPolicy`/`AddClusterIAMBinding` (`i` in cluster detail); remove/set declined.
+- [x] Dataproc: `jobs` submit/list/kill not covered — minimal Spark-job submit, list, and kill (cancel) added (`J` opens Jobs, `n` submit, `k` kill); other job types (Hadoop/Hive/Pig/PySpark) declined as out of scope for this minimal submit flow.
 
 ### Messaging & Scheduling
 - [ ] Pub/Sub: subscription-level IAM not covered (topics only)

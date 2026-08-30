@@ -185,6 +185,201 @@ func (c *Client) RestartInstance(projectID, name string) error {
 	return err
 }
 
+// FailoverInstance triggers a failover from a High Availability primary to
+// its standby, matching `gcloud sql instances failover`. Only applicable to
+// instances with AvailabilityType REGIONAL; the API rejects the call
+// otherwise, and that error is surfaced to the caller as-is.
+func (c *Client) FailoverInstance(projectID, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	_, err := c.service.Instances.Failover(projectID, name, &sqladmin.InstancesFailoverRequest{}).Do()
+	return err
+}
+
+// PromoteReplica promotes a read replica to a standalone primary instance,
+// matching `gcloud sql instances promote-replica`. This is irreversible:
+// once promoted, the instance stops replicating from its former primary.
+func (c *Client) PromoteReplica(projectID, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	_, err := c.service.Instances.PromoteReplica(projectID, name).Do()
+	return err
+}
+
+// CloneInstance clones a Cloud SQL instance into a new instance named
+// destName, matching `gcloud sql instances clone`. If pointInTime is
+// non-empty (RFC 3339), the clone is taken as of that point in time
+// instead of the current state -- this is also how point-in-time recovery
+// works in the Cloud SQL Admin API: there is no separate PITR-restore RPC,
+// just a clone with CloneContext.PointInTime set.
+func (c *Client) CloneInstance(projectID, name, destName, pointInTime string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	req := &sqladmin.InstancesCloneRequest{
+		CloneContext: &sqladmin.CloneContext{
+			DestinationInstanceName: destName,
+			PointInTime:             pointInTime,
+		},
+	}
+	_, err := c.service.Instances.Clone(projectID, name, req).Do()
+	return err
+}
+
+// SwitchoverInstance triggers a planned switchover between a Cloud SQL
+// primary and its cross-region replica, matching `gcloud sql instances
+// switchover`. Only applicable to instances configured for replication;
+// the API rejects the call otherwise.
+func (c *Client) SwitchoverInstance(projectID, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	_, err := c.service.Instances.Switchover(projectID, name).Do()
+	return err
+}
+
+// ListDatabases lists the databases on a Cloud SQL instance, matching
+// `gcloud sql databases list`.
+func (c *Client) ListDatabases(projectID, instance string) ([]Database, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("sql client not initialized")
+	}
+	resp, err := c.service.Databases.List(projectID, instance).Do()
+	if err != nil {
+		return nil, err
+	}
+	dbs := make([]Database, 0, len(resp.Items))
+	for _, d := range resp.Items {
+		dbs = append(dbs, Database{Name: d.Name, Charset: d.Charset, Collation: d.Collation})
+	}
+	return dbs, nil
+}
+
+// CreateDatabase creates a new database on a Cloud SQL instance, matching
+// `gcloud sql databases create`.
+func (c *Client) CreateDatabase(projectID, instance, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	_, err := c.service.Databases.Insert(projectID, instance, &sqladmin.Database{Name: name}).Do()
+	return err
+}
+
+// DeleteDatabase deletes a database from a Cloud SQL instance, matching
+// `gcloud sql databases delete`. This permanently destroys all data in the
+// database with no undo.
+func (c *Client) DeleteDatabase(projectID, instance, name string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	_, err := c.service.Databases.Delete(projectID, instance, name).Do()
+	return err
+}
+
+// ListUsers lists the database users on a Cloud SQL instance, matching
+// `gcloud sql users list`.
+func (c *Client) ListUsers(projectID, instance string) ([]DBUser, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("sql client not initialized")
+	}
+	resp, err := c.service.Users.List(projectID, instance).Do()
+	if err != nil {
+		return nil, err
+	}
+	users := make([]DBUser, 0, len(resp.Items))
+	for _, u := range resp.Items {
+		users = append(users, DBUser{Name: u.Name, Host: u.Host, Type: u.Type})
+	}
+	return users, nil
+}
+
+// CreateUser creates a new database user on a Cloud SQL instance, matching
+// `gcloud sql users create`.
+func (c *Client) CreateUser(projectID, instance, name, password string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	_, err := c.service.Users.Insert(projectID, instance, &sqladmin.User{Name: name, Password: password}).Do()
+	return err
+}
+
+// DeleteUser deletes a database user from a Cloud SQL instance, matching
+// `gcloud sql users delete`. host identifies which host-scoped user to
+// delete (MySQL-style host wildcards); pass "" for engines without
+// host-scoped users (Postgres, SQL Server).
+func (c *Client) DeleteUser(projectID, instance, name, host string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("sql client not initialized")
+	}
+	call := c.service.Users.Delete(projectID, instance).Name(name)
+	if host != "" {
+		call = call.Host(host)
+	}
+	_, err := call.Do()
+	return err
+}
+
+// ListBackups lists the automated/on-demand backup runs for a Cloud SQL
+// instance, matching `gcloud sql backups list`. Read-only -- there is no
+// Create/Delete flow for backups in this minimal viable coverage, since a
+// backup run is normally driven by the instance's automated backup
+// schedule rather than ad hoc from this TUI.
+func (c *Client) ListBackups(projectID, instance string) ([]Backup, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("sql client not initialized")
+	}
+	resp, err := c.service.BackupRuns.List(projectID, instance).Do()
+	if err != nil {
+		return nil, err
+	}
+	backups := make([]Backup, 0, len(resp.Items))
+	for _, b := range resp.Items {
+		backups = append(backups, Backup{
+			ID:        b.Id,
+			Status:    b.Status,
+			Type:      b.Type,
+			StartTime: b.StartTime,
+			EndTime:   b.EndTime,
+		})
+	}
+	return backups, nil
+}
+
 // writeKeywordRe matches SQL keywords that mutate data or schema. It is
 // checked against the whole statement body (not just its prefix) so that a
 // disallowed write hidden inside a CTE -- e.g.

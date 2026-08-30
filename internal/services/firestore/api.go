@@ -122,6 +122,98 @@ func (c *Client) DeleteDatabase(databaseName string) error {
 	return err
 }
 
+// ExportDocuments starts a long-running export of a Firestore database to a
+// GCS bucket, matching `gcloud firestore export gs://bucket`. It only
+// kicks off the operation -- polling for completion is out of scope, same
+// as every other long-running op in this app (Create/Delete database, etc.
+// all just fire-and-report "started").
+func (c *Client) ExportDocuments(databaseName, outputURIPrefix string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	_, err := c.firestoreSvc.Projects.Databases.ExportDocuments(databaseName, &firestore.GoogleFirestoreAdminV1ExportDocumentsRequest{
+		OutputUriPrefix: outputURIPrefix,
+	}).Do()
+	return err
+}
+
+// ImportDocuments starts a long-running import of a prior export back into
+// a Firestore database, matching `gcloud firestore import gs://bucket/path`.
+func (c *Client) ImportDocuments(databaseName, inputURIPrefix string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	_, err := c.firestoreSvc.Projects.Databases.ImportDocuments(databaseName, &firestore.GoogleFirestoreAdminV1ImportDocumentsRequest{
+		InputUriPrefix: inputURIPrefix,
+	}).Do()
+	return err
+}
+
+// BulkDeleteDocuments starts a long-running bulk delete of every document
+// in every collection of a database, matching
+// `gcloud firestore bulk-delete --collection-ids=*` (all collections, since
+// this app has no per-collection browser to pick a subset from).
+func (c *Client) BulkDeleteDocuments(databaseName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	_, err := c.firestoreSvc.Projects.Databases.BulkDeleteDocuments(databaseName, &firestore.GoogleFirestoreAdminV1BulkDeleteDocumentsRequest{}).Do()
+	return err
+}
+
+// CloneDatabase creates a new database as a point-in-time clone of an
+// existing one, matching `gcloud firestore databases clone
+// --source-database --snapshot-time`. snapshotTime is RFC 3339; the source
+// database must have PITR enabled and retain that snapshot.
+func (c *Client) CloneDatabase(projectID, sourceDatabaseID, newDatabaseID, snapshotTime string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s", projectID)
+	req := &firestore.GoogleFirestoreAdminV1CloneDatabaseRequest{
+		DatabaseId: newDatabaseID,
+		PitrSnapshot: &firestore.GoogleFirestoreAdminV1PitrSnapshot{
+			Database:     fmt.Sprintf("projects/%s/databases/%s", projectID, sourceDatabaseID),
+			SnapshotTime: snapshotTime,
+		},
+	}
+	_, err := c.firestoreSvc.Projects.Databases.Clone(parent, req).Do()
+	return err
+}
+
+// RestoreDatabase creates a new database by restoring a backup into it,
+// matching `gcloud firestore databases restore --source-backup`.
+// backupName is the backup's fully qualified resource name
+// (projects/{p}/locations/{l}/backups/{b}) -- this package has no backup
+// create/list flow, so the caller supplies it directly.
+func (c *Client) RestoreDatabase(projectID, newDatabaseID, backupName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.firestoreSvc == nil {
+		return fmt.Errorf("firestore client not initialized")
+	}
+	parent := fmt.Sprintf("projects/%s", projectID)
+	req := &firestore.GoogleFirestoreAdminV1RestoreDatabaseRequest{
+		DatabaseId: newDatabaseID,
+		Backup:     backupName,
+	}
+	_, err := c.firestoreSvc.Projects.Databases.Restore(parent, req).Do()
+	return err
+}
+
 // ListNamespaces lists all namespaces in a Datastore mode database
 func (c *Client) ListNamespaces(projectID, databaseID string) ([]Namespace, error) {
 	if demo.Enabled {

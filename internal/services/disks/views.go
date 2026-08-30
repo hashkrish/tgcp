@@ -16,7 +16,37 @@ func (s *Service) renderConfirmation() string {
 		return "Error: No disk selected"
 	}
 
+	if s.pendingAction == "grant" {
+		return components.RenderConfirmationWithMessage("grant", s.selectedDisk.Name, "disk",
+			components.IAMConfirmMessage("disk", s.selectedDisk.Name, s.pendingIAMRole, s.pendingIAMMember))
+	}
+	if s.pendingAction == "start-replication" {
+		return components.RenderConfirmationWithMessage("start-replication", s.selectedDisk.Name, "disk",
+			fmt.Sprintf("Start async replication from disk %s to %s?",
+				styles.TitleStyle.Render(s.selectedDisk.Name), s.pendingSecondary))
+	}
+
 	return components.RenderConfirmation(s.pendingAction, s.selectedDisk.Name, "disk")
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// disk, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedDisk == nil {
+		return "Error: No disk selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Disks",
+		s.selectedDisk.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedDisk.Name, rows)
 }
 
 // formatLastAttach formats the disk's LastAttachTimestamp (RFC3339) for display.

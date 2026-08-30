@@ -8,10 +8,18 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
-// renderConfirmation renders the database-delete confirmation dialog.
+// renderConfirmation renders the database delete/bulk-delete confirmation dialog.
 func (s *Service) renderConfirmation() string {
 	if s.selectedDB == nil {
 		return "Error: No database selected"
+	}
+	if s.pendingAction == "bulk-delete" {
+		return components.RenderConfirmationWithMessage(
+			"delete",
+			s.selectedDB.Name,
+			"database",
+			fmt.Sprintf("Are you sure you want to bulk-delete EVERY document in %s? This does not delete the database itself, only its data, and cannot be undone.", s.selectedDB.Name),
+		)
 	}
 	return components.RenderConfirmationWithMessage(
 		s.pendingAction,
@@ -42,6 +50,14 @@ func (s *Service) View() string {
 		return s.createForm.View()
 	case ViewUpdate:
 		return s.updateForm.View()
+	case ViewExport:
+		return s.exportForm.View()
+	case ViewImport:
+		return s.importForm.View()
+	case ViewClone:
+		return s.cloneForm.View()
+	case ViewRestore:
+		return s.restoreForm.View()
 	case ViewConfirmation:
 		return s.renderConfirmation()
 	}

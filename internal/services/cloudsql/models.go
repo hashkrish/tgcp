@@ -44,6 +44,29 @@ type Instance struct {
 	PointInTimeRecovery bool
 }
 
+// Database is a single database on a Cloud SQL instance.
+type Database struct {
+	Name      string
+	Charset   string
+	Collation string
+}
+
+// DBUser is a single database user on a Cloud SQL instance.
+type DBUser struct {
+	Name string
+	Host string // MySQL-style host scope; empty for engines without one
+	Type string
+}
+
+// Backup is a single backup run on a Cloud SQL instance.
+type Backup struct {
+	ID        int64
+	Status    string
+	Type      string
+	StartTime string
+	EndTime   string
+}
+
 // QueryColumn describes one column of a QueryResult.
 type QueryColumn struct {
 	Name string

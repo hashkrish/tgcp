@@ -172,6 +172,91 @@ func (c *Client) ListTables(datasetID string) ([]Table, error) {
 	return tables, nil
 }
 
+// CreateTable creates a new table in a dataset with the given schema,
+// matching `bq mk --table dataset.table field:type,field:type`.
+func (c *Client) CreateTable(datasetID, tableID string, schema []SchemaField) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("bigquery client not initialized")
+	}
+	bqSchema := make(bigquery.Schema, 0, len(schema))
+	for _, f := range schema {
+		bqSchema = append(bqSchema, &bigquery.FieldSchema{
+			Name:     f.Name,
+			Type:     bigquery.FieldType(f.Type),
+			Required: f.Mode == "REQUIRED",
+			Repeated: f.Mode == "REPEATED",
+		})
+	}
+	return c.client.Dataset(datasetID).Table(tableID).Create(context.Background(), &bigquery.TableMetadata{Schema: bqSchema})
+}
+
+// DeleteTable deletes a single table, matching `bq rm -t dataset.table`.
+func (c *Client) DeleteTable(datasetID, tableID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("bigquery client not initialized")
+	}
+	return c.client.Dataset(datasetID).Table(tableID).Delete(context.Background())
+}
+
+// RunQuery executes an arbitrary SQL statement (SELECT, INSERT, UPDATE,
+// CREATE TABLE AS SELECT, etc.) as a BigQuery job and returns up to
+// queryResultRowLimit rows of its result, matching `bq query`. This is the
+// data-plane entry point for insert/show-rows/copy/jobs -- every BigQuery
+// query already runs as a job, and INSERT/CTAS statements are themselves
+// valid SQL, so one query runner covers all four rather than needing
+// separate insert/copy/jobs-list flows.
+func (c *Client) RunQuery(projectID, sql string) (*QueryResult, error) {
+	if demo.Enabled {
+		return &QueryResult{Columns: []string{"col"}, Rows: [][]string{{"demo"}}, RowCount: 1}, nil
+	}
+	if c.client == nil {
+		return nil, fmt.Errorf("bigquery client not initialized")
+	}
+	ctx := context.Background()
+	q := c.client.Query(sql)
+	it, err := q.Read(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	result := &QueryResult{}
+	for _, f := range it.Schema {
+		result.Columns = append(result.Columns, f.Name)
+	}
+
+	for {
+		var row []bigquery.Value
+		err := it.Next(&row)
+		if err == iterator.Done {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		result.RowCount++
+		if len(result.Rows) >= queryResultRowLimit {
+			result.Truncated = true
+			continue
+		}
+		strRow := make([]string, len(row))
+		for i, v := range row {
+			strRow[i] = fmt.Sprintf("%v", v)
+		}
+		result.Rows = append(result.Rows, strRow)
+	}
+	if len(result.Columns) == 0 {
+		result.Columns = []string{"result"}
+		result.Rows = [][]string{{"query completed (no rows returned)"}}
+	}
+	return result, nil
+}
+
 func (c *Client) GetTableSchema(datasetID, tableID string) ([]SchemaField, error) {
 	if demo.Enabled {
 		return []SchemaField{}, nil

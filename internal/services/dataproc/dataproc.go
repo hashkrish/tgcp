@@ -29,6 +29,10 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewConfirmation
+	ViewIAM
+	ViewIAMForm
+	ViewJobs
+	ViewJobSubmit
 )
 
 // newClusterUpdateForm builds the FormModel for resizing a cluster's
@@ -47,6 +51,14 @@ func newClusterUpdateForm(cluster Cluster) components.FormModel {
 	})
 }
 
+// newSparkJobForm builds the FormModel for submitting a minimal Spark job.
+func newSparkJobForm(cluster Cluster) components.FormModel {
+	return components.NewForm("Submit Spark Job: "+cluster.Name, []components.FormField{
+		{Label: "Main Class", Placeholder: "org.apache.spark.examples.SparkPi", Required: true},
+		{Label: "Jar URI", Placeholder: "file:///usr/lib/spark/examples/jars/spark-examples.jar", Required: true},
+	})
+}
+
 type clustersMsg []Cluster
 type errMsg error
 
@@ -54,6 +66,18 @@ type errMsg error
 type actionResultMsg struct {
 	err error
 	msg string
+}
+
+// iamPolicyMsg carries the result of a GetClusterIAMPolicy fetch.
+type iamPolicyMsg struct {
+	bindings []IAMBinding
+	err      error
+}
+
+// jobsMsg carries the result of a ListJobs fetch.
+type jobsMsg struct {
+	jobs []JobInfo
+	err  error
 }
 
 // -----------------------------------------------------------------------------
@@ -79,8 +103,21 @@ type Service struct {
 	updateForm components.FormModel
 
 	// Confirmation State
-	pendingAction string    // "delete"
+	pendingAction string    // "delete", "start", "stop", "diagnose", "grant"
 	actionSource  ViewState // Where to return after confirmation
+
+	// IAM State: current bindings for the selected cluster, and the
+	// add-binding form.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
+
+	// Jobs State
+	jobs          []JobInfo
+	jobTable      *components.StandardTable
+	jobSubmitForm components.FormModel
+	selectedJob   *JobInfo
 
 	cache *core.Cache
 }
@@ -95,8 +132,16 @@ func NewService(cache *core.Cache) *Service {
 
 	t := components.NewStandardTable(columns)
 
+	jobColumns := []table.Column{
+		{Title: "Job ID", Width: 30},
+		{Title: "Type", Width: 12},
+		{Title: "State", Width: 15},
+	}
+	jobTable := components.NewStandardTable(jobColumns)
+
 	svc := &Service{
 		table:     t,
+		jobTable:  jobTable,
 		filter:    components.NewFilterWithPlaceholder("Filter clusters..."),
 		spinner:   components.NewSpinner(),
 		viewState: ViewList,
@@ -118,11 +163,17 @@ func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		return "r:Refresh  /:Filter  Ent:Detail  n:New Cluster"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewIAMForm || s.viewState == ViewJobSubmit {
 		return "Tab/↑↓:Move  Enter/Ctrl+S:Submit  Esc:Cancel"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  u:Update  s:Start  x:Stop  d:Delete"
+		return "Esc/q:Back  u:Update  s:Start  x:Stop  g:Diagnose  i:IAM  J:Jobs  d:Delete"
+	}
+	if s.viewState == ViewIAM {
+		return "Esc/q:Back  a:Grant Role"
+	}
+	if s.viewState == ViewJobs {
+		return "Esc/q:Back  r:Refresh  n:Submit Spark Job  k:Kill"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
@@ -170,6 +221,10 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewList
 	s.selectedCluster = nil
+	s.selectedJob = nil
+	s.pendingAction = ""
+	s.iamBindings = nil
+	s.jobs = nil
 	s.err = nil
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
@@ -221,7 +276,77 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
+	case jobsMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.jobs = msg.jobs
+		s.updateJobTable(s.jobs)
+		s.viewState = ViewJobs
+		return s, nil
+
 	case actionResultMsg:
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedCluster != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedCluster),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.pendingAction == "kill-job" {
+			s.pendingAction = ""
+			s.selectedJob = nil
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchJobsCmd(),
+			)
+		}
+		if s.pendingAction == "diagnose" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if s.viewState == ViewJobSubmit {
+			if msg.err != nil {
+				s.jobSubmitForm.SubmitErr = msg.err.Error()
+				return s, nil
+			}
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchJobsCmd(),
+			)
+		}
 		if s.pendingAction == "delete" || s.pendingAction == "start" || s.pendingAction == "stop" {
 			action := s.pendingAction
 			s.pendingAction = ""
@@ -370,7 +495,95 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewConfirmation
 				}
 				return s, nil
+			case "g": // Diagnose (Confirm)
+				if s.selectedCluster != nil {
+					s.pendingAction = "diagnose"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			case "i": // IAM
+				if s.selectedCluster != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedCluster), s.spinner.Start(""))
+				}
+				return s, nil
+			case "J": // Jobs
+				if s.selectedCluster != nil {
+					return s, tea.Batch(s.fetchJobsCmd(), s.spinner.Start(""))
+				}
+				return s, nil
 			}
+		}
+
+		if s.viewState == ViewIAM {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedCluster != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedCluster.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+		}
+
+		if s.viewState == ViewIAMForm {
+			result, formCmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedCluster != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, formCmd
+		}
+
+		if s.viewState == ViewJobs {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "r":
+				return s, tea.Batch(s.fetchJobsCmd(), s.spinner.Start(""))
+			case "n": // Submit a new Spark job
+				if s.selectedCluster != nil {
+					s.jobSubmitForm = newSparkJobForm(*s.selectedCluster)
+					s.viewState = ViewJobSubmit
+				}
+				return s, nil
+			case "k": // Kill selected job (Confirm)
+				if idx := s.jobTable.Cursor(); idx >= 0 && idx < len(s.jobs) {
+					s.selectedJob = &s.jobs[idx]
+					s.pendingAction = "kill-job"
+					s.actionSource = ViewJobs
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+			var updatedJobTable *components.StandardTable
+			updatedJobTable, cmd = s.jobTable.Update(msg)
+			s.jobTable = updatedJobTable
+			return s, cmd
+		}
+
+		if s.viewState == ViewJobSubmit {
+			result, formCmd := s.jobSubmitForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewJobs
+				return s, nil
+			}
+			if result.Submitted && s.selectedCluster != nil {
+				return s, s.submitSparkJobCmd(*s.selectedCluster, s.jobSubmitForm.Value("Main Class"), s.jobSubmitForm.Value("Jar URI"))
+			}
+			return s, formCmd
 		}
 
 		if s.viewState == ViewConfirmation {
@@ -385,6 +598,20 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						actionCmd = s.startClusterCmd(*s.selectedCluster)
 					case "stop":
 						actionCmd = s.stopClusterCmd(*s.selectedCluster)
+					case "diagnose":
+						actionCmd = s.diagnoseClusterCmd(*s.selectedCluster)
+					case "grant":
+						actionCmd = s.addIAMBindingCmd(*s.selectedCluster, s.pendingIAMRole, s.pendingIAMMember)
+						s.viewState = ViewIAM
+						s.pendingAction = ""
+						return s, actionCmd
+					case "kill-job":
+						if s.selectedJob != nil {
+							actionCmd = s.killJobCmd(*s.selectedJob)
+						}
+						s.viewState = ViewJobs
+						s.pendingAction = ""
+						return s, actionCmd
 					}
 				}
 				s.viewState = s.actionSource
@@ -489,6 +716,94 @@ func (s *Service) stopClusterCmd(cluster Cluster) tea.Cmd {
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Stopping cluster %s...", cluster.Name)}
 	}
+}
+
+// diagnoseClusterCmd kicks off diagnostic collection on cluster.
+func (s *Service) diagnoseClusterCmd(cluster Cluster) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DiagnoseCluster(s.projectID, DefaultRegion, cluster.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Diagnosing cluster %s...", cluster.Name)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a cluster.
+func (s *Service) fetchIAMCmd(cluster Cluster) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetClusterIAMPolicy(s.projectID, DefaultRegion, cluster.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given cluster.
+func (s *Service) addIAMBindingCmd(cluster Cluster, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddClusterIAMBinding(s.projectID, DefaultRegion, cluster.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on cluster %s", role, member, cluster.Name)}
+	}
+}
+
+// fetchJobsCmd fetches the region's Dataproc jobs.
+func (s *Service) fetchJobsCmd() tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return jobsMsg{err: fmt.Errorf("client not initialized")}
+		}
+		jobs, err := s.client.ListJobs(s.projectID, DefaultRegion)
+		if err != nil {
+			return jobsMsg{err: err}
+		}
+		return jobsMsg{jobs: jobs}
+	}
+}
+
+// submitSparkJobCmd submits a minimal Spark job to cluster.
+func (s *Service) submitSparkJobCmd(cluster Cluster, mainClass, jarURI string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.SubmitSparkJob(s.projectID, DefaultRegion, cluster.Name, mainClass, jarURI); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Submitted Spark job to %s", cluster.Name)}
+	}
+}
+
+// killJobCmd cancels a running job.
+func (s *Service) killJobCmd(job JobInfo) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.KillJob(s.projectID, DefaultRegion, job.ID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Killing job %s...", job.ID)}
+	}
+}
+
+func (s *Service) updateJobTable(jobs []JobInfo) {
+	rows := make([]table.Row, len(jobs))
+	for i, j := range jobs {
+		rows[i] = table.Row{j.ID, j.Type, j.State}
+	}
+	s.jobTable.SetRows(rows)
 }
 
 func (s *Service) fetchClustersCmd(force bool) tea.Cmd {

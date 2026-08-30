@@ -50,7 +50,29 @@ const (
 	ViewCreate
 	ViewUpdate
 	ViewUpdateGroup
+	ViewCreateGroup
+	ViewIAM
+	ViewIAMForm
 )
+
+// newGroupCreateForm builds the FormModel for creating a new zonal Managed
+// Instance Group from an existing instance template, matching `gcloud
+// compute instance-groups managed create`.
+func newGroupCreateForm() components.FormModel {
+	return components.NewForm("Create Instance Group", []components.FormField{
+		{Label: "Name", Placeholder: "my-mig", Required: true},
+		{Label: "Zone", Placeholder: "us-central1-a", Required: true},
+		{Label: "Base Instance Name", Placeholder: "my-instance", Required: true},
+		{Label: "Instance Template", Placeholder: "projects/my-project/global/instanceTemplates/my-template", Required: true},
+		{Label: "Target Size", Default: "1", Required: true, Validate: func(v string) string {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n < 0 {
+				return "must be a non-negative integer"
+			}
+			return ""
+		}},
+	})
+}
 
 // newGroupUpdateForm builds the FormModel for resizing a MIG's target
 // size, seeded with its current value. set-autoscaling and update-instances
@@ -117,6 +139,18 @@ type Service struct {
 	updateGroupForm components.FormModel
 	selectedGroup   *InstanceGroup
 
+	// MIG Create State
+	createGroupForm components.FormModel
+
+	// IAM State (VM instances only). pendingIAMRole/pendingIAMMember are
+	// captured at form-submit time so the confirmation dialog and the
+	// actual API call use the same values regardless of what the form
+	// fields hold later.
+	iamBindings      []IAMBinding
+	iamForm          components.FormModel
+	pendingIAMRole   string
+	pendingIAMMember string
+
 	// Cache
 	cache *core.Cache
 }
@@ -161,18 +195,21 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		if s.activeTab == TabInstanceGroups {
-			return "[]:Tabs  r:Refresh  u:Update (resize)  d:Delete"
+			return "[]:Tabs  r:Refresh  n:Create  u:Update (resize)  s:Start All  x:Stop All  p:Rolling Replace  R:Rolling Restart  d:Delete"
 		}
-		return "[]:Tabs  r:Refresh  /:Filter  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  h:SSH  l:Logs  Ent:Detail  n:Create  u:Update  d:Delete"
+		return "[]:Tabs  r:Refresh  /:Filter  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  M:Maintenance  h:SSH  l:Logs  i:IAM  Ent:Detail  n:Create  u:Update  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  h:SSH  u:Update  d:Delete"
+		return "Esc/q:Back  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  M:Maintenance  h:SSH  i:IAM  u:Update  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewUpdateGroup {
+	if s.viewState == ViewCreate || s.viewState == ViewUpdate || s.viewState == ViewUpdateGroup || s.viewState == ViewCreateGroup || s.viewState == ViewIAMForm {
 		return "Tab/↑↓:Move  Enter:Submit  Esc:Cancel"
+	}
+	if s.viewState == ViewIAM {
+		return "a:Add Binding  q/Esc:Back"
 	}
 	return ""
 }
@@ -193,6 +230,12 @@ func (s *Service) Blur() {
 type instancesMsg []Instance
 type groupsMsg []InstanceGroup
 type errMsg error
+
+// iamPolicyMsg carries the result of a GetInstanceIAMPolicy fetch.
+type iamPolicyMsg struct {
+	err      error
+	bindings []IAMBinding
+}
 
 // InitService initializes the service logic (API clients)
 func (s *Service) InitService(ctx context.Context, projectID string) error {
@@ -268,7 +311,33 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.err = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewState = ViewIAM
+		return s, nil
+
 	case actionResultMsg:
+		if s.pendingAction == "grant" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			if s.selectedInstance != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMCmd(*s.selectedInstance),
+				)
+			}
+			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
 		if msg.err != nil {
 			s.err = msg.err
 			// Show error toast
@@ -345,11 +414,47 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "r":
 				return s, s.fetchGroupsCmd(true)
+			case "n": // Create
+				s.createGroupForm = newGroupCreateForm()
+				s.viewState = ViewCreateGroup
+				return s, nil
 			case "u": // Update (resize)
 				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
 					s.selectedGroup = &s.groups[idx]
 					s.updateGroupForm = newGroupUpdateForm(*s.selectedGroup)
 					s.viewState = ViewUpdateGroup
+					return s, nil
+				}
+			case "s": // Start all instances (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-start"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "x": // Stop all instances (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-stop"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "p": // Rolling-action replace (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-replace"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "R": // Rolling-action restart (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-restart"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
 					return s, nil
 				}
 			case "d": // Delete (Confirm)
@@ -415,6 +520,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
 					s.selectedInstance = &instances[idx]
 					s.pendingAction = "resume"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "M": // Perform Maintenance (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "maintenance"
 					s.actionSource = ViewList
 					s.viewState = ViewConfirmation
 				}
@@ -498,6 +611,16 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.actionSource = ViewDetail
 					s.viewState = ViewConfirmation
 				}
+			case "M": // Perform Maintenance (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "maintenance"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "i": // View IAM bindings
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedInstance), s.spinner.Start(""))
+				}
 			case "h": // SSH
 				if s.selectedInstance != nil {
 					return s, s.SSHCmd(*s.selectedInstance)
@@ -535,6 +658,28 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					actionCmd = s.SuspendInstanceCmd(*s.selectedInstance)
 				case "resume":
 					actionCmd = s.ResumeInstanceCmd(*s.selectedInstance)
+				case "maintenance":
+					actionCmd = s.PerformMaintenanceCmd(*s.selectedInstance)
+				case "grant":
+					if s.selectedInstance != nil {
+						actionCmd = s.addIAMBindingCmd(*s.selectedInstance, s.pendingIAMRole, s.pendingIAMMember)
+					}
+				case "mig-start":
+					if s.selectedGroup != nil {
+						actionCmd = s.StartInstancesInGroupCmd(*s.selectedGroup)
+					}
+				case "mig-stop":
+					if s.selectedGroup != nil {
+						actionCmd = s.StopInstancesInGroupCmd(*s.selectedGroup)
+					}
+				case "mig-replace":
+					if s.selectedGroup != nil {
+						actionCmd = s.RollingActionReplaceCmd(*s.selectedGroup)
+					}
+				case "mig-restart":
+					if s.selectedGroup != nil {
+						actionCmd = s.RollingActionRestartCmd(*s.selectedGroup)
+					}
 				case "delete":
 					if s.selectedInstance != nil {
 						actionCmd = s.DeleteInstanceCmd(*s.selectedInstance)
@@ -555,8 +700,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = s.actionSource
 				}
 
-				// Reset pending state
-				s.pendingAction = ""
+				// Reset pending state -- except "grant", which the
+				// actionResultMsg handler needs intact to know whether to
+				// re-fetch the IAM policy on success (see that case above).
+				if s.pendingAction != "grant" {
+					s.pendingAction = ""
+				}
 				return s, actionCmd
 
 			case "n", "esc", "q": // Cancel
@@ -564,6 +713,55 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.pendingAction = ""
 				return s, nil
 			}
+		}
+
+		// IAM VIEW KEYBINDINGS (VM instances only)
+		if s.viewState == ViewIAM {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedInstance != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedInstance.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+		}
+
+		// IAM ADD-BINDING FORM KEYBINDINGS
+		if s.viewState == ViewIAMForm {
+			result, fcmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+		}
+
+		// CREATE GROUP (MIG) VIEW KEYBINDINGS
+		if s.viewState == ViewCreateGroup {
+			result, fcmd := s.createGroupForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.createGroupForm.Values()
+				size, _ := strconv.ParseInt(vals["Target Size"], 10, 64)
+				s.viewState = ViewList
+				return s, s.CreateGroupCmd(vals["Name"], vals["Zone"], vals["Base Instance Name"], vals["Instance Template"], size)
+			}
+			return s, fcmd
 		}
 
 		// CREATE VIEW KEYBINDINGS
@@ -663,6 +861,18 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewUpdateGroup {
 		return s.updateGroupForm.View()
+	}
+
+	if s.viewState == ViewCreateGroup {
+		return s.createGroupForm.View()
+	}
+
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
 	}
 
 	// Default: List View
@@ -796,6 +1006,113 @@ func (s *Service) ResizeGroupCmd(group InstanceGroup, size int64) tea.Cmd {
 	}
 }
 
+// PerformMaintenanceCmd triggers a manual live migration on the given
+// sole-tenant-node-hosted instance.
+func (s *Service) PerformMaintenanceCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.PerformMaintenanceInstance(s.projectID, inst.Zone, inst.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Performing maintenance on instance %s...", inst.Name)}
+	}
+}
+
+// fetchIAMCmd fetches the current IAM policy for a VM instance.
+func (s *Service) fetchIAMCmd(inst Instance) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetInstanceIAMPolicy(s.projectID, inst.Zone, inst.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given VM instance.
+func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddInstanceIAMBinding(s.projectID, inst.Zone, inst.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on instance %s", role, member, inst.Name)}
+	}
+}
+
+// CreateGroupCmd triggers creation of a new zonal Managed Instance Group.
+func (s *Service) CreateGroupCmd(name, zone, baseInstanceName, instanceTemplate string, targetSize int64) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateInstanceGroup(s.projectID, zone, name, baseInstanceName, instanceTemplate, targetSize); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Creating MIG %s...", name)}
+	}
+}
+
+// StartInstancesInGroupCmd starts every instance in the given MIG. Regional
+// MIGs are out of scope, matching CreateGroupCmd.
+func (s *Service) StartInstancesInGroupCmd(group InstanceGroup) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.StartInstancesInGroup(s.projectID, group.Location, group.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Starting all instances in MIG %s...", group.Name)}
+	}
+}
+
+// StopInstancesInGroupCmd stops every instance in the given MIG.
+func (s *Service) StopInstancesInGroupCmd(group InstanceGroup) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.StopInstancesInGroup(s.projectID, group.Location, group.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Stopping all instances in MIG %s...", group.Name)}
+	}
+}
+
+// RollingActionReplaceCmd recreates every instance in the given MIG.
+func (s *Service) RollingActionReplaceCmd(group InstanceGroup) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RollingActionReplaceGroup(s.projectID, group.Location, group.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Rolling replace started for MIG %s...", group.Name)}
+	}
+}
+
+// RollingActionRestartCmd restarts every instance in the given MIG in place.
+func (s *Service) RollingActionRestartCmd(group InstanceGroup) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RollingActionRestartGroup(s.projectID, group.Location, group.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Rolling restart started for MIG %s...", group.Name)}
+	}
+}
+
 // Cmd to refresh (public)
 func (s *Service) Refresh() tea.Cmd {
 	if s.activeTab == TabInstanceGroups {
@@ -816,6 +1133,8 @@ func (s *Service) Reset() {
 	s.activeTab = TabInstances
 	s.selectedInstance = nil
 	s.selectedGroup = nil
+	s.pendingAction = ""
+	s.iamBindings = nil
 	s.err = nil          // Fix: Clear previous errors on reset
 	s.table.SetCursor(0) // Optional: reset cursor to top
 	s.groupTable.SetCursor(0)

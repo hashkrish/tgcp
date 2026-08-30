@@ -8,12 +8,56 @@ import (
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
-// renderConfirmation renders the cluster-delete confirmation dialog.
+// renderConfirmation renders the pending-action confirmation dialog.
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "kill-job" {
+		if s.selectedJob == nil {
+			return "Error: No job selected"
+		}
+		return components.RenderConfirmation("kill", s.selectedJob.ID, "job")
+	}
 	if s.selectedCluster == nil {
 		return "Error: No cluster selected"
 	}
 	return components.RenderConfirmation(s.pendingAction, s.selectedCluster.Name, "cluster")
+}
+
+// renderIAMView renders the current IAM policy bindings for the selected
+// cluster, the safety-net read step before allowing an add-binding write.
+func (s *Service) renderIAMView() string {
+	if s.selectedCluster == nil {
+		return "Error: No cluster selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Clusters",
+		s.selectedCluster.Name,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedCluster.Name, rows)
+}
+
+// renderJobsView renders the region's Dataproc jobs.
+func (s *Service) renderJobsView() string {
+	if s.selectedCluster == nil {
+		return "Error: No cluster selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Clusters",
+		s.selectedCluster.Name,
+		"Jobs",
+	)
+	if len(s.jobs) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("jobs"))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.jobTable.View())
 }
 
 func (s *Service) View() string {
@@ -40,6 +84,22 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewConfirmation {
 		return s.renderConfirmation()
+	}
+
+	if s.viewState == ViewIAM {
+		return s.renderIAMView()
+	}
+
+	if s.viewState == ViewIAMForm {
+		return s.iamForm.View()
+	}
+
+	if s.viewState == ViewJobs {
+		return s.renderJobsView()
+	}
+
+	if s.viewState == ViewJobSubmit {
+		return s.jobSubmitForm.View()
 	}
 
 	// Filter Bar
