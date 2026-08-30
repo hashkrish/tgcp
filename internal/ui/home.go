@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/yogirk/tgcp/internal/services/overview"
 	"github.com/yogirk/tgcp/internal/styles"
 )
 
@@ -54,8 +55,15 @@ func (m MainModel) View() string {
 	// 5. Overlays (Command Palette)
 	if m.Navigation.PaletteActive {
 		// Overlay Palette on top of the entire screen
-		// Note: Palette.Render uses lipgloss.Place to center itself in the given dimensions
-		paletteView := m.Palette.Render(m.Navigation, m.Width, m.Height, GetBanner())
+		// Note: Palette.Render uses lipgloss.Place to center itself in the given dimensions.
+		// otherRows is a conservative estimate of the palette's own chrome
+		// (input box + spacers + help hint; the variable-height suggestions
+		// list is deliberately not counted here, since palette.Render has
+		// its own follow-up degrade step -- dropping the help hint -- for
+		// whatever doesn't fit once the real suggestion count is known).
+		const paletteOtherRows = 6
+		banner := chooseBanner(m.Height-1, paletteOtherRows)
+		paletteView := m.Palette.Render(m.Navigation, m.Width, m.Height, banner)
 
 		// To truly "overlay" in TUI without clearing background is hard with just string concatenation.
 		// However, lipgloss.Place will fill the screen with whitespace if we aren't careful.
@@ -72,6 +80,36 @@ func (m MainModel) View() string {
 	}
 
 	return screen
+}
+
+// buildStatsLine renders a one-line resource-count summary from a lightweight
+// inventory snapshot (see MainModel.fetchLandingStatsCmd in model.go). Zero
+// counts are omitted rather than shown as "0 X". Returns "" if inv is nil or
+// every count is zero, so the caller can treat an empty string as "nothing
+// to show" uniformly.
+func buildStatsLine(inv *overview.ResourceInventory) string {
+	if inv == nil {
+		return ""
+	}
+	var parts []string
+	add := func(icon string, count int, label string) {
+		if count <= 0 {
+			return
+		}
+		if count != 1 {
+			label += "s"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d %s", icon, count, label))
+	}
+	add("🖥", inv.InstanceCount, "VM")
+	add("💾", inv.DiskCount, "Disk")
+	add("🪣", inv.BucketCount, "Bucket")
+	add("🗄", inv.SQLCount, "SQL instance")
+	add("📊", inv.DatasetCount, "Dataset")
+	if len(parts) == 0 {
+		return ""
+	}
+	return styles.SubtleStyle.Render(strings.Join(parts, "   ·   "))
 }
 
 // renderLandingPage renders the central home screen
@@ -94,6 +132,12 @@ func renderLandingPage(m MainModel) string {
 		email,
 		m.AuthState.ProjectID,
 	))
+
+	// Stats strip (lightweight resource-count snapshot; see
+	// MainModel.fetchLandingStatsCmd). Empty until the one-shot background
+	// fetch completes, or if every count comes back zero.
+	statsLine := buildStatsLine(m.LandingStats)
+	showStats := statsLine != ""
 
 	// Menu
 	menu := m.HomeMenu.View()
@@ -126,19 +170,27 @@ func renderLandingPage(m MainModel) string {
 	available := m.Height - 1
 
 	menuHeight := lipgloss.Height(menu)
-	banner := GetBanner()
-	bannerHeight := lipgloss.Height(banner)
 	// userInfo(1) + gap(1) + menu + gap(1) + hints(1) + version(1)
-	chromeRows := 1 + 1 + menuHeight + 1 + 1 + 1
+	baseChromeRows := 1 + 1 + menuHeight + 1 + 1 + 1
+	chromeRows := baseChromeRows
+	if showStats {
+		chromeRows += 2 // stats line + its gap
+	}
+
+	// Degrade order: the stats strip is the newest, least essential
+	// element, so it's dropped first -- before the banner/version/hints
+	// steps below get a chance to fire -- rather than competing with them
+	// on equal footing.
+	if showStats && BannerHeight+1+chromeRows > available {
+		showStats = false
+		chromeRows = baseChromeRows
+	}
+
+	banner := chooseBanner(available, chromeRows+1)
+	bannerHeight := lipgloss.Height(banner)
 
 	showVersion := true
 	showHints := true
-	if bannerHeight+1+chromeRows > available {
-		// Too tall even before adding the banner's own height — switch to
-		// a 1-line wordmark instead of the 6-line ASCII banner.
-		banner = GetCompactBanner()
-		bannerHeight = lipgloss.Height(banner)
-	}
 	if bannerHeight+1+chromeRows > available {
 		// Still too tall on a very short terminal: drop the version line,
 		// then the hint line, before ever falling back to cropping.
@@ -157,9 +209,14 @@ func renderLandingPage(m MainModel) string {
 		banner,
 		"",
 		userInfo,
+	}
+	if showStats {
+		bodyParts = append(bodyParts, "", statsLine)
+	}
+	bodyParts = append(bodyParts,
 		"",
 		menu,
-	}
+	)
 	if showHints || showVersion {
 		bodyParts = append(bodyParts, "")
 	}

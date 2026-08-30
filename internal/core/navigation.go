@@ -49,7 +49,16 @@ type NavigationModel struct {
 	Query         string
 	Suggestions   []SuggestionMatch // Includes match info for highlighting
 	Selection     int
+
+	// RecentNames tracks the most-recently-executed command names,
+	// most-recent-first, deduped, capped at recentNamesCap. Session-only
+	// (not persisted) -- shown as the default suggestion list when the
+	// palette opens with an empty query, instead of showing nothing.
+	RecentNames []string
 }
+
+// recentNamesCap bounds how many recently-executed commands are remembered.
+const recentNamesCap = 8
 
 func NewNavigation() NavigationModel {
 	defaults := defaultCommands()
@@ -117,7 +126,8 @@ func (m *NavigationModel) RestoreBaseCommands() {
 func (m *NavigationModel) FilterCommands(query string) {
 	m.Query = query
 	if query == "" {
-		m.Suggestions = []SuggestionMatch{}
+		m.Suggestions = m.recentSuggestions()
+		m.Selection = 0
 		return
 	}
 
@@ -174,6 +184,27 @@ func (m *NavigationModel) FilterCommands(query string) {
 	m.Selection = 0 // Reset selection
 }
 
+// recentSuggestions builds the default suggestion list shown when the
+// palette opens with no query yet, from RecentNames matched against the
+// currently active Commands (skipping any recent name that no longer
+// resolves, e.g. after a command-set switch triggered by SetCommands).
+func (m *NavigationModel) recentSuggestions() []SuggestionMatch {
+	if len(m.RecentNames) == 0 {
+		return []SuggestionMatch{}
+	}
+	byName := make(map[string]Command, len(m.Commands))
+	for _, cmd := range m.Commands {
+		byName[cmd.Name] = cmd
+	}
+	suggestions := make([]SuggestionMatch, 0, len(m.RecentNames))
+	for _, name := range m.RecentNames {
+		if cmd, ok := byName[name]; ok {
+			suggestions = append(suggestions, SuggestionMatch{Command: cmd})
+		}
+	}
+	return suggestions
+}
+
 // rangeIndexes returns a slice of sequential ints from start (inclusive) to
 // end (exclusive). Used to build MatchedIndexes for literal prefix/substring
 // hits so palette rendering highlights the matched span uniformly.
@@ -199,11 +230,31 @@ func (m *NavigationModel) SelectPrev() {
 	}
 }
 
-// ExecuteSelection returns the route for the selected command
+// ExecuteSelection returns the route for the selected command, recording it
+// in RecentNames so it ranks in the default (empty-query) suggestion list
+// next time the palette opens.
 func (m *NavigationModel) ExecuteSelection() *Route {
 	if len(m.Suggestions) > 0 {
-		route := m.Suggestions[m.Selection].Action()
+		selected := m.Suggestions[m.Selection]
+		route := selected.Action()
+		m.recordRecent(selected.Name)
 		return &route
 	}
 	return nil
+}
+
+// recordRecent moves name to the front of RecentNames, deduping and capping
+// at recentNamesCap.
+func (m *NavigationModel) recordRecent(name string) {
+	recent := make([]string, 0, recentNamesCap)
+	recent = append(recent, name)
+	for _, n := range m.RecentNames {
+		if len(recent) >= recentNamesCap {
+			break
+		}
+		if n != name {
+			recent = append(recent, n)
+		}
+	}
+	m.RecentNames = recent
 }

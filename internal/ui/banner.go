@@ -86,3 +86,16 @@ func GetCompactBanner() string {
 		styleP.Bold(true).Render("p"),
 	)
 }
+
+// chooseBanner picks between the full 6-line ASCII banner and the 1-line
+// compact wordmark based on how many rows are available after accounting
+// for otherRows of additional chrome the caller needs (menu, status bar,
+// hints, etc.) -- shared by every banner-showing view (landing page,
+// command palette) so they all degrade at the same terminal height instead
+// of each computing their own threshold and drifting out of sync.
+func chooseBanner(availableHeight, otherRows int) string {
+	if BannerHeight+otherRows > availableHeight {
+		return GetCompactBanner()
+	}
+	return GetBanner()
+}

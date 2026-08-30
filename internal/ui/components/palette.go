@@ -1,7 +1,6 @@
 package components
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -88,6 +87,23 @@ func highlightMatches(name, description string, matchedIndexes []int) (string, s
 	return nameBuilder.String(), descBuilder.String()
 }
 
+// paletteVisibleCount computes how many suggestion rows fit given the
+// terminal height, mirroring home_menu.go's UpdateViewportRows() row-count-
+// from-height formula. overhead is a conservative estimate of everything
+// else the palette renders (banner up to 6 rows, spacers, the input box,
+// the help hint) so suggestions don't get squeezed off a short terminal.
+func paletteVisibleCount(screenHeight int) int {
+	const overhead = 12
+	count := screenHeight - overhead
+	if count < 4 {
+		count = 4
+	}
+	if count > 12 {
+		count = 12
+	}
+	return count
+}
+
 // Render renders the palette overlay using the provided navigation state
 func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight int, banner string) string {
 	if screenWidth <= 0 {
@@ -97,32 +113,32 @@ func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight
 		screenHeight = 24
 	}
 
-	boxWidth := screenWidth - 6
-	if boxWidth > 72 {
-		boxWidth = 72
-	}
-	if boxWidth < 40 {
-		boxWidth = 40
-	}
+	// boxWidth: floor 40 (usable on a narrow terminal), ceiling 100 (raised
+	// from a previous flat 72 -- a wide terminal has plenty of room for
+	// longer command descriptions before the box needs to stop growing).
+	boxWidth := min(max(screenWidth-6, 40), 100)
 
 	// 1. Input Box
 	// Determine if we have a dropdown (suggestions or "no matches")
 	hasDropdown := len(nav.Suggestions) > 0 || m.TextInput.Value() != ""
 
-	// Build input box style - seamless with dropdown when present
+	// Build input box style - seamless with dropdown when present.
+	// Padding(0, 1): horizontal-only, matching FilterModel's convention
+	// (internal/ui/components/filter.go) -- a full Padding(1) reads as
+	// unnecessarily loose chrome around a single-line search input.
 	var inputBoxStyle lipgloss.Style
 	if hasDropdown {
 		// No bottom border - connects seamlessly with dropdown
 		inputBoxStyle = lipgloss.NewStyle().
 			Width(boxWidth).
-			Padding(1).
+			Padding(0, 1).
 			Border(lipgloss.RoundedBorder(), true, true, false, true). // No bottom
 			BorderForeground(styles.ColorBrandAccent)
 	} else {
 		// Full border when no dropdown
 		inputBoxStyle = lipgloss.NewStyle().
 			Width(boxWidth).
-			Padding(1).
+			Padding(0, 1).
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(styles.ColorBrandAccent)
 	}
@@ -132,13 +148,33 @@ func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight
 	// 2. Suggestions List
 	var suggestionsView string
 	if len(nav.Suggestions) > 0 {
-		var lines []string
-		for i, match := range nav.Suggestions {
-			// Limit display to 8 items
-			if i >= 8 {
-				lines = append(lines, styles.SubtleStyle.Render(fmt.Sprintf("... and %d more", len(nav.Suggestions)-i)))
-				break
+		total := len(nav.Suggestions)
+		visibleCount := paletteVisibleCount(screenHeight)
+
+		// Scroll window: computed fresh each render from nav.Selection alone
+		// (no persisted scroll-offset state needed) so the selected row
+		// always stays inside [start, start+visibleCount) -- same "follow
+		// the cursor" behavior as home_menu.go's adjustScroll(), just
+		// stateless since Render() already gets the full nav state every
+		// frame.
+		start := 0
+		if total > visibleCount {
+			start = nav.Selection - visibleCount + 1
+			if start < 0 {
+				start = 0
 			}
+			if maxStart := total - visibleCount; start > maxStart {
+				start = maxStart
+			}
+		}
+		end := min(start+visibleCount, total)
+
+		var lines []string
+		if start > 0 {
+			lines = append(lines, styles.SubtleStyle.Render("  ↑ more"))
+		}
+		for i := start; i < end; i++ {
+			match := nav.Suggestions[i]
 
 			// Render Item with highlighted matches
 			name, desc := highlightMatches(match.Name, match.Description, match.MatchedIndexes)
@@ -162,6 +198,9 @@ func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight
 			}
 			lines = append(lines, content)
 		}
+		if end < total {
+			lines = append(lines, styles.SubtleStyle.Render("  ↓ more"))
+		}
 		suggestionsView = lipgloss.JoinVertical(lipgloss.Left, lines...)
 
 		// Style the dropdown - no top border, same accent color as input
@@ -180,19 +219,34 @@ func (m PaletteModel) Render(nav core.NavigationModel, screenWidth, screenHeight
 			Render(styles.SubtleStyle.Render("No matching commands"))
 	}
 
-	helpHint := styles.SubtleStyle.Render("Esc:Cancel  Enter:Run  ↑/↓:Select")
+	helpHint := styles.SubtleStyle.Render("Esc:Cancel  Enter:Run  ↑/↓/^P/^N:Select")
 
 	// 3. Combine: Banner -> Buffer -> Input -> List
-	// The banner is passed in.
+	// The banner is passed in (already degraded to the compact wordmark by
+	// the caller if the terminal is short -- see chooseBanner in banner.go).
+	//
+	// NOTE: spacer elements must be "" not "\n" -- lipgloss.JoinVertical
+	// splits each element on "\n" to get its lines, and splitting the
+	// single-character string "\n" yields TWO empty lines (["", ""]),
+	// silently doubling the gap. This is the same bug class documented and
+	// fixed in home.go's landing page.
+	buildUI := func(showHint bool) string {
+		parts := []string{banner, "", inputView, suggestionsView, ""}
+		if showHint {
+			parts = append(parts, helpHint)
+		}
+		return lipgloss.JoinVertical(lipgloss.Center, parts...)
+	}
 
-	ui := lipgloss.JoinVertical(lipgloss.Center,
-		banner,
-		"\n", // Spacer between banner and search bar
-		inputView,
-		suggestionsView,
-		"\n",
-		helpHint,
-	)
+	ui := buildUI(true)
+	// If even the compact banner doesn't leave room for everything, drop the
+	// help hint line before giving up -- mirrors the landing page's own
+	// "drop hints when short" degrade step (home.go), scoped here to just
+	// the data this component already has (no cross-package banner-choice
+	// logic needed, since the caller already picked full-vs-compact banner).
+	if lipgloss.Height(ui) > screenHeight {
+		ui = buildUI(false)
+	}
 
 	// 4. Center in Screen without backdrop to avoid ghosting/shadows
 	return lipgloss.Place(screenWidth, screenHeight,

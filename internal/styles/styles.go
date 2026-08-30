@@ -164,17 +164,16 @@ var (
 			Foreground(ColorTextMuted).
 			Italic(true)
 
-	// Tabs
+	// Tabs — plain text, no border/padding box and no background fill.
+	// Active vs. inactive is distinguished by color/weight/underline alone;
+	// callers already bracket each label with a leading/trailing space
+	// (e.g. " Services "), which is enough separation between adjacent
+	// tabs without a bordered box around each one.
 	ActiveTabStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder(), true, true, false, true).
-			BorderForeground(ColorBrandAccent).
-			Padding(SpaceXS, SpaceS).
 			Bold(true).
+			Underline(true).
 			Foreground(ColorBrandAccent)
 
 	InactiveTabStyle = lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder(), true, true, false, true).
-				BorderForeground(ColorBorderSubtle).
-				Padding(SpaceXS, SpaceS).
 				Foreground(ColorTextMuted)
 )

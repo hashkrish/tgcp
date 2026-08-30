@@ -62,6 +62,17 @@ var serviceIcons = map[string]string{
 	"artifactregistry": "A",
 }
 
+// gridColumn is one category's worth of services, rendered as a column in
+// the grid layout (see rebuildColumns/renderGrid). Grid mode is used instead
+// of the flat list when the terminal is wide enough and there are enough
+// results for multiple columns to be worthwhile; otherwise HomeMenuModel
+// falls back to the flat list unchanged (see narrowMode).
+type gridColumn struct {
+	categoryIdx  int
+	categoryName string
+	rows         []listEntry // service entries only (isCategory==false, service != nil)
+}
+
 // listEntry represents a single row in the flat list (either category header or service)
 type listEntry struct {
 	isCategory   bool
@@ -96,6 +107,18 @@ type HomeMenuModel struct {
 	// scroll position changes (short names vs. long names), shifting the
 	// whole centered landing-page layout left/right between frames.
 	contentWidth int
+
+	// --- Grid mode (category-column layout) ---
+	// The flat list above (allEntries/filtered/cursor/scrollOffset/
+	// viewportRows) is left completely unchanged and remains the fallback
+	// path -- see narrowMode.
+	numCols     int          // columns per row-of-columns; only meaningful when !narrowMode
+	widthNarrow bool         // true if the terminal is too narrow for >1 column (set by UpdateViewportCols)
+	narrowMode  bool         // true => render/navigate via the flat list; false => grid
+	columns     []gridColumn // rebuilt by rebuildColumns() alongside every applyFilter()/UpdateViewportCols() call
+	cursorCol   int          // grid-mode cursor: column index into columns
+	cursorRow   int          // grid-mode cursor: row index into columns[cursorCol].rows
+	onTopItem   bool         // grid-mode cursor: true when the Overview strip (not a column) is selected
 }
 
 func NewHomeMenu() HomeMenuModel {
@@ -177,6 +200,15 @@ func NewHomeMenu() HomeMenuModel {
 		IsFocused:    true,
 		filter:       NewFilterWithPlaceholder("Type to filter services..."),
 		viewportRows: 12, // conservative default before first WindowSizeMsg
+		// Grid mode only activates once UpdateViewportCols() sees a real,
+		// wide-enough ScreenWidth from a WindowSizeMsg; until then (and on
+		// any narrow terminal) everything behaves exactly like the
+		// original flat list, so every existing flat-mode test/behavior is
+		// unaffected by grid mode's addition.
+		numCols:     1,
+		widthNarrow: true,
+		narrowMode:  true,
+		onTopItem:   true,
 	}
 	m.rebuildEntries()
 	m.applyFilter()
@@ -267,6 +299,7 @@ func (m *HomeMenuModel) applyFilter() {
 		copy(m.filtered, m.allEntries)
 		m.updateFilterCounts()
 		m.clampCursorAndScroll()
+		m.rebuildColumns()
 		return
 	}
 
@@ -310,6 +343,171 @@ func (m *HomeMenuModel) applyFilter() {
 	m.scrollOffset = 0
 	m.updateFilterCounts()
 	m.clampCursorAndScroll()
+	m.rebuildColumns()
+}
+
+// rebuildColumns groups the current m.filtered service entries by category
+// into columns (see gridColumn), and decides narrowMode: whether the grid is
+// actually worth showing given the current width and filtered result count.
+// Called after every applyFilter() (so filtering re-flows the grid, or
+// collapses it to the flat list when results are scattered/few) and after
+// every UpdateViewportCols() (so resizing re-flows it too).
+func (m *HomeMenuModel) rebuildColumns() {
+	byCat := make(map[int][]listEntry)
+	var catOrder []int
+	catName := make(map[int]string)
+
+	for _, e := range m.filtered {
+		if e.isCategory {
+			catName[e.categoryIdx] = e.categoryName
+			continue
+		}
+		if e.isTopItem || e.service == nil {
+			continue // TopItem is handled separately (see onTopItem), not as a column row
+		}
+		if _, ok := byCat[e.categoryIdx]; !ok {
+			catOrder = append(catOrder, e.categoryIdx)
+		}
+		byCat[e.categoryIdx] = append(byCat[e.categoryIdx], e)
+	}
+
+	columns := make([]gridColumn, 0, len(catOrder))
+	totalMatched := 0
+	for _, ci := range catOrder {
+		rows := byCat[ci]
+		columns = append(columns, gridColumn{categoryIdx: ci, categoryName: catName[ci], rows: rows})
+		totalMatched += len(rows)
+	}
+	m.columns = columns
+
+	// Collapse to the flat list not just when the terminal is narrow
+	// (widthNarrow), but also when the filtered result set is small/
+	// scattered enough that a grid wouldn't help -- a tidy short flat list
+	// reads better than a sparse multi-column grid for a handful of
+	// matches.
+	tooFewForGrid := m.numCols >= 2 && (len(columns) <= 1 || totalMatched < 2*m.numCols)
+	m.narrowMode = m.widthNarrow || tooFewForGrid
+
+	// Clamp the 2D cursor into range. Mode switches (narrow<->grid) don't
+	// try to preserve which service was selected across the transition --
+	// an acceptable v1 rough edge, not attempted here.
+	if len(m.columns) == 0 {
+		m.cursorCol, m.cursorRow = 0, 0
+		return
+	}
+	if m.cursorCol >= len(m.columns) {
+		m.cursorCol = len(m.columns) - 1
+	}
+	if m.cursorCol < 0 {
+		m.cursorCol = 0
+	}
+	m.clampCursorRowForColumn()
+}
+
+// clampCursorRowForColumn clamps cursorRow into the current cursorCol's row
+// count. Used both by rebuildColumns() and by left/right column movement,
+// where the target column may have fewer rows than the one the cursor came
+// from -- clamping to the target's last row is intentional (not a bug):
+// no attempt is made to preserve visual Y-position across columns of
+// different heights.
+func (m *HomeMenuModel) clampCursorRowForColumn() {
+	if m.cursorCol < 0 || m.cursorCol >= len(m.columns) {
+		m.cursorRow = 0
+		return
+	}
+	rows := m.columns[m.cursorCol].rows
+	if m.cursorRow >= len(rows) {
+		m.cursorRow = len(rows) - 1
+	}
+	if m.cursorRow < 0 {
+		m.cursorRow = 0
+	}
+}
+
+// --- Grid-mode navigation ---
+// Mirrors the flat list's up/down/home/end semantics (no wrap-around at
+// either end) plus a new left/right axis for moving between columns.
+
+// gridMoveDown moves within the current column, or from the Overview strip
+// into the current column's first row.
+func (m *HomeMenuModel) gridMoveDown() {
+	if m.onTopItem {
+		if len(m.columns) > 0 {
+			m.onTopItem = false
+			m.cursorRow = 0
+		}
+		return
+	}
+	if m.cursorCol < 0 || m.cursorCol >= len(m.columns) {
+		return
+	}
+	if m.cursorRow < len(m.columns[m.cursorCol].rows)-1 {
+		m.cursorRow++
+	}
+}
+
+// gridMoveUp moves within the current column; from a column's top row, it
+// jumps to the Overview strip only if that column is in the first
+// row-of-columns (columns wrap into multiple rows-of-columns when there
+// are more categories than numCols) -- avoids conflating the row axis with
+// the column axis for columns further down the grid.
+func (m *HomeMenuModel) gridMoveUp() {
+	if m.onTopItem {
+		return
+	}
+	if m.cursorRow > 0 {
+		m.cursorRow--
+		return
+	}
+	if m.numCols > 0 && m.cursorCol < m.numCols {
+		m.onTopItem = true
+	}
+}
+
+// gridMoveLeft moves to the previous column in reading order (columns are
+// stored left-to-right, top-to-bottom across rows-of-columns, so this
+// naturally falls through to the last column of the previous
+// row-of-columns at a row's leftmost column -- no separate wrap logic
+// needed). No-ops at the very first column, and while on the Overview strip.
+func (m *HomeMenuModel) gridMoveLeft() {
+	if m.onTopItem || len(m.columns) == 0 {
+		return
+	}
+	if m.cursorCol > 0 {
+		m.cursorCol--
+		m.clampCursorRowForColumn()
+	}
+}
+
+// gridMoveRight is the mirror of gridMoveLeft.
+func (m *HomeMenuModel) gridMoveRight() {
+	if m.onTopItem || len(m.columns) == 0 {
+		return
+	}
+	if m.cursorCol < len(m.columns)-1 {
+		m.cursorCol++
+		m.clampCursorRowForColumn()
+	}
+}
+
+// gridHome jumps to the Overview strip (top-left), matching the flat list's
+// "home" landing on cursor 0 (the TopItem).
+func (m *HomeMenuModel) gridHome() {
+	m.onTopItem = true
+}
+
+// gridEnd jumps to the last row of the last column (bottom-right), matching
+// the flat list's "end" landing on the very last item.
+func (m *HomeMenuModel) gridEnd() {
+	if len(m.columns) == 0 {
+		return
+	}
+	m.onTopItem = false
+	m.cursorCol = len(m.columns) - 1
+	m.cursorRow = len(m.columns[m.cursorCol].rows) - 1
+	if m.cursorRow < 0 {
+		m.cursorRow = 0
+	}
 }
 
 // categoryHasMatch checks if any service in the given category matched the filter
@@ -451,42 +649,84 @@ func (m HomeMenuModel) Update(msg tea.Msg) (HomeMenuModel, tea.Cmd) {
 		}
 
 		// Navigation (works whether filter is active or not)
-		selectable := m.selectableItems()
-		switch key {
-		case "up":
-			if m.cursor > 0 {
-				m.cursor--
-				m.adjustScroll()
+		if m.narrowMode {
+			selectable := m.selectableItems()
+			switch key {
+			case "up":
+				if m.cursor > 0 {
+					m.cursor--
+					m.adjustScroll()
+				}
+			case "k":
+				if !m.filter.Active && m.cursor > 0 {
+					m.cursor--
+					m.adjustScroll()
+				}
+			case "down":
+				if m.cursor < len(selectable)-1 {
+					m.cursor++
+					m.adjustScroll()
+				}
+			case "j":
+				if !m.filter.Active && m.cursor < len(selectable)-1 {
+					m.cursor++
+					m.adjustScroll()
+				}
+			case "home", "g":
+				if !m.filter.Active {
+					m.cursor = 0
+					m.adjustScroll()
+				}
+			case "end", "G":
+				if !m.filter.Active && len(selectable) > 0 {
+					m.cursor = len(selectable) - 1
+					m.adjustScroll()
+				}
 			}
-		case "k":
-			if !m.filter.Active && m.cursor > 0 {
-				m.cursor--
-				m.adjustScroll()
-			}
-		case "down":
-			if m.cursor < len(selectable)-1 {
-				m.cursor++
-				m.adjustScroll()
-			}
-		case "j":
-			if !m.filter.Active && m.cursor < len(selectable)-1 {
-				m.cursor++
-				m.adjustScroll()
-			}
-		case "home", "g":
-			if !m.filter.Active {
-				m.cursor = 0
-				m.adjustScroll()
-			}
-		case "end", "G":
-			if !m.filter.Active && len(selectable) > 0 {
-				m.cursor = len(selectable) - 1
-				m.adjustScroll()
+		} else {
+			// Grid mode: 2D column/row cursor (see gridMove*/gridHome/gridEnd).
+			switch key {
+			case "up":
+				m.gridMoveUp()
+			case "k":
+				if !m.filter.Active {
+					m.gridMoveUp()
+				}
+			case "down":
+				m.gridMoveDown()
+			case "j":
+				if !m.filter.Active {
+					m.gridMoveDown()
+				}
+			case "left":
+				m.gridMoveLeft()
+			case "h":
+				if !m.filter.Active {
+					m.gridMoveLeft()
+				}
+			case "right":
+				m.gridMoveRight()
+			case "l":
+				if !m.filter.Active {
+					m.gridMoveRight()
+				}
+			case "home", "g":
+				if !m.filter.Active {
+					m.gridHome()
+				}
+			case "end", "G":
+				if !m.filter.Active {
+					m.gridEnd()
+				}
 			}
 		}
 
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+		// Mouse click-to-select only works in the flat-list fallback for
+		// now -- the grid's per-cell bounding boxes aren't tracked during
+		// render (unlike the flat list's approximate single-column
+		// getItemFromClickY), so grid mode is keyboard-only in this pass.
+		if m.narrowMode && msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
 			// Map click Y to a filtered list entry
 			if idx := m.getItemFromClickY(msg.Y); idx >= 0 {
 				// Find which selectable index this corresponds to
@@ -531,6 +771,17 @@ func (m HomeMenuModel) getItemFromClickY(screenY int) int {
 }
 
 func (m HomeMenuModel) View() string {
+	if m.narrowMode {
+		return m.renderFlatList()
+	}
+	return m.renderGrid()
+}
+
+// renderFlatList is the original single-column, vertically-scrolling menu.
+// It's the fallback for both narrow terminals and small/scattered filter
+// results (see rebuildColumns) -- kept entirely unchanged from before grid
+// mode existed.
+func (m HomeMenuModel) renderFlatList() string {
 	// Filter bar
 	filterBar := m.filter.View()
 
@@ -646,17 +897,189 @@ func (m HomeMenuModel) View() string {
 	return menuBox
 }
 
+// measureServiceRowWidth returns the rendered width of one service row
+// (icon + name), checked against both selected/unselected styles since
+// their padding can differ -- mirrors computeContentWidth's per-row
+// measurement technique (rendering through the real styles rather than
+// estimating from raw text length, so it can't drift out of sync with the
+// actual render), scoped to a single row for per-column width measurement
+// in grid mode.
+func measureServiceRowWidth(e listEntry) int {
+	if e.service == nil {
+		return 0
+	}
+	iconGlyph := serviceIcons[e.service.ShortName]
+	if iconGlyph == "" {
+		iconGlyph = "·"
+	}
+	name := e.service.Name
+	if e.service.IsComing {
+		name += " [Coming Soon]"
+	}
+	display := iconGlyph + "  " + name
+	w := lipgloss.Width(styles.SelectedActive.Render(display))
+	if uw := lipgloss.Width(styles.UnselectedItemStyle.Render(display)); uw > w {
+		w = uw
+	}
+	return w
+}
+
+// maxGridColWidth caps a single category column's width so one long service
+// name (e.g. "Memorystore (Redis)") can't blow out its whole column; names
+// wider than this are truncated with an ellipsis (see truncateToWidth).
+const maxGridColWidth = 32
+
+// renderColumn renders one category's header + service rows as a single
+// fixed-width block, used by renderGrid.
+func (m HomeMenuModel) renderColumn(col gridColumn, colIdx int) string {
+	catHeaderStyle := lipgloss.NewStyle().
+		Foreground(CategoryColor(col.categoryName)).
+		Bold(true).
+		PaddingLeft(styles.SpaceS)
+	header := catHeaderStyle.Render(strings.ToUpper(col.categoryName))
+
+	width := lipgloss.Width(header)
+	for _, e := range col.rows {
+		if w := measureServiceRowWidth(e); w > width {
+			width = w
+		}
+	}
+	if width > maxGridColWidth {
+		width = maxGridColWidth
+	}
+
+	lines := []string{header}
+	for ri, e := range col.rows {
+		if e.service == nil {
+			continue
+		}
+		iconGlyph := serviceIcons[e.service.ShortName]
+		if iconGlyph == "" {
+			iconGlyph = "·"
+		}
+		name := e.service.Name
+		if e.service.IsComing {
+			name += " [Coming Soon]"
+		}
+		// Truncate the name (not the icon) if this row would exceed the
+		// column's capped width.
+		if plainWidth := lipgloss.Width(iconGlyph + "  " + name); plainWidth > width {
+			avail := width - lipgloss.Width(iconGlyph+"  ")
+			name = truncateToWidth(name, avail)
+		}
+		icon := lipgloss.NewStyle().Foreground(ServiceAccent(e.service.ShortName)).Render(iconGlyph)
+		display := icon + "  " + name
+
+		isSelected := !m.onTopItem && colIdx == m.cursorCol && ri == m.cursorRow
+		if isSelected {
+			lines = append(lines, styles.SelectedActive.Render(display))
+		} else {
+			style := styles.UnselectedItemStyle
+			if e.service.IsComing {
+				style = style.Foreground(styles.ColorTextMuted)
+			}
+			lines = append(lines, style.Render(display))
+		}
+	}
+
+	return lipgloss.NewStyle().Width(width).Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
+}
+
+// renderGrid renders the category-column grid layout (see rebuildColumns/
+// gridColumn). Columns wrap into additional rows-of-columns when there are
+// more categories than numCols. Unlike renderFlatList, there is no vertical
+// scrolling of the grid itself in this pass -- with today's ~7 categories
+// and a 4-column cap, the grid is at most 2 rows-of-columns tall, which
+// comfortably fits typical terminal heights; a growing category count would
+// need this revisited (see the risk callout in the design notes).
+func (m HomeMenuModel) renderGrid() string {
+	filterBar := m.filter.View()
+	title := styles.HeaderStyle.Render("Services")
+
+	// Overview strip — a standalone always-first row above the columns,
+	// same special treatment it gets in the flat list.
+	var topLine string
+	if m.TopItem != nil {
+		iconGlyph := serviceIcons[m.TopItem.ShortName]
+		if iconGlyph == "" {
+			iconGlyph = "·"
+		}
+		display := iconGlyph + "  " + m.TopItem.Name
+		if m.onTopItem {
+			topLine = styles.SelectedActive.Render(display)
+		} else {
+			topLine = styles.UnselectedItemStyle.Render(display)
+		}
+	}
+
+	var gridBody string
+	if len(m.columns) == 0 {
+		gridBody = EmptyState("services")
+	} else {
+		const colGap = "    "
+		var screenRows []string
+		for start := 0; start < len(m.columns); start += m.numCols {
+			end := start + m.numCols
+			if end > len(m.columns) {
+				end = len(m.columns)
+			}
+			blocks := make([]string, 0, (end-start)*2-1)
+			for i := start; i < end; i++ {
+				if i > start {
+					blocks = append(blocks, colGap)
+				}
+				blocks = append(blocks, m.renderColumn(m.columns[i], i))
+			}
+			screenRows = append(screenRows, lipgloss.JoinHorizontal(lipgloss.Top, blocks...))
+		}
+		gridBody = lipgloss.JoinVertical(lipgloss.Left, screenRows...)
+	}
+
+	content := lipgloss.JoinVertical(lipgloss.Left, title, "", filterBar, "", topLine, "", gridBody)
+
+	// boxWidth: widest screen-row-of-columns, so the box doesn't jump width
+	// between filter states (same anti-drift intent as the flat list's
+	// computeContentWidth, just measured from the actually-rendered grid
+	// content here since column packing/wrapping makes an upfront measure
+	// impractical).
+	boxWidth := lipgloss.Width(content) + 2*styles.SpaceM
+	if fw := lipgloss.Width(filterBar) + 2*styles.SpaceM; fw > boxWidth {
+		boxWidth = fw
+	}
+
+	return styles.PrimaryBoxStyle.
+		Width(boxWidth).
+		Render(content)
+}
+
 // SelectedItem returns the currently selected service
 func (m HomeMenuModel) SelectedItem() ServiceItem {
-	selectable := m.selectableItems()
-	if m.cursor < 0 || m.cursor >= len(selectable) {
+	if m.narrowMode {
+		selectable := m.selectableItems()
+		if m.cursor < 0 || m.cursor >= len(selectable) {
+			return ServiceItem{}
+		}
+		entry := m.filtered[selectable[m.cursor]]
+		if entry.service != nil {
+			return *entry.service
+		}
 		return ServiceItem{}
 	}
-	entry := m.filtered[selectable[m.cursor]]
-	if entry.service != nil {
-		return *entry.service
+
+	if m.onTopItem {
+		if m.TopItem != nil {
+			return *m.TopItem
+		}
+		return ServiceItem{}
 	}
-	return ServiceItem{}
+	if m.cursorCol < 0 || m.cursorCol >= len(m.columns) {
+		return ServiceItem{}
+	}
+	rows := m.columns[m.cursorCol].rows
+	if m.cursorRow < 0 || m.cursorRow >= len(rows) || rows[m.cursorRow].service == nil {
+		return ServiceItem{}
+	}
+	return *rows[m.cursorRow].service
 }
 
 // IsOnCategory returns true if cursor is on a category header.
@@ -697,4 +1120,33 @@ func (m *HomeMenuModel) UpdateViewportRows() {
 	}
 	m.viewportRows = rows
 	m.clampCursorAndScroll()
+}
+
+// UpdateViewportCols recalculates how many category columns fit the current
+// terminal width, pairing with UpdateViewportRows' row-count-from-height
+// formula. Below the width that fits even 2 columns, numCols computes to 1
+// and rebuildColumns() sets widthNarrow (and therefore narrowMode) so the
+// menu falls back to the flat list entirely -- there's no "1-column grid"
+// mode, since at that point a grid is just a list with extra header rows.
+func (m *HomeMenuModel) UpdateViewportCols() {
+	const colGap = 4       // spacing rendered between adjacent columns
+	const minColWidth = 20 // shortest a category column can render legibly
+	const boxChrome = 2*styles.SpaceM + 2 // box padding + border, same budget convention as boxWidth below
+
+	numCols := 1
+	if available := m.ScreenWidth - boxChrome; available > 0 {
+		numCols = (available + colGap) / (minColWidth + colGap)
+	}
+	if numCols < 1 {
+		numCols = 1
+	}
+	// Cap at 4 -- beyond that, categories get cramped and left-to-right
+	// eyeline scanning across more columns is the actual UX limit, not raw
+	// width.
+	if numCols > 4 {
+		numCols = 4
+	}
+	m.numCols = numCols
+	m.widthNarrow = numCols <= 1
+	m.rebuildColumns()
 }

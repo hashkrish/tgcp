@@ -91,10 +91,18 @@ type MainModel struct {
 	// External Managers
 	ProjectManager  *core.ProjectManager
 	ServiceRegistry *core.ServiceRegistry
+	Cache           *core.Cache
 
 	// Version Info
 	Version    core.VersionInfo
 	UpdateInfo *core.UpdateInfo // nil until checked
+
+	// LandingStats is a lightweight resource-count snapshot shown on the
+	// landing page. nil until the one-shot background fetch (see Init())
+	// completes; deliberately never re-fetched on a timer -- staleness
+	// until app restart is an acceptable tradeoff for a glanceable count,
+	// not a live dashboard.
+	LandingStats *overview.ResourceInventory
 }
 
 // InitialModel returns the initial state of the application
@@ -132,6 +140,7 @@ func InitialModel(authState core.AuthState, cfg *config.Config, version core.Ver
 		ServiceMap:      svcMap,
 		ProjectManager:  core.NewProjectManager(cache),
 		ServiceRegistry: registry,
+		Cache:           cache,
 		Version:         version,
 	}
 }
@@ -142,7 +151,43 @@ func (m MainModel) Init() tea.Cmd {
 	return tea.Batch(
 		tea.EnableMouseCellMotion,
 		core.CheckForUpdates(m.Version.Version),
+		m.fetchLandingStatsCmd(),
 	)
+}
+
+// landingStatsMsg carries the one-shot resource-count snapshot for the
+// landing page's stats strip.
+type landingStatsMsg overview.ResourceInventory
+
+// fetchLandingStatsCmd fetches a lightweight resource-count snapshot for the
+// landing page's stats strip. Reuses the exact same cache key format the
+// real Overview service uses for its own inventory fetch
+// (internal/services/overview/overview.go fetchInventoryCmd) so opening the
+// Overview tab later hits the same cache entry instead of double-fetching.
+func (m MainModel) fetchLandingStatsCmd() tea.Cmd {
+	return func() tea.Msg {
+		cacheKey := fmt.Sprintf("billing:inventory:global:%s", m.AuthState.ProjectID)
+		if m.Cache != nil {
+			if val, found := m.Cache.Get(cacheKey); found {
+				if inv, ok := val.(overview.ResourceInventory); ok {
+					return landingStatsMsg(inv)
+				}
+			}
+		}
+
+		client, err := overview.NewClient(context.Background())
+		if err != nil {
+			return nil // best-effort; landing page just shows no stats strip
+		}
+		inv, err := client.GetGlobalInventory(m.AuthState.ProjectID)
+		if err != nil {
+			return nil
+		}
+		if m.Cache != nil {
+			m.Cache.Set(cacheKey, inv, overview.CacheTTL)
+		}
+		return landingStatsMsg(inv)
+	}
 }
 
 // getOrInitializeService gets a service from the map, initializing it lazily if needed
@@ -242,6 +287,11 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.StatusBar.LastUpdated = time.Time(msg)
 		return m, nil
 
+	case landingStatsMsg:
+		inv := overview.ResourceInventory(msg)
+		m.LandingStats = &inv
+		return m, nil
+
 	case tea.KeyMsg:
 		// Global Keybindings
 		if m.Focus != FocusPalette {
@@ -338,10 +388,10 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.Navigation.RestoreBaseCommands() // Reset to default commands
 				m.Navigation.FilterCommands("")
 				return m, nil
-			case "up":
+			case "up", "ctrl+p":
 				m.Navigation.SelectPrev()
 				return m, nil
-			case "down":
+			case "down", "ctrl+n":
 				m.Navigation.SelectNext()
 				return m, nil
 			case "enter":
@@ -716,6 +766,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.HomeMenu.ScreenWidth = msg.Width
 		m.HomeMenu.ScreenHeight = msg.Height
 		m.HomeMenu.UpdateViewportRows()
+		m.HomeMenu.UpdateViewportCols()
 
 	case tea.MouseMsg:
 		// Handle mouse clicks for focus switching and selection

@@ -10,6 +10,50 @@
 - [x] Lifecycle operations — the simplest, most common single-call actions implemented for 10 services (2026-08-28 Round 7, see below): GCE VM reset/suspend/resume (on top of Round 3's start/stop), Cloud Tasks pause/resume/purge, Cloud Scheduler pause/resume/run, Redis failover, Dataflow cancel/drain, Dataproc start/stop, IAM Service Account disable/enable, Secret Manager version enable/disable/destroy, Pub/Sub detach-subscription, Cloud Functions call (Gen1 only). Remaining `[ ]` Lifecycle rows are deliberately skipped with an inline reason in the reference table — mostly multi-step orchestration (GKE upgrade, Cloud SQL failover/promote/clone/PITR/switchover, Firestore clone/restore, Cloud Run jobs/deploy), operations needing a sub-resource this app doesn't model (MIG per-instance ops, KMS key versions, Load Balancing get-health/invalidate-cdn-cache, Filestore revert/replica ops, Disks async-replication), or narrow/rare/unstable-API operations (Spanner change-quorum, Cloud Monitoring policy migrate, GCE perform-maintenance).
 - [x] Data-plane operations — implemented for 6 services with the simplest/safest wins (2026-08-28 Round 9, see below): GCS object delete+download, Secret Manager add-version, Pub/Sub publish+pull-without-ack, KMS get-public-key, Bigtable table list, Cloud SQL execute-sql (read-only SELECT/SHOW/EXPLAIN/DESCRIBE only, enforced client-side). Every mutating op (GCS delete, Pub/Sub publish, Secret Manager add-version) goes through the existing confirm-dialog pattern; read-only ops (GCS download, Pub/Sub pull, KMS public-key, Bigtable tables, Cloud SQL query) skip it. Spanner execute-sql, Firestore export/import/bulk-delete, Redis export/import/get-auth-string, Dataproc jobs, Cloud Tasks task-level ops, Parameter Manager versions, Cloud DNS record-set transactions, Cloud Logging sinks/metrics/buckets/views, Cloud Build log streaming, and Artifact Registry docker tags were all considered and explicitly skipped — see the reference table for the per-service reasons (mostly: needs a scrolling/streaming UI surface, a multi-step batch editor, or a sub-resource this app doesn't model).
 
+### Landing page + command palette UI/UX (2026-08-30)
+Implemented per an approved plan (`internal/ui/components/home_menu.go`, `palette.go`,
+`internal/core/navigation.go`, `internal/ui/{home,model,banner}.go`). Verified with
+`go build`/`go vet`/`go test`/`golangci-lint` (0 issues) after each batch; visually
+smoke-tested via throwaway tests printing rendered output (a real bug — the Overview
+TopItem's zero-valued `categoryIdx` leaking into the first category's column as a
+duplicate row — was only caught this way, not by unit tests, since the tests only
+asserted selection-index behavior rather than checking the actual rendered content).
+Not live-tested in a real terminal/tmux.
+
+- [x] **Landing page stats strip** — one-line resource-count summary (VMs/Disks/Buckets/
+  SQL/Datasets, zero counts omitted) between the user-info line and the service menu.
+  Reuses `overview.Client.GetGlobalInventory` and the exact cache key format the real
+  Overview service uses, so opening that tab later doesn't double-fetch. Fetched once at
+  `Init()` (no periodic refresh — deliberate v1 scope limit, staleness until restart is
+  an acceptable tradeoff for a glanceable count). Lowest priority in the landing page's
+  small-terminal degrade ladder — dropped first, before the banner/version/hints steps.
+- [x] **Grid-based, category-grouped service picker** — replaces the single-column
+  scrolling list with side-by-side category columns (wrapping into additional
+  rows-of-columns on narrower terminals), still fully keyboard-navigable
+  (arrows + h/j/k/l, no wrap-around at grid edges, home/end jump to Overview/last item).
+  Falls back to the original flat list unchanged — both on narrow terminals (`numCols`
+  computed from width, capped `[1,4]`) and when a filter narrows results to a small/
+  scattered set where a grid wouldn't help. **Mouse click-to-select only works in the
+  flat-list fallback** — grid mode is keyboard-only in this pass (no per-cell
+  bounding-box tracking was built; a documented, deliberate v1 scope limit, not an
+  oversight). No vertical scrolling of the grid itself yet either — today's ~7
+  categories / ≤4-column cap fits in two rows-of-columns, comfortably within typical
+  terminal heights, but this would need revisiting if the category count grows a lot.
+- [x] **Command palette**: minimal `Padding(0,1)` input box (was `Padding(1)`, matching
+  `FilterModel`'s convention); recently-executed commands ranked in the default
+  (empty-query) suggestion list instead of showing nothing, via `NavigationModel.
+  RecentNames` (session-only, cap 8); scrollable results replacing the old hard 8-item
+  cap + "...and N more" text row; wider box on large terminals (cap raised 72→100 cols);
+  `ctrl+p`/`ctrl+n` as additional select-up/down bindings alongside the arrow keys; and a
+  real bug fix — the palette always rendered the full 6-line banner even when the
+  landing page itself had already degraded to the compact wordmark at the same terminal
+  height (two independent, out-of-sync banner-choice call sites) — fixed via a shared
+  `chooseBanner()` helper (`internal/ui/banner.go`) used by both.
+- [ ] **Deliberately deferred, not attempted this pass**: grid mode mouse support (see
+  above); grid vertical scrolling for a much larger category/service count; palette
+  recency persisted across sessions (currently in-memory only); a true click-to-cell
+  bounding-box map for the grid.
+
 ### Cloud Run: revision management (2026-08-30)
 Revision listing was added this session (`v` key from a service's detail view opens a scrollable Revisions list — `ListRevisions` via `Revisions.List`, merged with the service's `Status.Traffic` for percent/latest/tag; `Enter` opens a full Revision Detail view).
 - [x] **Traffic-split editing (promote only)** — `p` key from the Revisions list or Revision Detail view sends 100% of traffic to the selected revision (`Client.PromoteRevision`, Get→replace `Spec.Traffic`→`ReplaceService`, matching `gcloud run services update-traffic --to-revisions=REVISION=100`), confirm-dialog gated with a new "promote" verb style in `internal/ui/components/confirmation.go`. Arbitrary N-way percent splits (e.g. 90/10 canary) are **not** implemented — this only supports the single most common case, cutting 100% to one revision.

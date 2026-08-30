@@ -292,3 +292,201 @@ func TestHomeMenu_IsOnCategoryAlwaysFalse(t *testing.T) {
 		t.Error("cursor should never land on a category header in the flat list")
 	}
 }
+
+// --- Grid mode ---
+
+func TestHomeMenu_GridMode_WideTerminalActivatesGrid(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+
+	if m.narrowMode {
+		t.Fatal("expected a wide terminal with the full unfiltered service list to activate grid mode")
+	}
+	if m.numCols <= 1 {
+		t.Errorf("expected numCols > 1 on a wide terminal, got %d", m.numCols)
+	}
+	if len(m.columns) == 0 {
+		t.Fatal("expected columns to be populated in grid mode")
+	}
+}
+
+func TestHomeMenu_GridMode_NarrowTerminalStaysFlat(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 30
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+
+	if !m.narrowMode {
+		t.Error("expected a narrow terminal to stay in flat-list mode")
+	}
+	if m.numCols != 1 {
+		t.Errorf("expected numCols clamped to 1 on a narrow terminal, got %d", m.numCols)
+	}
+}
+
+func TestHomeMenu_GridMode_LeftRightNavigation(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	if m.narrowMode {
+		t.Fatal("expected grid mode on a wide terminal")
+	}
+
+	// Start on Overview, move down into the first column, then right into
+	// the second column -- the selection must change to a service in a
+	// different category.
+	m = sendKey(m, "down")
+	if m.onTopItem {
+		t.Fatal("expected 'down' from Overview to enter the first column")
+	}
+	firstCatIdx := m.cursorCol
+	first := m.SelectedItem()
+
+	m = sendKey(m, "right")
+	if m.cursorCol == firstCatIdx {
+		t.Fatal("expected 'right' to move to the next column")
+	}
+	second := m.SelectedItem()
+	if second.ShortName == first.ShortName {
+		t.Errorf("expected a different service selected after moving right, got %q both times", second.ShortName)
+	}
+
+	m = sendKey(m, "left")
+	if m.cursorCol != firstCatIdx {
+		t.Errorf("expected 'left' to return to column %d, got %d", firstCatIdx, m.cursorCol)
+	}
+}
+
+func TestHomeMenu_GridMode_RightAtLastColumnNoops(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	m = sendKey(m, "down")
+
+	last := len(m.columns) - 1
+	for i := 0; i < last+5; i++ {
+		m = sendKey(m, "right")
+	}
+	if m.cursorCol != last {
+		t.Errorf("expected cursorCol clamped to last column %d, got %d", last, m.cursorCol)
+	}
+}
+
+func TestHomeMenu_GridMode_RowClampOnUnevenColumns(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	if len(m.columns) < 2 {
+		t.Skip("need at least 2 columns to exercise uneven-column clamping")
+	}
+
+	// Find two adjacent columns with different row counts.
+	var colA, colB int
+	found := false
+	for i := 0; i < len(m.columns)-1; i++ {
+		if len(m.columns[i].rows) != len(m.columns[i+1].rows) {
+			colA, colB = i, i+1
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Skip("no two adjacent columns with different row counts to test clamping")
+	}
+
+	m.onTopItem = false
+	m.cursorCol = colA
+	// Put the cursor on the last row of the taller column.
+	tall, short := colA, colB
+	if len(m.columns[colB].rows) > len(m.columns[colA].rows) {
+		tall, short = colB, colA
+	}
+	m.cursorCol = tall
+	m.cursorRow = len(m.columns[tall].rows) - 1
+
+	// Move onto the shorter column: cursorRow must clamp into range, not
+	// panic or point past the shorter column's last row.
+	if tall < short {
+		m = sendKey(m, "right")
+	} else {
+		m = sendKey(m, "left")
+	}
+	if m.cursorRow < 0 || m.cursorRow >= len(m.columns[short].rows) {
+		t.Errorf("cursorRow %d out of bounds [0,%d) after moving to a shorter column", m.cursorRow, len(m.columns[short].rows))
+	}
+}
+
+func TestHomeMenu_GridMode_FilterCollapsesToFlatList(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	if m.narrowMode {
+		t.Fatal("expected grid mode before filtering")
+	}
+
+	m = sendKey(m, "/")
+	for _, r := range "gke" {
+		m = sendKey(m, string(r))
+	}
+
+	if !m.narrowMode {
+		t.Error("expected a narrow, scattered filter result to collapse to the flat list")
+	}
+	if got := m.SelectedItem().ShortName; got != "gke" {
+		t.Errorf("expected 'gke' selected via the flat-list fallback, got %q", got)
+	}
+
+	m = sendKey(m, "esc")
+	if m.narrowMode {
+		t.Error("expected clearing the filter to restore grid mode on a wide terminal")
+	}
+}
+
+func TestHomeMenu_GridMode_MouseClickIsInert(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	m = sendKey(m, "down")
+	m = sendKey(m, "right")
+	col, row := m.cursorCol, m.cursorRow
+
+	msg := tea.MouseMsg{X: 5, Y: 20, Action: tea.MouseActionPress, Button: tea.MouseButtonLeft}
+	updated, _ := m.Update(msg)
+
+	if updated.cursorCol != col || updated.cursorRow != row {
+		t.Errorf("expected mouse clicks to be inert in grid mode, cursor moved from (%d,%d) to (%d,%d)", col, row, updated.cursorCol, updated.cursorRow)
+	}
+}
+
+func TestHomeMenu_GridMode_HomeAndEnd(t *testing.T) {
+	m := NewHomeMenu()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	m = sendKey(m, "down")
+	m = sendKey(m, "right")
+
+	m = sendKey(m, "home")
+	if !m.onTopItem {
+		t.Error("expected 'home' to select the Overview strip in grid mode")
+	}
+	if got := m.SelectedItem().ShortName; got != "overview" {
+		t.Errorf("expected 'overview' selected after 'home', got %q", got)
+	}
+
+	m = sendKey(m, "end")
+	if m.onTopItem {
+		t.Error("expected 'end' to move off the Overview strip")
+	}
+	lastCol := len(m.columns) - 1
+	if m.cursorCol != lastCol {
+		t.Errorf("expected 'end' to land on the last column %d, got %d", lastCol, m.cursorCol)
+	}
+}
