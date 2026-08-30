@@ -348,10 +348,10 @@ func (m *HomeMenuModel) applyFilter() {
 
 // rebuildColumns groups the current m.filtered service entries by category
 // into columns (see gridColumn), and decides narrowMode: whether the grid is
-// actually worth showing given the current width and filtered result count.
-// Called after every applyFilter() (so filtering re-flows the grid, or
-// collapses it to the flat list when results are scattered/few) and after
-// every UpdateViewportCols() (so resizing re-flows it too).
+// actually usable given the current width and whether a search filter is
+// active. Called after every applyFilter() (so filtering collapses to the
+// flat list -- see the narrowMode comment below for why) and after every
+// UpdateViewportCols() (so resizing re-flows the grid).
 func (m *HomeMenuModel) rebuildColumns() {
 	byCat := make(map[int][]listEntry)
 	var catOrder []int
@@ -372,21 +372,23 @@ func (m *HomeMenuModel) rebuildColumns() {
 	}
 
 	columns := make([]gridColumn, 0, len(catOrder))
-	totalMatched := 0
 	for _, ci := range catOrder {
-		rows := byCat[ci]
-		columns = append(columns, gridColumn{categoryIdx: ci, categoryName: catName[ci], rows: rows})
-		totalMatched += len(rows)
+		columns = append(columns, gridColumn{categoryIdx: ci, categoryName: catName[ci], rows: byCat[ci]})
 	}
 	m.columns = columns
 
-	// Collapse to the flat list not just when the terminal is narrow
-	// (widthNarrow), but also when the filtered result set is small/
-	// scattered enough that a grid wouldn't help -- a tidy short flat list
-	// reads better than a sparse multi-column grid for a handful of
-	// matches.
-	tooFewForGrid := m.numCols >= 2 && (len(columns) <= 1 || totalMatched < 2*m.numCols)
-	m.narrowMode = m.widthNarrow || tooFewForGrid
+	// Collapse to the flat list whenever the terminal is narrow
+	// (widthNarrow), OR whenever a search query is active at all. Grid mode
+	// is a 2D layout -- "down" only moves within the current column/
+	// category -- which breaks the universal "type a query, press down to
+	// reach the next match" fuzzy-finder expectation the moment matches
+	// land in more than one category/column (a match further down the
+	// result list can become unreachable via down alone, since reaching it
+	// requires pressing "right" into a different column first, which
+	// nothing hints at). The flat list's linear navigation is exactly what
+	// search expects, so any non-empty filter always uses it, regardless
+	// of how many/few matches there are.
+	m.narrowMode = m.widthNarrow || m.filter.Value() != ""
 
 	// Clamp the 2D cursor into range. Mode switches (narrow<->grid) don't
 	// try to preserve which service was selected across the transition --
@@ -605,7 +607,8 @@ func (m *HomeMenuModel) adjustScroll() {
 func isArrowNavKey(key string) bool {
 	return key == "up" || key == "down" ||
 		key == "home" || key == "end" ||
-		key == "pageup" || key == "pagedown"
+		key == "pageup" || key == "pagedown" ||
+		key == "ctrl+p" || key == "ctrl+n"
 }
 
 func (m HomeMenuModel) Init() tea.Cmd {
@@ -652,7 +655,7 @@ func (m HomeMenuModel) Update(msg tea.Msg) (HomeMenuModel, tea.Cmd) {
 		if m.narrowMode {
 			selectable := m.selectableItems()
 			switch key {
-			case "up":
+			case "up", "ctrl+p":
 				if m.cursor > 0 {
 					m.cursor--
 					m.adjustScroll()
@@ -662,7 +665,7 @@ func (m HomeMenuModel) Update(msg tea.Msg) (HomeMenuModel, tea.Cmd) {
 					m.cursor--
 					m.adjustScroll()
 				}
-			case "down":
+			case "down", "ctrl+n":
 				if m.cursor < len(selectable)-1 {
 					m.cursor++
 					m.adjustScroll()
@@ -686,13 +689,13 @@ func (m HomeMenuModel) Update(msg tea.Msg) (HomeMenuModel, tea.Cmd) {
 		} else {
 			// Grid mode: 2D column/row cursor (see gridMove*/gridHome/gridEnd).
 			switch key {
-			case "up":
+			case "up", "ctrl+p":
 				m.gridMoveUp()
 			case "k":
 				if !m.filter.Active {
 					m.gridMoveUp()
 				}
-			case "down":
+			case "down", "ctrl+n":
 				m.gridMoveDown()
 			case "j":
 				if !m.filter.Active {

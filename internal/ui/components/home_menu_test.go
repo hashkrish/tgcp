@@ -465,6 +465,96 @@ func TestHomeMenu_GridMode_MouseClickIsInert(t *testing.T) {
 	}
 }
 
+// TestHomeMenu_FilterAcrossCategoriesReachableViaDown is a regression test
+// for a reported bug: with grid mode active on a wide terminal, filtering to
+// a query whose matches spanned more than one category left later matches
+// unreachable via "down" alone (down only moved within the current
+// category/column; reaching a match in a different category required
+// "right", which nothing hinted at). The fix collapses to the flat list
+// for any active filter, restoring plain linear "down reaches every match"
+// navigation regardless of terminal width.
+func TestHomeMenu_FilterAcrossCategoriesReachableViaDown(t *testing.T) {
+	m := HomeMenuModel{
+		TopItem: &ServiceItem{Name: "Overview", ShortName: "overview"},
+		Categories: []Category{
+			{Name: "A", Services: []ServiceItem{{Name: "Alpha Match", ShortName: "alpha"}}},
+			{Name: "B", Services: []ServiceItem{{Name: "Beta Other", ShortName: "beta"}}},
+			{Name: "C", Services: []ServiceItem{{Name: "Gamma Match", ShortName: "gamma"}}},
+		},
+		IsFocused:    true,
+		filter:       NewFilterWithPlaceholder("Filter..."),
+		viewportRows: 12,
+	}
+	m.rebuildEntries()
+	m.applyFilter()
+	m.ScreenWidth = 200
+	m.ScreenHeight = 60
+	m.UpdateViewportCols()
+	if m.narrowMode {
+		t.Fatal("expected grid mode with no filter active on a wide terminal")
+	}
+
+	m = sendKey(m, "/")
+	for _, r := range "match" {
+		m = sendKey(m, string(r))
+	}
+
+	if !m.narrowMode {
+		t.Fatal("expected an active filter to force the flat list regardless of terminal width")
+	}
+	if got := len(m.selectableItems()); got != 2 {
+		t.Fatalf("expected 2 matches (alpha, gamma), got %d", got)
+	}
+	if got := m.SelectedItem().ShortName; got != "alpha" {
+		t.Fatalf("expected first match 'alpha' selected, got %q", got)
+	}
+
+	m = sendKey(m, "down")
+	if got := m.SelectedItem().ShortName; got != "gamma" {
+		t.Fatalf("expected 'down' to reach the second match 'gamma' in a different category, got %q", got)
+	}
+
+	m = sendKey(m, "esc")
+	if m.narrowMode {
+		t.Error("expected clearing the filter to restore grid mode on a wide terminal")
+	}
+}
+
+func TestHomeMenu_CtrlPCtrlN_NavigateLikeArrows(t *testing.T) {
+	m := NewHomeMenu()
+	start := m.cursor
+
+	m = sendKey(m, "ctrl+n")
+	if m.cursor != start+1 {
+		t.Fatalf("expected ctrl+n to move down to %d, got %d", start+1, m.cursor)
+	}
+	m = sendKey(m, "ctrl+p")
+	if m.cursor != start {
+		t.Fatalf("expected ctrl+p to move back up to %d, got %d", start, m.cursor)
+	}
+}
+
+func TestHomeMenu_CtrlPCtrlN_WorkWhileFiltering(t *testing.T) {
+	m := NewHomeMenu()
+	m = sendKey(m, "/")
+	for _, r := range "cloud" {
+		m = sendKey(m, string(r))
+	}
+	if !m.FilterActive() {
+		t.Fatal("expected filter to be active")
+	}
+	start := m.cursor
+
+	m = sendKey(m, "ctrl+n")
+	if m.cursor != start+1 {
+		t.Fatalf("expected ctrl+n to move selection down while filtering, got cursor %d (started at %d)", m.cursor, start)
+	}
+	m = sendKey(m, "ctrl+p")
+	if m.cursor != start {
+		t.Fatalf("expected ctrl+p to move selection back up while filtering, got cursor %d", m.cursor)
+	}
+}
+
 func TestHomeMenu_GridMode_HomeAndEnd(t *testing.T) {
 	m := NewHomeMenu()
 	m.ScreenWidth = 200
