@@ -77,16 +77,16 @@
 - [ ] Cloud Scheduler: no target/type update
 
 ### Security & Identity
-- [ ] IAM Service Accounts: no undelete
-- [ ] IAM Service Accounts: no add/remove/set-iam-policy (write)
-- [ ] IAM Service Accounts: `keys` subgroup not covered
-- [ ] Secret Manager: no replication set/update
-- [ ] Secret Manager: no remove/set-iam-policy (raw)
-- [ ] Parameter Manager: no versions create/render
-- [ ] KMS: no key-version lifecycle ops (set-primary/enable/disable/destroy/restore)
-- [ ] KMS: no crypto-key-level IAM
-- [ ] KMS: no remove/set-iam-policy (raw)
-- [ ] KMS: no import/export-trusted-key-wrapped
+- [x] IAM Service Accounts: no undelete — `UndeleteServiceAccount` added (`U` in list view).
+- [x] IAM Service Accounts: no add/remove/set-iam-policy (write) — add-only `GetServiceAccountIAMPolicy`/`AddServiceAccountIAMBinding` (`i` in detail view); remove/set declined (lockout risk).
+- [x] IAM Service Accounts: `keys` subgroup not covered — list/create/delete (`K` opens Keys, `n` create, `d` delete).
+- [x] Secret Manager: no replication set/update — **Declined**: replication policy (automatic vs. user-managed with specific KMS keys per region) is a create-time-shaped, multi-field structural choice, not a good fit for this codebase's single-field-patch Update convention (see `UpdateSecretLabels`'s existing labels-only scope).
+- [x] Secret Manager: no remove/set-iam-policy (raw) — **Declined** (lockout-risk repo policy); add-iam-policy-binding already existed.
+- [x] Parameter Manager: no versions create/render — `CreateVersion`/`RenderVersion` added.
+- [x] KMS: no key-version lifecycle ops (set-primary/enable/disable/destroy/restore) — all added (`p`/`e`/`x`/`d`/`R` in the Versions view).
+- [x] KMS: no crypto-key-level IAM — add-only `GetCryptoKeyIAMPolicy`/`AddCryptoKeyIAMBinding` (`i` in Keys view); remove/set declined.
+- [x] KMS: no remove/set-iam-policy (raw) — **Declined** (lockout-risk repo policy); add already existed at both key-ring and crypto-key level.
+- [x] KMS: no import/export-trusted-key-wrapped — **Declined**: this is a multi-step interactive key-wrapping ceremony (generate a wrapping key, wrap the external key material with OpenSSL/a tool outside this app, then submit the wrapped blob) rather than a single form submission; doesn't fit this app's one-shot mutating-action pattern.
 - [ ] Cloud DNS: no zone/record update
 - [ ] Cloud DNS: no IAM
 - [ ] Cloud DNS: no record-sets transaction/export/import

@@ -30,4 +30,18 @@ type CryptoKey struct {
 	RotationPeriod   string // Human-readable duration, empty if rotation is not configured
 	NextRotationTime string // RFC3339-ish local timestamp, empty if unset
 	CreateTime       string
+	// PrimaryVersion is the version number (e.g. "1") of this key's current
+	// primary CryptoKeyVersion, empty if the key has no primary set yet.
+	PrimaryVersion string
+}
+
+// CryptoKeyVersion represents a single version of a Cloud KMS crypto key.
+// Metadata only -- see the package doc-comment in api.go on Client for what
+// key-material operations this package will never call.
+type CryptoKeyVersion struct {
+	Name       string // Full resource name
+	VersionID  string // Short version number, e.g. "1"
+	State      string // ENABLED, DISABLED, DESTROYED, DESTROY_SCHEDULED, PENDING_GENERATION, etc.
+	Primary    bool   // true if this is the parent key's current primary version
+	CreateTime string
 }

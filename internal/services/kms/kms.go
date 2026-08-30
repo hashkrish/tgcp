@@ -33,13 +33,14 @@ const (
 	ViewIAM
 	ViewIAMForm
 	ViewPublicKey
+	ViewVersions
 )
 
 // newKeyUpdateForm builds the FormModel for updating a crypto key's
 // automatic rotation period (e.g. "7776000s" for 90 days), seeded with its
-// current value if set. Key-version operations (set-primary-version,
-// enable/disable/destroy/restore) are out of scope for this minimal Update
-// flow.
+// current value if set. Key-version lifecycle operations (set-primary-version,
+// enable/disable/destroy/restore) live in the separate versions view (see
+// ViewVersions) rather than this Update flow.
 func newKeyUpdateForm(key CryptoKey) components.FormModel {
 	return components.NewForm("Update Crypto Key: "+key.Name, []components.FormField{
 		{Label: "Rotation Period (Go duration, e.g. 2160h)", Default: rotationDefault(key.RotationPeriod), Required: true, Validate: func(v string) string {
@@ -62,6 +63,12 @@ func rotationDefault(existing string) string {
 type ringsMsg []KeyRing
 type keysMsg []CryptoKey
 type errMsg error
+
+// versionsMsg carries the result of a ListCryptoKeyVersions fetch.
+type versionsMsg struct {
+	versions []CryptoKeyVersion
+	err      error
+}
 
 // actionResultMsg carries the result of an async create action.
 type actionResultMsg struct {
@@ -118,14 +125,24 @@ type Service struct {
 	pendingAction string    // "delete"
 	actionSource  ViewState // Where to return after confirmation
 
-	// IAM: current bindings for the selected key ring, and the add-binding
-	// form. pendingIAMRole/pendingIAMMember are captured at form-submit
-	// time so the confirmation dialog and the actual API call use the same
-	// values regardless of what the form fields hold later.
+	// IAM: current bindings for the selected key ring or crypto key (see
+	// iamOnKey), and the add-binding form. pendingIAMRole/pendingIAMMember
+	// are captured at form-submit time so the confirmation dialog and the
+	// actual API call use the same values regardless of what the form
+	// fields hold later.
 	iamBindings      []IAMBinding
 	iamForm          components.FormModel
 	pendingIAMRole   string
 	pendingIAMMember string
+	// iamOnKey is true when the IAM view/form/bindings currently in scope
+	// target the selected crypto key rather than the selected key ring.
+	iamOnKey bool
+
+	// Versions: the selected crypto key's versions, for the key-version
+	// lifecycle operations (set-primary/enable/disable/destroy/restore).
+	versions        []CryptoKeyVersion
+	selectedVersion *CryptoKeyVersion
+	versionTable    *components.StandardTable
 
 	// Public key state — session-only, holds the PEM fetched for the
 	// currently selected asymmetric key's version 1 (see api.go GetPublicKey
@@ -155,13 +172,22 @@ func NewService(cache *core.Cache) *Service {
 	}
 	kt := components.NewStandardTable(keyColumns)
 
+	versionColumns := []table.Column{
+		{Title: "Version", Width: 12},
+		{Title: "State", Width: 20},
+		{Title: "Primary", Width: 10},
+		{Title: "Created", Width: 20},
+	}
+	vt := components.NewStandardTable(versionColumns)
+
 	svc := &Service{
-		ringTable: rt,
-		keyTable:  kt,
-		filter:    components.NewFilterWithPlaceholder("Filter key rings..."),
-		spinner:   components.NewSpinner(),
-		viewState: ViewRings,
-		cache:     cache,
+		ringTable:    rt,
+		keyTable:     kt,
+		versionTable: vt,
+		filter:       components.NewFilterWithPlaceholder("Filter key rings..."),
+		spinner:      components.NewSpinner(),
+		viewState:    ViewRings,
+		cache:        cache,
 	}
 	svc.filterSession = components.NewFilterSession(&svc.filter, svc.getFilteredRings, svc.updateRingTable)
 	return svc
@@ -180,7 +206,9 @@ func (s *Service) HelpText() string {
 	case ViewRings:
 		return "r:Refresh  /:Filter  n:New Key Ring  Ent:Keys  i:IAM"
 	case ViewKeys:
-		return "Esc/q:Back  n:New Key  u:Update  d:Delete  k:Public Key"
+		return "Esc/q:Back  n:New Key  u:Update  d:Delete  v:Versions  i:IAM  k:Public Key"
+	case ViewVersions:
+		return "p:Set Primary  e:Enable  x:Disable  d:Destroy  R:Restore  Esc/q:Back"
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
 	case ViewIAM:
@@ -242,10 +270,15 @@ func (s *Service) Refresh() tea.Cmd {
 func (s *Service) Reset() {
 	s.viewState = ViewRings
 	s.selectedRing = nil
+	s.selectedKey = nil
 	s.keys = nil
+	s.versions = nil
+	s.selectedVersion = nil
+	s.iamOnKey = false
 	s.err = nil
 	s.ringTable.SetCursor(0)
 	s.keyTable.SetCursor(0)
+	s.versionTable.SetCursor(0)
 	s.filter.ExitFilterMode()
 }
 
@@ -291,6 +324,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.updateKeyTable(msg)
 		return s, nil
 
+	case versionsMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.versions = msg.versions
+		s.updateVersionTable(s.versions)
+		s.viewState = ViewVersions
+		return s, nil
+
 	case errMsg:
 		s.spinner.Stop()
 		s.err = msg
@@ -322,6 +367,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
+			if s.iamOnKey && s.selectedKey != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchKeyIAMCmd(*s.selectedKey),
+				)
+			}
 			if s.selectedRing != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -329,6 +380,23 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				)
 			}
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+		}
+		if isVersionAction(s.pendingAction) {
+			s.pendingAction = ""
+			if msg.err != nil {
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			s.viewState = ViewVersions
+			if s.selectedKey == nil {
+				return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			}
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.spinner.Start(""),
+				s.fetchVersionsCmd(*s.selectedKey),
+			)
 		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
@@ -452,15 +520,78 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if s.viewState == ViewIAM {
 		switch msg.String() {
 		case "q", "esc":
-			s.viewState = ViewRings
+			if s.iamOnKey {
+				s.viewState = ViewKeys
+			} else {
+				s.viewState = ViewRings
+			}
 			return s, nil
 		case "a":
-			if s.selectedRing != nil {
+			if s.iamOnKey && s.selectedKey != nil {
+				s.iamForm = components.NewIAMAddBindingForm(s.selectedKey.Name)
+				s.viewState = ViewIAMForm
+			} else if !s.iamOnKey && s.selectedRing != nil {
 				s.iamForm = components.NewIAMAddBindingForm(s.selectedRing.Name)
 				s.viewState = ViewIAMForm
 			}
 			return s, nil
 		}
+	}
+
+	if s.viewState == ViewVersions {
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewKeys
+			s.versions = nil
+			s.selectedVersion = nil
+			return s, nil
+		case "p": // Set as primary version
+			if s.selectedKey != nil {
+				if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
+					s.selectedVersion = &s.versions[idx]
+					s.pendingAction = "set-primary"
+					s.actionSource = ViewVersions
+					s.viewState = ViewConfirmation
+				}
+			}
+			return s, nil
+		case "e": // Enable
+			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
+				s.selectedVersion = &s.versions[idx]
+				s.pendingAction = "enable-version"
+				s.actionSource = ViewVersions
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "x": // Disable
+			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
+				s.selectedVersion = &s.versions[idx]
+				s.pendingAction = "disable-version"
+				s.actionSource = ViewVersions
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "d": // Destroy
+			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
+				s.selectedVersion = &s.versions[idx]
+				s.pendingAction = "destroy-version"
+				s.actionSource = ViewVersions
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "R": // Restore
+			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
+				s.selectedVersion = &s.versions[idx]
+				s.pendingAction = "restore-version"
+				s.actionSource = ViewVersions
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		}
+		var updatedTable *components.StandardTable
+		updatedTable, cmd = s.versionTable.Update(msg)
+		s.versionTable = updatedTable
+		return s, cmd
 	}
 
 	if s.viewState == ViewRings {
@@ -499,6 +630,7 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			rings := s.getFilteredRings(s.rings, s.filter.Value())
 			if idx := s.ringTable.Cursor(); idx >= 0 && idx < len(rings) {
 				s.selectedRing = &rings[idx]
+				s.iamOnKey = false
 				return s, tea.Batch(s.fetchIAMCmd(*s.selectedRing), s.spinner.Start(""))
 			}
 			return s, nil
@@ -562,6 +694,19 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 				return s, tea.Batch(s.spinner.Start(""), s.fetchPublicKeyCmd(*s.selectedRing, key))
 			}
+		case "v":
+			if idx := s.keyTable.Cursor(); idx >= 0 && idx < len(s.keys) {
+				key := s.keys[idx]
+				s.selectedKey = &key
+				return s, tea.Batch(s.spinner.Start(""), s.fetchVersionsCmd(key))
+			}
+		case "i":
+			if idx := s.keyTable.Cursor(); idx >= 0 && idx < len(s.keys) {
+				key := s.keys[idx]
+				s.selectedKey = &key
+				s.iamOnKey = true
+				return s, tea.Batch(s.fetchKeyIAMCmd(key), s.spinner.Start(""))
+			}
 		}
 
 		var updatedTable *components.StandardTable
@@ -574,10 +719,23 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "y", "enter":
 			var actionCmd tea.Cmd
-			if s.pendingAction == "delete" && s.selectedKey != nil && s.selectedRing != nil {
+			switch {
+			case s.pendingAction == "delete" && s.selectedKey != nil && s.selectedRing != nil:
 				actionCmd = s.deleteKeyCmd(*s.selectedKey)
-			} else if s.pendingAction == "grant" && s.selectedRing != nil {
+			case s.pendingAction == "grant" && s.iamOnKey && s.selectedKey != nil && s.selectedRing != nil:
+				actionCmd = s.addKeyIAMBindingCmd(*s.selectedRing, *s.selectedKey, s.pendingIAMRole, s.pendingIAMMember)
+			case s.pendingAction == "grant" && !s.iamOnKey && s.selectedRing != nil:
 				actionCmd = s.addIAMBindingCmd(*s.selectedRing, s.pendingIAMRole, s.pendingIAMMember)
+			case s.pendingAction == "set-primary" && s.selectedKey != nil && s.selectedVersion != nil:
+				actionCmd = s.setPrimaryVersionCmd(*s.selectedKey, *s.selectedVersion)
+			case s.pendingAction == "enable-version" && s.selectedVersion != nil:
+				actionCmd = s.enableVersionCmd(*s.selectedVersion)
+			case s.pendingAction == "disable-version" && s.selectedVersion != nil:
+				actionCmd = s.disableVersionCmd(*s.selectedVersion)
+			case s.pendingAction == "destroy-version" && s.selectedVersion != nil:
+				actionCmd = s.destroyVersionCmd(*s.selectedVersion)
+			case s.pendingAction == "restore-version" && s.selectedVersion != nil:
+				actionCmd = s.restoreVersionCmd(*s.selectedVersion)
 			}
 			s.viewState = s.actionSource
 			return s, actionCmd
@@ -632,12 +790,35 @@ func (s *Service) View() string {
 		return s.renderPublicKeyView()
 	}
 
+	if s.viewState == ViewVersions {
+		return s.renderVersionsView()
+	}
+
 	return s.renderListView()
 }
 
 // renderIAMView renders the current IAM policy bindings for the selected
-// key ring, the safety-net read step before allowing an add-binding write.
+// key ring or crypto key (see iamOnKey), the safety-net read step before
+// allowing an add-binding write.
 func (s *Service) renderIAMView() string {
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	if s.iamOnKey {
+		if s.selectedKey == nil || s.selectedRing == nil {
+			return "Error: No key selected"
+		}
+		breadcrumb := components.Breadcrumb(
+			fmt.Sprintf("Project %s", s.projectID),
+			s.Name(),
+			"Key Rings",
+			s.selectedRing.Name,
+			s.selectedKey.Name,
+			"IAM",
+		)
+		return components.RenderIAMBindings(breadcrumb, s.selectedKey.Name, rows)
+	}
 	if s.selectedRing == nil {
 		return "Error: No key ring selected"
 	}
@@ -648,11 +829,27 @@ func (s *Service) renderIAMView() string {
 		s.selectedRing.Name,
 		"IAM",
 	)
-	rows := make([]components.IAMBindingRow, len(s.iamBindings))
-	for i, b := range s.iamBindings {
-		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
-	}
 	return components.RenderIAMBindings(breadcrumb, s.selectedRing.Name, rows)
+}
+
+// renderVersionsView renders the selected crypto key's versions.
+func (s *Service) renderVersionsView() string {
+	if s.selectedRing == nil || s.selectedKey == nil {
+		return "Error: No key selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		"Key Rings",
+		s.selectedRing.Name,
+		s.selectedKey.Name,
+		"Versions",
+	)
+	if len(s.versions) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("versions"))
+	}
+	hint := styles.HelpStyle.Render("p Set Primary  |  e Enable  |  x Disable  |  d Destroy  |  R Restore  |  q Back")
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.versionTable.View(), "", hint)
 }
 
 // renderPublicKeyView renders the PEM-encoded public key fetched for the
@@ -692,13 +889,14 @@ func (s *Service) renderPublicKeyView() string {
 	)
 }
 
-// renderConfirmation renders the key-delete confirmation dialog. Note that
-// this will only succeed if every version of the key has already been
-// destroyed — a precondition this app has no way to satisfy, since
-// key-version operations are out of scope.
+// renderConfirmation renders the confirmation dialog for the pending
+// action: key delete, IAM grant, or a key-version lifecycle operation.
 func (s *Service) renderConfirmation() string {
 	if s.pendingAction == "grant" {
 		return s.renderIAMConfirmation()
+	}
+	if isVersionAction(s.pendingAction) {
+		return s.renderVersionConfirmation()
 	}
 	if s.selectedKey == nil {
 		return "Error: No key selected"
@@ -707,13 +905,24 @@ func (s *Service) renderConfirmation() string {
 		s.pendingAction,
 		s.selectedKey.Name,
 		"crypto key",
-		fmt.Sprintf("Are you sure you want to DELETE key %s? This only succeeds if every key version has already been destroyed — this app has no key-version management, so this will likely fail for keys with active versions.", s.selectedKey.Name),
+		fmt.Sprintf("Are you sure you want to DELETE key %s? This only succeeds if every key version has already been destroyed (see the Versions view — press 'v' on a key — for destroying individual versions first).", s.selectedKey.Name),
 	)
 }
 
 // renderIAMConfirmation renders the IAM-grant confirmation dialog for the
-// selected key ring.
+// selected key ring or crypto key (see iamOnKey).
 func (s *Service) renderIAMConfirmation() string {
+	if s.iamOnKey {
+		if s.selectedKey == nil {
+			return "Error: No key selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"grant",
+			s.selectedKey.Name,
+			"crypto key",
+			components.IAMConfirmMessage("crypto key", s.selectedKey.Name, s.pendingIAMRole, s.pendingIAMMember),
+		)
+	}
 	if s.selectedRing == nil {
 		return "Error: No key ring selected"
 	}
@@ -723,6 +932,28 @@ func (s *Service) renderIAMConfirmation() string {
 		"key ring",
 		components.IAMConfirmMessage("key ring", s.selectedRing.Name, s.pendingIAMRole, s.pendingIAMMember),
 	)
+}
+
+// renderVersionConfirmation renders the confirmation dialog for a
+// key-version lifecycle action (set-primary/enable/disable/destroy/restore).
+func (s *Service) renderVersionConfirmation() string {
+	if s.selectedVersion == nil {
+		return "Error: No version selected"
+	}
+	verb := strings.TrimSuffix(s.pendingAction, "-version")
+	if verb == "set-primary" {
+		return components.RenderConfirmationWithMessage(
+			"set-primary",
+			s.selectedVersion.VersionID,
+			"crypto key version",
+			fmt.Sprintf("Set version %s as the primary version?", s.selectedVersion.VersionID),
+		)
+	}
+	message := fmt.Sprintf("%s version %s?", strings.ToUpper(verb[:1])+verb[1:], s.selectedVersion.VersionID)
+	if verb == "destroy" {
+		message += " This schedules the key material for destruction after a ~24h grace period, during which it can still be restored."
+	}
+	return components.RenderConfirmationWithMessage(verb, s.selectedVersion.VersionID, "crypto key version", message)
 }
 
 func (s *Service) renderListView() string {
@@ -863,6 +1094,130 @@ func (s *Service) addIAMBindingCmd(ring KeyRing, role, member string) tea.Cmd {
 	}
 }
 
+// fetchKeyIAMCmd fetches the current IAM policy for a crypto key.
+func (s *Service) fetchKeyIAMCmd(key CryptoKey) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil || s.selectedRing == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetCryptoKeyIAMPolicy(cryptoKeyFullName(*s.selectedRing, key))
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addKeyIAMBindingCmd grants role to member on the selected crypto key.
+func (s *Service) addKeyIAMBindingCmd(ring KeyRing, key CryptoKey, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddCryptoKeyIAMBinding(cryptoKeyFullName(ring, key), role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on key %s", role, member, key.Name)}
+	}
+}
+
+// fetchVersionsCmd lists the versions of the selected crypto key.
+func (s *Service) fetchVersionsCmd(key CryptoKey) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil || s.selectedRing == nil {
+			return versionsMsg{err: fmt.Errorf("client not initialized")}
+		}
+		versions, err := s.client.ListCryptoKeyVersions(cryptoKeyFullName(*s.selectedRing, key))
+		if err != nil {
+			return versionsMsg{err: err}
+		}
+		return versionsMsg{versions: versions}
+	}
+}
+
+// isVersionAction reports whether action is one of the key-version
+// lifecycle pendingActions, all of which route through the same
+// actionResultMsg handling (return to ViewVersions, refetch versions).
+func isVersionAction(action string) bool {
+	switch action {
+	case "set-primary", "enable-version", "disable-version", "destroy-version", "restore-version":
+		return true
+	}
+	return false
+}
+
+// setPrimaryVersionCmd sets version as the selected crypto key's primary version.
+func (s *Service) setPrimaryVersionCmd(key CryptoKey, version CryptoKeyVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil || s.selectedRing == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.SetPrimaryVersion(cryptoKeyFullName(*s.selectedRing, key), version.VersionID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Set version %s as primary for %s", version.VersionID, key.Name)}
+	}
+}
+
+// enableVersionCmd re-enables a disabled crypto key version.
+func (s *Service) enableVersionCmd(version CryptoKeyVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.EnableCryptoKeyVersion(version.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Enabled version %s", version.VersionID)}
+	}
+}
+
+// disableVersionCmd disables a crypto key version.
+func (s *Service) disableVersionCmd(version CryptoKeyVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DisableCryptoKeyVersion(version.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Disabled version %s", version.VersionID)}
+	}
+}
+
+// destroyVersionCmd schedules a crypto key version for destruction.
+func (s *Service) destroyVersionCmd(version CryptoKeyVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DestroyCryptoKeyVersion(version.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Destruction scheduled for version %s", version.VersionID)}
+	}
+}
+
+// restoreVersionCmd undoes a pending destroy on a crypto key version.
+func (s *Service) restoreVersionCmd(version CryptoKeyVersion) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.RestoreCryptoKeyVersion(version.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Restored version %s", version.VersionID)}
+	}
+}
+
+// cryptoKeyFullName builds a crypto key's full resource name from its key
+// ring and short key name, matching the (keyRingFullName, keyID) signature
+// CreateCryptoKey/DeleteCryptoKey already use in api.go.
+func cryptoKeyFullName(ring KeyRing, key CryptoKey) string {
+	return fmt.Sprintf("%s/cryptoKeys/%s", ring.FullName, key.Name)
+}
+
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
@@ -955,6 +1310,19 @@ func (s *Service) updateKeyTable(items []CryptoKey) {
 		}
 	}
 	s.keyTable.SetRows(rows)
+}
+
+func (s *Service) updateVersionTable(items []CryptoKeyVersion) {
+	rows := make([]table.Row, len(items))
+	for i, item := range items {
+		rows[i] = table.Row{
+			item.VersionID,
+			item.State,
+			fmt.Sprintf("%t", item.Primary),
+			item.CreateTime,
+		}
+	}
+	s.versionTable.SetRows(rows)
 }
 
 // getFilteredRings returns filtered key rings based on the query string

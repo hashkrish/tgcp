@@ -2,7 +2,10 @@ package iam
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"os"
+	"strings"
 
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/demo"
@@ -170,5 +173,161 @@ func (c *Client) UpdateServiceAccountDisplayName(resourceName, displayName strin
 		UpdateMask: "displayName",
 	}
 	_, err := c.service.Projects.ServiceAccounts.Patch(resourceName, req).Do()
+	return err
+}
+
+// UndeleteServiceAccount restores a recently-deleted service account,
+// matching `gcloud iam service-accounts undelete`. Real gcloud looks up the
+// account's unique ID from `service-accounts list --show-deleted` first;
+// this app doesn't track deleted accounts (they simply vanish from
+// ListServiceAccounts), so the caller supplies the unique ID directly --
+// only recoverable within GCP's ~30-day undelete window.
+func (c *Client) UndeleteServiceAccount(projectID, uniqueID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("iam client not initialized")
+	}
+	resourceName := fmt.Sprintf("projects/%s/serviceAccounts/%s", projectID, uniqueID)
+	_, err := c.service.Projects.ServiceAccounts.Undelete(resourceName, &iam.UndeleteServiceAccountRequest{}).Do()
+	return err
+}
+
+// GetServiceAccountIAMPolicy reads a service account's own IAM policy --
+// who can act as/impersonate this identity (e.g. roles/iam.serviceAccountUser),
+// as opposed to GetProjectPolicyBindings' project-level policy of what this
+// identity itself can do. Matches `gcloud iam service-accounts get-iam-policy`.
+func (c *Client) GetServiceAccountIAMPolicy(resourceName string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("iam client not initialized")
+	}
+	policy, err := c.service.Projects.ServiceAccounts.GetIamPolicy(resourceName).Do()
+	if err != nil {
+		return nil, fmt.Errorf("get service account IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, b := range policy.Bindings {
+		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
+	}
+	return out, nil
+}
+
+// AddServiceAccountIAMBinding grants a role to a member on a service
+// account's own IAM policy, matching
+// `gcloud iam service-accounts add-iam-policy-binding`. It fetches the
+// current policy, merges the new binding in, and writes the whole policy
+// back -- this never drops any existing binding, unlike a raw
+// set-iam-policy (which this app deliberately never calls).
+func (c *Client) AddServiceAccountIAMBinding(resourceName, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("iam client not initialized")
+	}
+	policy, err := c.service.Projects.ServiceAccounts.GetIamPolicy(resourceName).Do()
+	if err != nil {
+		return fmt.Errorf("get service account IAM policy: %w", err)
+	}
+	policy.Bindings = mergeServiceAccountIAMBinding(policy.Bindings, role, member)
+	_, err = c.service.Projects.ServiceAccounts.SetIamPolicy(resourceName, &iam.SetIamPolicyRequest{Policy: policy}).Do()
+	return err
+}
+
+// mergeServiceAccountIAMBinding appends member to the existing binding for
+// role if one exists (skipping if already granted), or appends a brand-new
+// role binding otherwise. It never removes or replaces any other binding.
+func mergeServiceAccountIAMBinding(bindings []*iam.Binding, role, member string) []*iam.Binding {
+	for _, b := range bindings {
+		if b.Role != role {
+			continue
+		}
+		for _, m := range b.Members {
+			if m == member {
+				return bindings
+			}
+		}
+		b.Members = append(b.Members, member)
+		return bindings
+	}
+	return append(bindings, &iam.Binding{Role: role, Members: []string{member}})
+}
+
+// ListServiceAccountKeys lists the user-managed keys on a service account,
+// matching `gcloud iam service-accounts keys list --managed-by=user`.
+// System-managed keys are excluded -- they're auto-rotated by Google and
+// can't be created/deleted through the API.
+func (c *Client) ListServiceAccountKeys(resourceName string) ([]ServiceAccountKey, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.service == nil {
+		return nil, fmt.Errorf("iam client not initialized")
+	}
+	resp, err := c.service.Projects.ServiceAccounts.Keys.List(resourceName).KeyTypes("USER_MANAGED").Do()
+	if err != nil {
+		return nil, fmt.Errorf("list service account keys: %w", err)
+	}
+	var keys []ServiceAccountKey
+	for _, k := range resp.Keys {
+		keys = append(keys, ServiceAccountKey{
+			Name:            k.Name,
+			KeyID:           shortKeyID(k.Name),
+			ValidAfterTime:  k.ValidAfterTime,
+			ValidBeforeTime: k.ValidBeforeTime,
+			Disabled:        k.Disabled,
+		})
+	}
+	return keys, nil
+}
+
+func shortKeyID(fullName string) string {
+	const marker = "/keys/"
+	if i := strings.LastIndex(fullName, marker); i >= 0 {
+		return fullName[i+len(marker):]
+	}
+	return fullName
+}
+
+// CreateServiceAccountKey creates a new user-managed key for a service
+// account and writes the returned private key JSON to outputPath, matching
+// `gcloud iam service-accounts keys create OUTPUT_FILE`. The private key is
+// only ever returned once by the API -- if the write fails, the key still
+// exists server-side and the caller must delete it manually.
+func (c *Client) CreateServiceAccountKey(resourceName, outputPath string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("iam client not initialized")
+	}
+	key, err := c.service.Projects.ServiceAccounts.Keys.Create(resourceName, &iam.CreateServiceAccountKeyRequest{}).Do()
+	if err != nil {
+		return fmt.Errorf("create service account key: %w", err)
+	}
+	data, err := base64.StdEncoding.DecodeString(key.PrivateKeyData)
+	if err != nil {
+		return fmt.Errorf("key %s was created but its key data could not be decoded -- delete it manually: %w", key.Name, err)
+	}
+	if err := os.WriteFile(outputPath, data, 0600); err != nil {
+		return fmt.Errorf("key %s was created but could not be written to %s -- delete it manually: %w", key.Name, outputPath, err)
+	}
+	return nil
+}
+
+// DeleteServiceAccountKey deletes a user-managed key, matching
+// `gcloud iam service-accounts keys delete`.
+func (c *Client) DeleteServiceAccountKey(keyResourceName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("iam client not initialized")
+	}
+	_, err := c.service.Projects.ServiceAccounts.Keys.Delete(keyResourceName).Do()
 	return err
 }

@@ -157,10 +157,54 @@ func (c *Client) CreateParameter(projectID, parameterID, format string) error {
 	return err
 }
 
+// CreateVersion creates a new version under an existing parameter with the
+// given payload, matching `gcloud parametermanager parameters versions
+// create --payload-data`.
+func (c *Client) CreateVersion(parameterFullName, versionID, payload string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("parametermanager client not initialized")
+	}
+	version := &parametermanager.ParameterVersion{
+		Payload: &parametermanager.ParameterVersionPayload{
+			Data: base64.StdEncoding.EncodeToString([]byte(payload)),
+		},
+	}
+	_, err := c.service.Projects.Locations.Parameters.Versions.Create(parameterFullName, version).ParameterVersionId(versionID).Do()
+	return err
+}
+
+// RenderVersion resolves a parameter version's payload, expanding any
+// references it contains (e.g. to Secret Manager secrets), matching
+// `gcloud parametermanager parameters versions render`. Unlike
+// GetVersionPayload (which returns the raw stored payload), this returns
+// the fully-resolved value actually seen by a consumer of the parameter.
+func (c *Client) RenderVersion(versionFullName string) (string, error) {
+	if demo.Enabled {
+		return "", nil
+	}
+	if c.service == nil {
+		return "", fmt.Errorf("parametermanager client not initialized")
+	}
+	resp, err := c.service.Projects.Locations.Parameters.Versions.Render(versionFullName).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to render parameter version: %w", err)
+	}
+	if resp.RenderedPayload == "" {
+		return "", nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(resp.RenderedPayload)
+	if err != nil {
+		return resp.RenderedPayload, nil
+	}
+	return string(decoded), nil
+}
+
 // UpdateParameterLabels replaces a parameter's labels via a labels-only
 // Patch, matching `gcloud parametermanager parameters update
-// --update-labels`. Format is immutable after creation and versions
-// create/render are out of scope for this minimal Update flow.
+// --update-labels`. Format is immutable after creation.
 func (c *Client) UpdateParameterLabels(parameterName string, labels map[string]string) error {
 	if demo.Enabled {
 		return nil

@@ -24,6 +24,7 @@ type tickMsg time.Time
 type parametersMsg []Parameter
 type versionsMsg []ParameterVersion
 type valueMsg string
+type renderedMsg string
 type errMsg error
 
 // ViewState defines the current UI state
@@ -35,9 +36,20 @@ const (
 	ViewVersions
 	ViewVersionDetail
 	ViewCreate
+	ViewCreateVersion
 	ViewUpdate
 	ViewConfirmation
 )
+
+// newVersionCreateForm builds the FormModel for adding a new version to an
+// existing parameter, matching `gcloud parametermanager parameters versions
+// create --payload-data`.
+func newVersionCreateForm() components.FormModel {
+	return components.NewForm("New Parameter Version", []components.FormField{
+		{Label: "Version ID", Placeholder: "v1", Required: true},
+		{Label: "Payload", Placeholder: "the parameter value", Required: true},
+	})
+}
 
 // newParameterUpdateForm builds the FormModel for updating a parameter's
 // labels, seeded with its current labels rendered as comma-separated
@@ -91,7 +103,11 @@ type Service struct {
 	value             string
 	valueErr          error
 
-	createForm components.FormModel
+	createForm        components.FormModel
+	versionCreateForm components.FormModel
+	// rendered indicates s.value currently holds a *rendered* payload (from
+	// RenderVersion, references expanded) rather than the raw stored one.
+	rendered   bool
 	updateForm components.FormModel
 
 	// Confirmation State
@@ -149,10 +165,10 @@ func (s *Service) HelpText() string {
 	case ViewDetail:
 		return "v:Versions  u:Update  d:Delete  Esc/q:Back"
 	case ViewVersions:
-		return "Enter:View Version  Esc/q:Back to Detail"
+		return "n:New Version  Enter:View Version  Esc/q:Back to Detail"
 	case ViewVersionDetail:
-		return "Esc/q:Back"
-	case ViewCreate, ViewUpdate:
+		return "R:Render  Esc/q:Back"
+	case ViewCreate, ViewUpdate, ViewCreateVersion:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
@@ -202,6 +218,7 @@ func (s *Service) Reset() {
 	s.versions = nil
 	s.value = ""
 	s.valueErr = nil
+	s.rendered = false
 	s.err = nil
 	s.table.SetCursor(0)
 	s.versionTable.SetCursor(0)
@@ -251,6 +268,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.spinner.Stop()
 		s.value = string(msg)
 		s.valueErr = nil
+		s.rendered = false
+		return s, nil
+
+	case renderedMsg:
+		s.spinner.Stop()
+		s.value = string(msg)
+		s.valueErr = nil
+		s.rendered = true
 		return s, nil
 
 	case errMsg:
@@ -273,6 +298,25 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
 				},
 				s.Refresh(),
+			)
+		}
+		if s.pendingAction == "create-version" {
+			s.pendingAction = ""
+			if msg.err != nil {
+				s.versionCreateForm.SubmitErr = msg.err.Error()
+				s.viewState = ViewCreateVersion
+				return s, nil
+			}
+			s.viewState = ViewVersions
+			if s.selectedParameter == nil {
+				return s, nil
+			}
+			return s, tea.Batch(
+				func() tea.Msg {
+					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+				},
+				s.spinner.Start(""),
+				s.fetchVersionsCmd(s.selectedParameter.FullName),
 			)
 		}
 		if msg.err != nil {
@@ -388,6 +432,18 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return s, formCmd
 
+	case ViewCreateVersion:
+		result, formCmd := s.versionCreateForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewVersions
+			return s, nil
+		}
+		if result.Submitted && s.selectedParameter != nil {
+			s.pendingAction = "create-version"
+			return s, s.submitCreateVersionCmd(*s.selectedParameter)
+		}
+		return s, formCmd
+
 	case ViewDetail:
 		switch msg.String() {
 		case "esc", "q":
@@ -439,6 +495,12 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			s.viewState = ViewDetail
 			return s, nil
+		case "n":
+			if s.selectedParameter != nil {
+				s.versionCreateForm = newVersionCreateForm()
+				s.viewState = ViewCreateVersion
+			}
+			return s, nil
 		case "enter":
 			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
 				s.selectedVersion = &s.versions[idx]
@@ -468,6 +530,15 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.selectedVersion = nil
 			s.value = ""
 			s.valueErr = nil
+			s.rendered = false
+			return s, nil
+		case "R":
+			// Render: resolve any references (e.g. Secret Manager) in the
+			// payload, matching `gcloud parametermanager parameters
+			// versions render`.
+			if s.selectedVersion != nil {
+				return s, tea.Batch(s.spinner.Start(""), s.fetchRenderCmd(s.selectedVersion.FullName))
+			}
 			return s, nil
 		}
 	}
@@ -497,6 +568,8 @@ func (s *Service) View() string {
 		return s.renderVersionDetailView()
 	case ViewCreate:
 		return s.createForm.View()
+	case ViewCreateVersion:
+		return s.versionCreateForm.View()
 	case ViewUpdate:
 		return s.updateForm.View()
 	case ViewConfirmation:
@@ -594,10 +667,13 @@ func (s *Service) renderVersionsView() string {
 		"Versions",
 	)
 
+	hint := styles.HelpStyle.Render("n New Version  |  enter View  |  q Back")
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
 		"",
 		s.versionTable.View(),
+		"",
+		hint,
 	)
 }
 
@@ -626,7 +702,7 @@ func (s *Service) renderVersionDetailView() string {
 	card := components.DetailCard(components.DetailCardOpts{
 		Title:      "Parameter Version Details",
 		Rows:       rows,
-		FooterHint: "q Back",
+		FooterHint: "R Render (resolve references)  |  q Back",
 	})
 
 	var valueBlock string
@@ -635,9 +711,13 @@ func (s *Service) renderVersionDetailView() string {
 			Foreground(styles.ColorError).
 			Render(fmt.Sprintf("Failed to load value: %v", s.valueErr))
 	} else {
+		labelText := "Value:"
+		if s.rendered {
+			labelText = "Value (rendered, references resolved):"
+		}
 		label := lipgloss.NewStyle().
 			Foreground(styles.ColorTextMuted).
-			Render("Value:")
+			Render(labelText)
 		value := lipgloss.NewStyle().
 			Foreground(styles.ColorTextPrimary).
 			Render(s.value)
@@ -770,6 +850,37 @@ func (s *Service) fetchValueCmd(versionFullName string) tea.Cmd {
 		}
 
 		return valueMsg(value)
+	}
+}
+
+// fetchRenderCmd resolves a version's payload, expanding any references it
+// contains, matching `gcloud parametermanager parameters versions render`.
+func (s *Service) fetchRenderCmd(versionFullName string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not initialized"))
+		}
+		rendered, err := s.client.RenderVersion(versionFullName)
+		if err != nil {
+			return errMsg(err)
+		}
+		return renderedMsg(rendered)
+	}
+}
+
+// submitCreateVersionCmd fires the CreateVersion API call using the current
+// version-create-form values.
+func (s *Service) submitCreateVersionCmd(param Parameter) tea.Cmd {
+	versionID := s.versionCreateForm.Value("Version ID")
+	payload := s.versionCreateForm.Value("Payload")
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateVersion(param.FullName, versionID, payload); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Created version %s on %s", versionID, param.Name)}
 	}
 }
 

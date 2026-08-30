@@ -4,11 +4,14 @@ import (
 	"context"
 
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
+	"github.com/yogirk/tgcp/internal/styles"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
@@ -34,15 +37,34 @@ type Service struct {
 	viewCreate      bool
 	viewUpdate      bool
 	viewConfirm     bool
+	viewIAM         bool
+	viewIAMForm     bool
+	viewKeys        bool
+	viewKeyCreate   bool
+	viewUndelete    bool
 	selectedAccount *ServiceAccount
 
 	// pendingAction is "delete" then escalates to "delete-confirm2" — service
 	// account delete immediately breaks any workload using that identity, so
-	// this requires a double confirmation.
+	// this requires a double confirmation. Also "enable"/"disable"/"grant"/
+	// "delete-key".
 	pendingAction string
 
-	createForm components.FormModel
-	updateForm components.FormModel
+	createForm    components.FormModel
+	updateForm    components.FormModel
+	iamForm       components.FormModel
+	undeleteForm  components.FormModel
+	keyCreateForm components.FormModel
+
+	// IAM State (the service account's own policy -- who can act as it)
+	iamBindings      []IAMBinding
+	pendingIAMRole   string
+	pendingIAMMember string
+
+	// Keys State
+	keys        []ServiceAccountKey
+	selectedKey *ServiceAccountKey
+	keyTable    *components.StandardTable
 
 	// Cache
 	cache *core.Cache
@@ -59,10 +81,19 @@ func NewService(cache *core.Cache) *Service {
 
 	t := components.NewStandardTable(columns)
 
+	keyColumns := []table.Column{
+		{Title: "Key ID", Width: 30},
+		{Title: "Valid After", Width: 22},
+		{Title: "Valid Before", Width: 22},
+		{Title: "Disabled", Width: 10},
+	}
+	keyTable := components.NewStandardTable(keyColumns)
+
 	return &Service{
-		table:   t,
-		spinner: components.NewSpinner(),
-		cache:   cache,
+		table:    t,
+		keyTable: keyTable,
+		spinner:  components.NewSpinner(),
+		cache:    cache,
 	}
 }
 
@@ -75,21 +106,28 @@ func (s *Service) ShortName() string {
 }
 
 func (s *Service) HelpText() string {
-	if s.viewCreate || s.viewUpdate {
+	if s.viewCreate || s.viewUpdate || s.viewIAMForm || s.viewUndelete || s.viewKeyCreate {
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	}
 	if s.viewConfirm {
 		return "y:Confirm  n:Cancel"
 	}
-	if s.viewDetail {
-		return "Esc/q:Back  u:Update  E:Enable  D:Disable  d:Delete"
+	if s.viewKeys {
+		return "Esc/q:Back  n:Create Key  d:Delete Key"
 	}
-	return "r:Refresh  n:New Service Account  Ent:Detail"
+	if s.viewIAM {
+		return "Esc/q:Back  a:Grant Role"
+	}
+	if s.viewDetail {
+		return "Esc/q:Back  u:Update  E:Enable  D:Disable  d:Delete  i:IAM  K:Keys"
+	}
+	return "r:Refresh  n:New Service Account  U:Undelete  Ent:Detail"
 }
 
 // newAccountUpdateForm builds the FormModel for updating a service
-// account's display name, seeded with its current value. Description and
-// the disable/enable/undelete/keys operations are out of scope.
+// account's display name, seeded with its current value. Description is
+// out of scope; undelete and the keys subgroup are covered separately (see
+// undeleteAccountCmd / *KeyCmd below).
 func newAccountUpdateForm(acc ServiceAccount) components.FormModel {
 	return components.NewForm("Update Service Account: "+acc.Email, []components.FormField{
 		{Label: "Display Name", Default: acc.DisplayName},
@@ -141,6 +179,18 @@ type actionResultMsg struct {
 	msg string
 }
 
+// iamPolicyMsg carries the result of a GetServiceAccountIAMPolicy fetch.
+type iamPolicyMsg struct {
+	err      error
+	bindings []IAMBinding
+}
+
+// keysMsg carries the result of a ListServiceAccountKeys fetch.
+type keysMsg struct {
+	err  error
+	keys []ServiceAccountKey
+}
+
 func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
@@ -170,6 +220,29 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.policyBindings = msg
 		return s, nil
 
+	case iamPolicyMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.iamBindings = msg.bindings
+		s.viewIAM = true
+		return s, nil
+
+	case keysMsg:
+		s.spinner.Stop()
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.keys = msg.keys
+		s.updateKeyTable(msg.keys)
+		s.viewKeys = true
+		return s, nil
+
 	case errMsg:
 		s.spinner.Stop()
 		s.err = msg
@@ -190,6 +263,25 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if action == "delete-confirm2" {
 				s.viewDetail = false
 				s.selectedAccount = nil
+			}
+			if action == "grant" && s.selectedAccount != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchIAMPolicyCmd(*s.selectedAccount),
+				)
+			}
+			if (action == "delete-key" || action == "create-key") && s.selectedAccount != nil {
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.fetchKeysCmd(*s.selectedAccount),
+				)
+			}
+			if action == "undelete" {
+				s.viewUndelete = false
+				return s, tea.Batch(
+					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+					s.Refresh(),
+				)
 			}
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -223,7 +315,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.MouseMsg:
 		// Forward mouse events to table for click selection
-		if !s.viewDetail && !s.viewCreate && !s.viewUpdate && !s.viewConfirm {
+		if !s.viewDetail && !s.viewCreate && !s.viewUpdate && !s.viewConfirm &&
+			!s.viewIAM && !s.viewIAMForm && !s.viewKeys && !s.viewKeyCreate && !s.viewUndelete {
 			var updatedTable *components.StandardTable
 			updatedTable, cmd = s.table.Update(msg)
 			s.table = updatedTable
@@ -253,6 +346,50 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return s, formCmd
 		}
+		if s.viewIAMForm {
+			result, formCmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewIAMForm = false
+				s.viewIAM = true
+				return s, nil
+			}
+			if result.Submitted && s.selectedAccount != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.viewIAMForm = false
+				s.viewConfirm = true
+				return s, nil
+			}
+			return s, formCmd
+		}
+		if s.viewUndelete {
+			result, formCmd := s.undeleteForm.Update(msg)
+			if result.Cancelled {
+				s.viewUndelete = false
+				return s, nil
+			}
+			if result.Submitted {
+				s.pendingAction = "undelete"
+				return s, s.undeleteAccountCmd(s.undeleteForm.Value("Unique ID"))
+			}
+			return s, formCmd
+		}
+		if s.viewKeyCreate {
+			result, formCmd := s.keyCreateForm.Update(msg)
+			if result.Cancelled {
+				s.viewKeyCreate = false
+				s.viewKeys = true
+				return s, nil
+			}
+			if result.Submitted && s.selectedAccount != nil {
+				s.pendingAction = "create-key"
+				outputPath := s.keyCreateForm.Value("Output File Path")
+				s.viewKeyCreate = false
+				return s, s.createKeyCmd(*s.selectedAccount, outputPath)
+			}
+			return s, formCmd
+		}
 		if s.viewConfirm {
 			switch msg.String() {
 			case "y", "enter":
@@ -272,6 +409,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						actionCmd = s.enableAccountCmd(*s.selectedAccount)
 					case "disable":
 						actionCmd = s.disableAccountCmd(*s.selectedAccount)
+					case "grant":
+						actionCmd = s.addIAMBindingCmd(*s.selectedAccount, s.pendingIAMRole, s.pendingIAMMember)
+					case "delete-key":
+						if s.selectedKey != nil {
+							actionCmd = s.deleteKeyCmd(*s.selectedKey)
+						}
 					}
 				}
 				s.viewConfirm = false
@@ -279,6 +422,57 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "n", "esc", "q":
 				s.viewConfirm = false
 				s.pendingAction = ""
+				if s.selectedKey != nil {
+					s.viewKeys = true
+				} else {
+					s.viewIAM = s.iamBindings != nil
+				}
+				return s, nil
+			}
+			return s, nil
+		}
+
+		if s.viewKeys {
+			switch msg.String() {
+			case "esc", "q":
+				s.viewKeys = false
+				s.keys = nil
+				s.selectedKey = nil
+				return s, nil
+			case "n":
+				s.keyCreateForm = components.NewForm("Create Service Account Key", []components.FormField{
+					{Label: "Output File Path", Placeholder: "/path/to/key.json", Required: true},
+				})
+				s.viewKeys = false
+				s.viewKeyCreate = true
+				return s, nil
+			case "d":
+				if idx := s.keyTable.Cursor(); idx >= 0 && idx < len(s.keys) {
+					s.selectedKey = &s.keys[idx]
+					s.pendingAction = "delete-key"
+					s.viewKeys = false
+					s.viewConfirm = true
+				}
+				return s, nil
+			}
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.keyTable.Update(msg)
+			s.keyTable = updatedTable
+			return s, cmd
+		}
+
+		if s.viewIAM {
+			switch msg.String() {
+			case "esc", "q":
+				s.viewIAM = false
+				s.iamBindings = nil
+				return s, nil
+			case "a":
+				if s.selectedAccount != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedAccount.Email)
+					s.viewIAM = false
+					s.viewIAMForm = true
+				}
 				return s, nil
 			}
 			return s, nil
@@ -315,6 +509,16 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewConfirm = true
 				}
 				return s, nil
+			case "i": // View/grant IAM policy on this service account
+				if s.selectedAccount != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchIAMPolicyCmd(*s.selectedAccount))
+				}
+				return s, nil
+			case "K": // View/manage keys
+				if s.selectedAccount != nil {
+					return s, tea.Batch(s.spinner.Start(""), s.fetchKeysCmd(*s.selectedAccount))
+				}
+				return s, nil
 			}
 		} else {
 			// List View Keybindings
@@ -327,6 +531,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					{Label: "Display Name", Placeholder: "My Service Account"},
 				})
 				s.viewCreate = true
+				return s, nil
+			case "U": // Undelete a recently-deleted service account by unique ID
+				s.undeleteForm = components.NewForm("Undelete Service Account", []components.FormField{
+					{Label: "Unique ID", Placeholder: "112233445566778899", Required: true},
+				})
+				s.viewUndelete = true
 				return s, nil
 			case "enter":
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(s.accounts) {
@@ -366,6 +576,26 @@ func (s *Service) View() string {
 		return s.renderConfirmation()
 	}
 
+	if s.viewIAMForm {
+		return s.iamForm.View()
+	}
+
+	if s.viewUndelete {
+		return s.undeleteForm.View()
+	}
+
+	if s.viewKeyCreate {
+		return s.keyCreateForm.View()
+	}
+
+	if s.viewKeys {
+		return s.renderKeysView()
+	}
+
+	if s.viewIAM {
+		return s.renderIAMView()
+	}
+
 	if s.viewDetail {
 		return s.renderDetailView()
 	}
@@ -373,10 +603,64 @@ func (s *Service) View() string {
 	return s.renderServiceAccountsList()
 }
 
+// renderIAMView renders the selected service account's own IAM policy --
+// who can act as/impersonate this identity.
+func (s *Service) renderIAMView() string {
+	if s.selectedAccount == nil {
+		return "Error: No service account selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		s.selectedAccount.Email,
+		"IAM",
+	)
+	rows := make([]components.IAMBindingRow, len(s.iamBindings))
+	for i, b := range s.iamBindings {
+		rows[i] = components.IAMBindingRow{Role: b.Role, Members: strings.Join(b.Members, ", ")}
+	}
+	return components.RenderIAMBindings(breadcrumb, s.selectedAccount.Email, rows)
+}
+
+// renderKeysView renders the selected service account's user-managed keys.
+func (s *Service) renderKeysView() string {
+	if s.selectedAccount == nil {
+		return "Error: No service account selected"
+	}
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project %s", s.projectID),
+		s.Name(),
+		s.selectedAccount.Email,
+		"Keys",
+	)
+	if len(s.keys) == 0 {
+		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("keys"))
+	}
+	hint := styles.HelpStyle.Render("n Create Key  |  d Delete Key  |  q Back")
+	return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.keyTable.View(), "", hint)
+}
+
 // renderConfirmation renders the account-delete confirmation dialog. Service
 // account delete requires a second confirmation ("delete-confirm2") because
 // it immediately breaks any workload authenticating as this identity.
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "grant" {
+		if s.selectedAccount == nil {
+			return "Error: No service account selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"grant",
+			s.selectedAccount.Email,
+			"service account",
+			components.IAMConfirmMessage("service account", s.selectedAccount.Email, s.pendingIAMRole, s.pendingIAMMember),
+		)
+	}
+	if s.pendingAction == "delete-key" {
+		if s.selectedKey == nil {
+			return "Error: No key selected"
+		}
+		return components.RenderConfirmation("delete", s.selectedKey.KeyID, "service account key")
+	}
 	if s.selectedAccount == nil {
 		return "Error: No service account selected"
 	}
@@ -471,14 +755,23 @@ func (s *Service) Reset() {
 	s.viewCreate = false
 	s.viewUpdate = false
 	s.viewConfirm = false
+	s.viewIAM = false
+	s.viewIAMForm = false
+	s.viewKeys = false
+	s.viewKeyCreate = false
+	s.viewUndelete = false
 	s.pendingAction = ""
 	s.selectedAccount = nil
+	s.selectedKey = nil
+	s.iamBindings = nil
+	s.keys = nil
 	s.err = nil // Fix: Clear previous errors on reset
 	s.table.SetCursor(0)
 }
 
 func (s *Service) IsRootView() bool {
-	return !s.viewDetail && !s.viewCreate && !s.viewUpdate && !s.viewConfirm
+	return !s.viewDetail && !s.viewCreate && !s.viewUpdate && !s.viewConfirm &&
+		!s.viewIAM && !s.viewIAMForm && !s.viewKeys && !s.viewKeyCreate && !s.viewUndelete
 }
 
 // submitCreateCmd fires the CreateServiceAccount API call using the
@@ -551,6 +844,89 @@ func (s *Service) enableAccountCmd(acc ServiceAccount) tea.Cmd {
 	}
 }
 
+// undeleteAccountCmd restores a recently-deleted service account by its
+// unique ID.
+func (s *Service) undeleteAccountCmd(uniqueID string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UndeleteServiceAccount(s.projectID, uniqueID); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Undeleted service account %s", uniqueID)}
+	}
+}
+
+// fetchIAMPolicyCmd fetches the given service account's own IAM policy.
+func (s *Service) fetchIAMPolicyCmd(acc ServiceAccount) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return iamPolicyMsg{err: fmt.Errorf("client not initialized")}
+		}
+		bindings, err := s.client.GetServiceAccountIAMPolicy(acc.Name)
+		if err != nil {
+			return iamPolicyMsg{err: err}
+		}
+		return iamPolicyMsg{bindings: bindings}
+	}
+}
+
+// addIAMBindingCmd grants role to member on the given service account's own
+// IAM policy (who can act as/impersonate it).
+func (s *Service) addIAMBindingCmd(acc ServiceAccount, role, member string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.AddServiceAccountIAMBinding(acc.Name, role, member); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on service account %s", role, member, acc.Email)}
+	}
+}
+
+// fetchKeysCmd fetches the given service account's user-managed keys.
+func (s *Service) fetchKeysCmd(acc ServiceAccount) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return keysMsg{err: fmt.Errorf("client not initialized")}
+		}
+		keys, err := s.client.ListServiceAccountKeys(acc.Name)
+		if err != nil {
+			return keysMsg{err: err}
+		}
+		return keysMsg{keys: keys}
+	}
+}
+
+// createKeyCmd creates a new user-managed key for acc, writing the private
+// key JSON to outputPath.
+func (s *Service) createKeyCmd(acc ServiceAccount, outputPath string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateServiceAccountKey(acc.Name, outputPath); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Created key for %s, written to %s", acc.Email, outputPath)}
+	}
+}
+
+// deleteKeyCmd deletes a user-managed key.
+func (s *Service) deleteKeyCmd(key ServiceAccountKey) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteServiceAccountKey(key.Name); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleted key %s", key.KeyID)}
+	}
+}
+
 // Internal Helpers
 
 func (s *Service) updateTable(accounts []ServiceAccount) {
@@ -569,4 +945,17 @@ func (s *Service) updateTable(accounts []ServiceAccount) {
 		}
 	}
 	s.table.SetRows(rows)
+}
+
+func (s *Service) updateKeyTable(keys []ServiceAccountKey) {
+	rows := make([]table.Row, len(keys))
+	for i, k := range keys {
+		rows[i] = table.Row{
+			k.KeyID,
+			k.ValidAfterTime,
+			k.ValidBeforeTime,
+			fmt.Sprintf("%t", k.Disabled),
+		}
+	}
+	s.keyTable.SetRows(rows)
 }

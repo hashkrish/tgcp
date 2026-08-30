@@ -130,10 +130,12 @@ func toCryptoKey(k *kmspb.CryptoKey) CryptoKey {
 	algorithm := ""
 	protectionLevel := ""
 	state := ""
+	primaryVersion := ""
 	if primary := k.GetPrimary(); primary != nil {
 		algorithm = primary.GetAlgorithm().String()
 		protectionLevel = primary.GetProtectionLevel().String()
 		state = primary.GetState().String()
+		primaryVersion = shortName(primary.GetName())
 	}
 
 	rotationPeriod := ""
@@ -160,6 +162,7 @@ func toCryptoKey(k *kmspb.CryptoKey) CryptoKey {
 		RotationPeriod:   rotationPeriod,
 		NextRotationTime: nextRotation,
 		CreateTime:       createTime,
+		PrimaryVersion:   primaryVersion,
 	}
 }
 
@@ -210,6 +213,168 @@ func (c *Client) AddKeyRingIAMBinding(keyRingFullName, role, member string) erro
 	}
 	policy.Add(member, iam.RoleName(role))
 	return h.SetPolicy(ctx, policy)
+}
+
+// GetCryptoKeyIAMPolicy reads a crypto key's current IAM policy, matching
+// `gcloud kms keys get-iam-policy`.
+func (c *Client) GetCryptoKeyIAMPolicy(cryptoKeyFullName string) ([]IAMBinding, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.client == nil {
+		return nil, fmt.Errorf("kms client not initialized")
+	}
+	h := c.client.ResourceIAM(cryptoKeyFullName)
+	policy, err := h.Policy(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("get crypto key IAM policy: %w", err)
+	}
+	var out []IAMBinding
+	for _, role := range policy.Roles() {
+		out = append(out, IAMBinding{Role: string(role), Members: policy.Members(role)})
+	}
+	return out, nil
+}
+
+// AddCryptoKeyIAMBinding grants a role to a member on a crypto key, matching
+// `gcloud kms keys add-iam-policy-binding`. Same merge-not-replace semantics
+// as AddKeyRingIAMBinding.
+func (c *Client) AddCryptoKeyIAMBinding(cryptoKeyFullName, role, member string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("kms client not initialized")
+	}
+	ctx := context.Background()
+	h := c.client.ResourceIAM(cryptoKeyFullName)
+	policy, err := h.Policy(ctx)
+	if err != nil {
+		return fmt.Errorf("get crypto key IAM policy: %w", err)
+	}
+	policy.Add(member, iam.RoleName(role))
+	return h.SetPolicy(ctx, policy)
+}
+
+// ListCryptoKeyVersions lists the versions of a crypto key, matching
+// `gcloud kms keys versions list`.
+func (c *Client) ListCryptoKeyVersions(cryptoKeyFullName string) ([]CryptoKeyVersion, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+	if c.client == nil {
+		return nil, fmt.Errorf("kms client not initialized")
+	}
+	ctx := context.Background()
+
+	key, err := c.client.GetCryptoKey(ctx, &kmspb.GetCryptoKeyRequest{Name: cryptoKeyFullName})
+	if err != nil {
+		return nil, fmt.Errorf("get crypto key: %w", err)
+	}
+	primaryName := ""
+	if key.GetPrimary() != nil {
+		primaryName = key.GetPrimary().GetName()
+	}
+
+	var versions []CryptoKeyVersion
+	it := c.client.ListCryptoKeyVersions(ctx, &kmspb.ListCryptoKeyVersionsRequest{Parent: cryptoKeyFullName})
+	for v, err := range it.All() {
+		if err != nil {
+			return nil, fmt.Errorf("list crypto key versions: %w", err)
+		}
+		createTime := ""
+		if t := v.GetCreateTime(); t != nil {
+			createTime = t.AsTime().Local().Format("2006-01-02 15:04:05 MST")
+		}
+		versions = append(versions, CryptoKeyVersion{
+			Name:       v.GetName(),
+			VersionID:  shortName(v.GetName()),
+			State:      v.GetState().String(),
+			Primary:    v.GetName() == primaryName,
+			CreateTime: createTime,
+		})
+	}
+	return versions, nil
+}
+
+// SetPrimaryVersion sets the given version as the crypto key's primary
+// version, matching `gcloud kms keys set-primary-version`.
+func (c *Client) SetPrimaryVersion(cryptoKeyFullName, versionID string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("kms client not initialized")
+	}
+	_, err := c.client.UpdateCryptoKeyPrimaryVersion(context.Background(), &kmspb.UpdateCryptoKeyPrimaryVersionRequest{
+		Name:               cryptoKeyFullName,
+		CryptoKeyVersionId: versionID,
+	})
+	return err
+}
+
+// setVersionState patches a crypto key version's state, backing
+// EnableCryptoKeyVersion/DisableCryptoKeyVersion below.
+func (c *Client) setVersionState(versionFullName string, state kmspb.CryptoKeyVersion_CryptoKeyVersionState) error {
+	if c.client == nil {
+		return fmt.Errorf("kms client not initialized")
+	}
+	_, err := c.client.UpdateCryptoKeyVersion(context.Background(), &kmspb.UpdateCryptoKeyVersionRequest{
+		CryptoKeyVersion: &kmspb.CryptoKeyVersion{
+			Name:  versionFullName,
+			State: state,
+		},
+		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"state"}},
+	})
+	return err
+}
+
+// EnableCryptoKeyVersion re-enables a disabled crypto key version, matching
+// `gcloud kms keys versions enable`.
+func (c *Client) EnableCryptoKeyVersion(versionFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	return c.setVersionState(versionFullName, kmspb.CryptoKeyVersion_ENABLED)
+}
+
+// DisableCryptoKeyVersion disables a crypto key version so it can no longer
+// be used for crypto operations (but can still be re-enabled), matching
+// `gcloud kms keys versions disable`.
+func (c *Client) DisableCryptoKeyVersion(versionFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	return c.setVersionState(versionFullName, kmspb.CryptoKeyVersion_DISABLED)
+}
+
+// DestroyCryptoKeyVersion schedules a crypto key version's key material for
+// destruction (a ~24h grace period during which RestoreCryptoKeyVersion can
+// still undo it, after which the material is unrecoverably gone), matching
+// `gcloud kms keys versions destroy`.
+func (c *Client) DestroyCryptoKeyVersion(versionFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("kms client not initialized")
+	}
+	_, err := c.client.DestroyCryptoKeyVersion(context.Background(), &kmspb.DestroyCryptoKeyVersionRequest{Name: versionFullName})
+	return err
+}
+
+// RestoreCryptoKeyVersion undoes a pending DestroyCryptoKeyVersion, matching
+// `gcloud kms keys versions restore`. Only works while the version is still
+// in the DESTROY_SCHEDULED grace period.
+func (c *Client) RestoreCryptoKeyVersion(versionFullName string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("kms client not initialized")
+	}
+	_, err := c.client.RestoreCryptoKeyVersion(context.Background(), &kmspb.RestoreCryptoKeyVersionRequest{Name: versionFullName})
+	return err
 }
 
 // CreateKeyRing creates a new Cloud KMS key ring in the given location.
