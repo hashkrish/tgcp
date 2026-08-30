@@ -48,7 +48,10 @@ func (s *Service) HelpText() string {
 }
 
 func (s *Service) Refresh() tea.Cmd {
-	s.data.Error = nil
+	s.data.InfoError = nil
+	s.data.RecsError = nil
+	s.data.InventoryError = nil
+	s.data.BudgetsError = nil
 	s.data.InfoLoading = true
 	s.data.RecsLoading = true
 	s.data.InventoryLoading = true
@@ -121,12 +124,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.data.Budgets = []SpendLimit(msg)
 		s.data.BudgetsLoading = false
 
-	case ErrMsg:
-		s.data.Error = msg
-		// Clear loaders on critical error
+	// Each section's fetch failure only clears and marks that section --
+	// the other three sections keep whatever they already loaded (or are
+	// still loading) instead of the whole dashboard being replaced by one
+	// big error box. Budgets in particular commonly fails on its own (many
+	// viewers lack Billing Account IAM access) even when everything else
+	// succeeds.
+	case InfoErrMsg:
+		s.data.InfoError = msg.Err
 		s.data.InfoLoading = false
+		s.data.BudgetsLoading = false // never learned a billing account ID to fetch budgets with
+
+	case RecsErrMsg:
+		s.data.RecsError = msg.Err
 		s.data.RecsLoading = false
+
+	case InventoryErrMsg:
+		s.data.InventoryError = msg.Err
 		s.data.InventoryLoading = false
+
+	case BudgetsErrMsg:
+		s.data.BudgetsError = msg.Err
 		s.data.BudgetsLoading = false
 
 	case tea.WindowSizeMsg:
@@ -163,18 +181,16 @@ func (s *Service) cardWidth() int {
 // Messages
 // -----------------------------------------------------------------------------
 
-type ErrMsg error
-
 // Helpers
 
 func (s *Service) fetchInfoCmd() tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return ErrMsg(fmt.Errorf("client not init"))
+			return InfoErrMsg{Err: fmt.Errorf("client not init")}
 		}
 		info, err := s.client.GetProjectBillingInfo(s.projectID)
 		if err != nil {
-			return ErrMsg(err)
+			return InfoErrMsg{Err: err}
 		}
 		return InfoMsg(info)
 	}
@@ -183,7 +199,7 @@ func (s *Service) fetchInfoCmd() tea.Cmd {
 func (s *Service) fetchRecsCmd() tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return ErrMsg(fmt.Errorf("client not init"))
+			return RecsErrMsg{Err: fmt.Errorf("client not init")}
 		}
 
 		// Cache Check
@@ -196,7 +212,7 @@ func (s *Service) fetchRecsCmd() tea.Cmd {
 
 		recs, err := s.client.GetRecommendations(s.projectID, "")
 		if err != nil {
-			return ErrMsg(err)
+			return RecsErrMsg{Err: err}
 		}
 
 		// Cache Set
@@ -209,7 +225,7 @@ func (s *Service) fetchRecsCmd() tea.Cmd {
 func (s *Service) fetchInventoryCmd() tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
-			return ErrMsg(fmt.Errorf("client not init"))
+			return InventoryErrMsg{Err: fmt.Errorf("client not init")}
 		}
 
 		// Cache Check
@@ -222,7 +238,7 @@ func (s *Service) fetchInventoryCmd() tea.Cmd {
 
 		inv, err := s.client.GetGlobalInventory(s.projectID)
 		if err != nil {
-			return ErrMsg(err)
+			return InventoryErrMsg{Err: err}
 		}
 
 		// Cache Set
@@ -235,7 +251,7 @@ func (s *Service) fetchInventoryCmd() tea.Cmd {
 func (s *Service) fetchBudgetsCmd(billingAccountID string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil || billingAccountID == "" {
-			return ErrMsg(fmt.Errorf("client not init or missing billing id"))
+			return BudgetsErrMsg{Err: fmt.Errorf("client not init or missing billing id")}
 		}
 
 		cacheKey := fmt.Sprintf("billing:budgets:%s", billingAccountID)
@@ -247,7 +263,7 @@ func (s *Service) fetchBudgetsCmd(billingAccountID string) tea.Cmd {
 
 		budgets, err := s.client.GetBudgets(billingAccountID)
 		if err != nil {
-			return ErrMsg(err)
+			return BudgetsErrMsg{Err: err}
 		}
 
 		s.cache.Set(cacheKey, budgets, CacheTTL)

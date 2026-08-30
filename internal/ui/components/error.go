@@ -215,6 +215,25 @@ func (m *ErrorModel) SetSize(width, height int) {
 	m.Height = height
 }
 
+// InlineError returns a static, single-line error indicator intended for use
+// inside a card/section that failed to load while sibling cards/sections on
+// the same screen loaded fine -- e.g. a dashboard where one independently-
+// fetched panel errored. Unlike RenderError (a full bordered box with
+// suggestions), this never grows past one line, so it can't push other
+// sections off screen or make one failure look like the whole view failed.
+func InlineError(err error) string {
+	const maxLen = 100
+	text := err.Error()
+	if len(text) > maxLen {
+		text = text[:maxLen-1] + "…"
+	}
+	icon := styles.ErrorStyle.Render("⚠")
+	msg := lipgloss.NewStyle().
+		Foreground(styles.ColorError).
+		Render(fmt.Sprintf("Failed to load: %s", text))
+	return icon + " " + msg
+}
+
 // RenderError is a convenience function for services to render errors
 func RenderError(err error, serviceName, resourceType string) string {
 	title := fmt.Sprintf("Error Loading %s", resourceType)

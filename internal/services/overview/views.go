@@ -24,51 +24,56 @@ var (
 )
 
 func (s *Service) View() string {
-	if s.data.Error != nil {
-		return components.RenderError(s.data.Error, "Overview", "Project Overview")
-	}
-
 	breadcrumb := components.Breadcrumb(
 		fmt.Sprintf("Project %s", s.projectID),
 		s.Name(),
 	)
 
 	// 1. Header Section (Status + Account)
-	billingStatus := "ACTIVE"
-	if !s.data.Info.Enabled {
-		billingStatus = "DISABLED"
-	}
+	var headerBody string
+	if s.data.InfoLoading {
+		headerBody = components.InlineLoader("Loading billing info...")
+	} else if s.data.InfoError != nil {
+		headerBody = components.InlineError(s.data.InfoError)
+	} else {
+		billingStatus := "ACTIVE"
+		if !s.data.Info.Enabled {
+			billingStatus = "DISABLED"
+		}
 
-	headerLeft := lipgloss.JoinVertical(lipgloss.Left,
-		fmt.Sprintf("Billing: %s", components.RenderStatus(billingStatus)),
-		fmt.Sprintf("Project: %s", s.projectID),
-	)
+		headerLeft := lipgloss.JoinVertical(lipgloss.Left,
+			fmt.Sprintf("Billing: %s", components.RenderStatus(billingStatus)),
+			fmt.Sprintf("Project: %s", s.projectID),
+		)
 
-	accountName := s.data.Info.BillingAccountName
-	if len(accountName) > 4 {
-		accountName = accountName[:4] + "****"
-	}
-	accountID := s.data.Info.BillingAccountID
-	if len(accountID) > 4 {
-		accountID = "****-" + accountID[len(accountID)-4:]
-	} else if accountID != "" {
-		accountID = "****"
-	}
+		accountName := s.data.Info.BillingAccountName
+		if len(accountName) > 4 {
+			accountName = accountName[:4] + "****"
+		}
+		accountID := s.data.Info.BillingAccountID
+		if len(accountID) > 4 {
+			accountID = "****-" + accountID[len(accountID)-4:]
+		} else if accountID != "" {
+			accountID = "****"
+		}
 
-	headerRight := lipgloss.JoinVertical(lipgloss.Left,
-		fmt.Sprintf("💳 Account: %s", accountName),
-		fmt.Sprintf("ID: %s", accountID),
-	)
+		headerRight := lipgloss.JoinVertical(lipgloss.Left,
+			fmt.Sprintf("💳 Account: %s", accountName),
+			fmt.Sprintf("ID: %s", accountID),
+		)
+
+		headerBody = lipgloss.JoinHorizontal(lipgloss.Top,
+			lipgloss.NewStyle().Width(40).Render(headerLeft),
+			headerRight,
+		)
+	}
 
 	// Top Header
 	header := cardStyle.Width(s.cardWidth()).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
 			lipgloss.NewStyle().Foreground(styles.ColorBrandAccent).Bold(true).Render("📡 Project Overview"),
 			"",
-			lipgloss.JoinHorizontal(lipgloss.Top,
-				lipgloss.NewStyle().Width(40).Render(headerLeft),
-				headerRight,
-			),
+			headerBody,
 		),
 	)
 
@@ -76,6 +81,8 @@ func (s *Service) View() string {
 	var insightsContent string
 	if s.data.RecsLoading {
 		insightsContent = components.InlineLoader("Loading insights...")
+	} else if s.data.RecsError != nil {
+		insightsContent = components.InlineError(s.data.RecsError)
 	} else if len(s.data.Recommendations) == 0 {
 		insightsContent = components.EmptyState("recommendations")
 	} else {
@@ -193,6 +200,8 @@ func (s *Service) View() string {
 	var inventoryContent string
 	if s.data.InventoryLoading {
 		inventoryContent = components.InlineLoader("Scanning resources...")
+	} else if s.data.InventoryError != nil {
+		inventoryContent = components.InlineError(s.data.InventoryError)
 	} else {
 		inv := s.data.Inventory
 
@@ -224,6 +233,8 @@ func (s *Service) View() string {
 	var budgetContent string
 	if s.data.BudgetsLoading {
 		budgetContent = components.InlineLoader("Loading budgets...")
+	} else if s.data.BudgetsError != nil {
+		budgetContent = components.InlineError(s.data.BudgetsError)
 	} else if len(s.data.Budgets) == 0 {
 		budgetContent = components.EmptyState("budgets")
 	} else {
