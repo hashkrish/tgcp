@@ -19,7 +19,8 @@ func HelpView(width, height int) string {
 			[][]string{
 				{":", "Command Palette"},
 				{"?", "Toggle Help"},
-				{"Tab", "Toggle Sidebar"},
+				{"Tab / Shift+Tab", "Next / Prev Tab (where supported)"},
+				{"Ctrl+b", "Toggle Sidebar"},
 				{"Ctrl+c", "Force Quit"},
 			},
 		},

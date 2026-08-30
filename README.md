@@ -98,7 +98,7 @@ tgcp
 
 TGCP supports a configuration file at `~/.tgcprc` (YAML format).
 
-The left-side sidebar is hidden by default (toggle it anytime with `Tab`); set `ui.sidebar_visible: true` to have it shown on startup instead.
+The left-side sidebar is hidden by default (toggle it anytime with `Ctrl+b`); set `ui.sidebar_visible: true` to have it shown on startup instead.
 
 **Example `~/.tgcprc`:**
 ```yaml
@@ -126,14 +126,15 @@ ui:
 | `:` | Open Command Palette |
 | `/` | Filter current list |
 | `Ctrl+c` | Force Quit |
+| `Ctrl+b` | Toggle Sidebar visibility |
 
 #### Navigation
 | Key | Action |
 |-----|--------|
-| `↑` / `k` | Move selection up |
-| `↓` / `j` | Move selection down |
+| `↑` / `k` / `Ctrl+p` | Move selection up |
+| `↓` / `j` / `Ctrl+n` | Move selection down |
 | `Enter` | Select item / View Details |
-| `Tab` | Toggle Sidebar visibility |
+| `Tab` / `Shift+Tab` | Next / Previous tab (where a service has tabs) |
 | `Click` | Select item (mouse/trackpad) |
 | `Shift+Drag` | Select text for copy |
 
@@ -145,7 +146,7 @@ ui:
 | `x` | **Stop** resource | GCE, Cloud SQL |
 | `h` | **SSH** into instance | GCE |
 | `K` | **Launch k9s** | GKE |
-| `[` / `]` | **Switch Tabs** | Cloud Run (Services/Functions) |
+| `[` / `]` / `Tab` / `Shift+Tab` | **Switch Tabs** | Cloud Run, Load Balancing, VPC Network, Cloud Monitoring |
 | `Enter` | **Drill Down** / **Open** | GCS Object Browser, BigQuery |
 | `Esc` | **Go Back** / **Up Level** | GCS Object Browser, BigQuery |
 
