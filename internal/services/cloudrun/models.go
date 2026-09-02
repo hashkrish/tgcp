@@ -86,6 +86,31 @@ type Revision struct {
 	Conditions []string
 }
 
+// ServiceUpdateOpts holds the fields the Update form can change on an
+// existing Cloud Run service's revision template; deploying the change
+// creates a new revision. Every field is a string and "" means "leave
+// unchanged" (matching TriggerUpdateOpts's convention in the cloudbuild
+// package) -- Concurrency/TimeoutSeconds are kept as strings rather than
+// int64 so an unset field can't be confused with an explicit 0, which is
+// itself a meaningful value for both.
+type ServiceUpdateOpts struct {
+	Image          string
+	CPULimit       string
+	MemoryLimit    string
+	Concurrency    string
+	TimeoutSeconds string
+	MinScale       string
+	MaxScale       string
+	VPCConnector   string
+	ServiceAccount string
+	// EnvVars is "KEY=value,KEY2=value2". If set, it replaces the container's
+	// entire env list with plain values only -- any env var currently backed
+	// by a Secret Manager reference on the revision is dropped unless it's
+	// re-specified here as a literal value, since secret values are never
+	// read back into this form.
+	EnvVars string
+}
+
 // IAMBinding is one role -> members grant from a service's IAM policy.
 type IAMBinding struct {
 	Role    string

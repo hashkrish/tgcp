@@ -2,6 +2,7 @@ package cloudbuild
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -17,13 +18,16 @@ import (
 
 // TriggerItem represents a Cloud Build trigger.
 type TriggerItem struct {
-	ID          string
-	Name        string
-	Description string
-	RepoName    string
-	BranchName  string
-	Disabled    bool
-	CreateTime  time.Time
+	ID              string
+	Name            string
+	Description     string
+	RepoName        string
+	BranchName      string
+	BuildConfigPath string
+	Tags            []string
+	Substitutions   map[string]string
+	Disabled        bool
+	CreateTime      time.Time
 }
 
 // WorkerPoolItem represents a private Cloud Build worker pool.
@@ -69,6 +73,18 @@ func newTriggerCreateForm() components.FormModel {
 		{Label: "Repo Name", Placeholder: "my-csr-repo", Required: true},
 		{Label: "Branch Pattern", Default: "^main$", Required: true},
 		{Label: "Build Config Path", Default: "cloudbuild.yaml", Required: true},
+	})
+}
+
+// newTriggerEditForm builds the FormModel for editing an existing trigger's
+// description, branch pattern, and build config path -- the same fields the
+// Create form takes, plus description, matching this repo's single/few-field
+// patch Update convention rather than a full trigger reconstruction.
+func newTriggerEditForm(t TriggerItem) components.FormModel {
+	return components.NewForm("Edit Trigger: "+t.Name, []components.FormField{
+		{Label: "Description", Default: t.Description},
+		{Label: "Branch Pattern", Default: t.BranchName, Required: true},
+		{Label: "Build Config Path", Default: t.BuildConfigPath, Required: true},
 	})
 }
 
@@ -157,10 +173,22 @@ func (s *Service) runTriggerCmd(t TriggerItem) tea.Cmd {
 		if s.client == nil {
 			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
-		if err := s.client.RunBuildTrigger(s.projectID, t.ID, t.BranchName); err != nil {
+		if err := s.client.RunBuildTrigger(s.projectID, t.ID, t.RepoName, t.BranchName); err != nil {
 			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "run"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Running trigger %s...", t.Name), resource: "trigger", name: t.Name, action: "run"}
+	}
+}
+
+func (s *Service) updateTriggerCmd(t TriggerItem, opts TriggerUpdateOpts) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.UpdateBuildTrigger(s.projectID, t.ID, opts); err != nil {
+			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "update"}
+		}
+		return resourceActionResultMsg{msg: fmt.Sprintf("Updated trigger %s", t.Name), resource: "trigger", name: t.Name, action: "update"}
 	}
 }
 
@@ -340,6 +368,16 @@ func (s *Service) handleResourceMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 	case triggersMsg:
 		s.triggers = m
 		s.triggersTable.SetRows(triggerRows(m))
+		// Repoint selectedTrigger at its refreshed copy (by ID) so a detail/edit
+		// view in progress reflects the latest data instead of going stale.
+		if s.selectedTrigger != nil {
+			for i := range s.triggers {
+				if s.triggers[i].ID == s.selectedTrigger.ID {
+					s.selectedTrigger = &s.triggers[i]
+					break
+				}
+			}
+		}
 		return s, nil, true
 	case workerPoolsMsg:
 		s.workerPools = m
@@ -355,12 +393,15 @@ func (s *Service) handleResourceMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return s, nil, true
 	case resourceActionResultMsg:
 		if m.err != nil {
-			s.err = m.err
+			// Don't set s.err here: that field drives the full-screen "Error
+			// Loading Builds" overlay in View(), and an action failure (e.g.
+			// running/updating a trigger) isn't a list-load failure. The
+			// caller in Update() already surfaces m.err via a toast.
 			return s, nil, true
 		}
 		// Re-fetch whichever sub-view is active so the list reflects the change.
 		switch s.viewState {
-		case ViewTriggers:
+		case ViewTriggers, ViewTriggerDetail, ViewTriggerEdit:
 			return s, s.fetchTriggersCmd(), true
 		case ViewWorkerPools:
 			return s, s.fetchWorkerPoolsCmd(), true
@@ -391,6 +432,12 @@ func (s *Service) handleResourceKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool
 			s.triggerForm = newTriggerCreateForm()
 			s.viewState = ViewTriggerCreate
 			return s, nil, true
+		case "enter":
+			if idx := s.triggersTable.Cursor(); idx >= 0 && idx < len(s.triggers) {
+				s.selectedTrigger = &s.triggers[idx]
+				s.viewState = ViewTriggerDetail
+			}
+			return s, nil, true
 		case "R": // Run
 			if idx := s.triggersTable.Cursor(); idx >= 0 && idx < len(s.triggers) {
 				s.selectedTrigger = &s.triggers[idx]
@@ -412,6 +459,64 @@ func (s *Service) handleResourceKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool
 		t, cmd = s.triggersTable.Update(msg)
 		s.triggersTable = t
 		return s, cmd, true
+
+	case ViewTriggerDetail:
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewTriggers
+			s.selectedTrigger = nil
+			return s, nil, true
+		case "e":
+			if s.selectedTrigger != nil {
+				s.triggerForm = newTriggerEditForm(*s.selectedTrigger)
+				s.viewState = ViewTriggerEdit
+			}
+			return s, nil, true
+		case "E": // Enable/Disable toggle
+			if s.selectedTrigger != nil {
+				if s.selectedTrigger.Disabled {
+					s.pendingAction = "enable-trigger"
+				} else {
+					s.pendingAction = "disable-trigger"
+				}
+				s.actionSource = ViewTriggerDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil, true
+		case "R": // Run
+			if s.selectedTrigger != nil {
+				s.pendingAction = "run-trigger"
+				s.actionSource = ViewTriggerDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil, true
+		case "d":
+			if s.selectedTrigger != nil {
+				s.pendingAction = "delete-trigger"
+				s.actionSource = ViewTriggerDetail
+				s.viewState = ViewConfirmation
+			}
+			return s, nil, true
+		}
+		return s, nil, true
+
+	case ViewTriggerEdit:
+		result, fcmd := s.triggerForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewTriggerDetail
+			return s, nil, true
+		}
+		if result.Submitted && s.selectedTrigger != nil {
+			vals := s.triggerForm.Values()
+			t := *s.selectedTrigger
+			s.viewState = ViewTriggerDetail
+			return s, s.updateTriggerCmd(t, TriggerUpdateOpts{
+				Description:     vals["Description"],
+				BranchPattern:   vals["Branch Pattern"],
+				BuildConfigPath: vals["Build Config Path"],
+			}), true
+		}
+		return s, fcmd, true
 
 	case ViewTriggerCreate:
 		result, fcmd := s.triggerForm.Update(msg)
@@ -526,11 +631,15 @@ func (s *Service) renderResourceView() string {
 	switch s.viewState {
 	case ViewTriggers:
 		breadcrumb := components.Breadcrumb(fmt.Sprintf("Project %s", s.projectID), s.Name(), "Triggers")
-		hint := styles.HelpStyle.Render("n New  |  R Run  |  d Delete  |  q Back")
+		hint := styles.HelpStyle.Render("n New  |  Enter Detail  |  R Run  |  d Delete  |  q Back")
 		if len(s.triggers) == 0 {
 			return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", components.EmptyState("triggers"), "", hint)
 		}
 		return lipgloss.JoinVertical(lipgloss.Left, breadcrumb, "", s.triggersTable.View(), "", hint)
+	case ViewTriggerDetail:
+		return s.renderTriggerDetailView()
+	case ViewTriggerEdit:
+		return s.triggerForm.View()
 	case ViewTriggerCreate:
 		return s.triggerForm.View()
 	case ViewWorkerPools:
@@ -564,6 +673,54 @@ func (s *Service) renderResourceView() string {
 	return ""
 }
 
+// renderTriggerDetailView renders the detail card for the selected trigger.
+func (s *Service) renderTriggerDetailView() string {
+	if s.selectedTrigger == nil {
+		return "Error: No trigger selected"
+	}
+	t := s.selectedTrigger
+
+	breadcrumb := components.Breadcrumb(fmt.Sprintf("Project %s", s.projectID), s.Name(), "Triggers", t.Name)
+
+	rows := []components.KeyValue{
+		{Key: "ID", Value: t.ID},
+		{Key: "Name", Value: t.Name},
+	}
+	if t.Description != "" {
+		rows = append(rows, components.KeyValue{Key: "Description", Value: t.Description})
+	}
+	rows = append(rows,
+		components.KeyValue{Key: "Repo", Value: t.RepoName},
+		components.KeyValue{Key: "Branch Pattern", Value: t.BranchName},
+		components.KeyValue{Key: "Build Config Path", Value: t.BuildConfigPath},
+	)
+	if len(t.Tags) > 0 {
+		rows = append(rows, components.KeyValue{Key: "Tags", Value: strings.Join(t.Tags, ", ")})
+	}
+	if len(t.Substitutions) > 0 {
+		rows = append(rows, components.KeyValue{Key: "Substitutions", Value: formatSubstitutions(t.Substitutions)})
+	}
+	rows = append(rows, components.KeyValue{Key: "Disabled", Value: fmt.Sprintf("%t", t.Disabled)})
+	if !t.CreateTime.IsZero() {
+		rows = append(rows, components.KeyValue{Key: "Created", Value: t.CreateTime.Format("2006-01-02 15:04:05")})
+	}
+
+	card := components.DetailCard(components.DetailCardOpts{
+		Title: "Trigger Details",
+		Rows:  rows,
+	})
+
+	hint := styles.HelpStyle.Render("e Edit  |  E Enable/Disable  |  R Run  |  d Delete  |  q Back")
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		breadcrumb,
+		"",
+		card,
+		"",
+		hint,
+	)
+}
+
 // renderResourceConfirmation renders the confirmation dialog for a pending
 // resource-sub-view action. Returns "" if pendingAction isn't one of these.
 func (s *Service) renderResourceConfirmation() (string, bool) {
@@ -578,6 +735,16 @@ func (s *Service) renderResourceConfirmation() (string, bool) {
 			return "Error: No trigger selected", true
 		}
 		return components.RenderConfirmation("delete", s.selectedTrigger.Name, "trigger"), true
+	case "enable-trigger":
+		if s.selectedTrigger == nil {
+			return "Error: No trigger selected", true
+		}
+		return components.RenderConfirmation("enable", s.selectedTrigger.Name, "trigger"), true
+	case "disable-trigger":
+		if s.selectedTrigger == nil {
+			return "Error: No trigger selected", true
+		}
+		return components.RenderConfirmation("disable", s.selectedTrigger.Name, "trigger"), true
 	case "delete-worker-pool":
 		if s.selectedWorkerPool == nil {
 			return "Error: No worker pool selected", true
@@ -614,6 +781,13 @@ func (s *Service) runResourceConfirmedAction() (tea.Cmd, bool) {
 			cmd := s.deleteTriggerCmd(*s.selectedTrigger)
 			s.viewState = ViewTriggers
 			s.selectedTrigger = nil
+			return cmd, true
+		}
+	case "enable-trigger", "disable-trigger":
+		if s.selectedTrigger != nil {
+			disabled := s.pendingAction == "disable-trigger"
+			cmd := s.updateTriggerCmd(*s.selectedTrigger, TriggerUpdateOpts{Disabled: &disabled})
+			s.viewState = ViewTriggerDetail
 			return cmd, true
 		}
 	case "delete-worker-pool":

@@ -65,15 +65,66 @@ func newServiceCreateForm() components.FormModel {
 	})
 }
 
-// newServiceUpdateForm builds the FormModel for updating a Cloud Run
-// service's container image, seeded with the service's current image. This
-// is the only field this Update flow touches -- update-traffic and full
-// service replace (env vars, resources, concurrency, ingress, etc.) are
-// explicitly out of scope.
+// newServiceUpdateForm builds the FormModel for editing a Cloud Run
+// service's revision spec and deploying the change as a new revision.
+// Fields are seeded from svc's latest-ready revision when available (i.e.
+// once the Revisions view has been fetched for this service; otherwise they
+// start blank, meaning "leave unchanged" -- see ServiceUpdateOpts). Traffic
+// splitting and multi-container/sidecar editing remain out of scope; see
+// UpdateServiceCmd/UpdateServiceSpec.
 func newServiceUpdateForm(svc RunService) components.FormModel {
-	return components.NewForm("Update Cloud Run Service: "+svc.Name, []components.FormField{
+	rev := latestReadyRevisionDetail(svc)
+	cpu, mem, concurrency, timeout, minScale, maxScale, vpc, sa := "", "", "", "", "", "", "", ""
+	if rev != nil {
+		cpu, mem = rev.CPULimit, rev.MemoryLimit
+		if rev.Concurrency > 0 {
+			concurrency = strconv.FormatInt(rev.Concurrency, 10)
+		}
+		if rev.TimeoutSeconds > 0 {
+			timeout = strconv.FormatInt(rev.TimeoutSeconds, 10)
+		}
+		minScale, maxScale = rev.MinScale, rev.MaxScale
+		vpc, sa = rev.VPCConnector, rev.ServiceAccount
+	}
+	return components.NewForm("Edit & Deploy Revision: "+svc.Name, []components.FormField{
 		{Label: "Container Image", Default: svc.Image, Placeholder: "gcr.io/my-project/my-image:latest", Required: true},
+		{Label: "CPU Limit", Default: cpu, Placeholder: "1"},
+		{Label: "Memory Limit", Default: mem, Placeholder: "512Mi"},
+		{Label: "Concurrency", Default: concurrency, Validate: validateOptionalInt},
+		{Label: "Timeout Seconds", Default: timeout, Validate: validateOptionalInt},
+		{Label: "Min Scale", Default: minScale},
+		{Label: "Max Scale", Default: maxScale},
+		{Label: "VPC Connector", Default: vpc},
+		{Label: "Service Account", Default: sa},
+		{Label: "Env Vars", Placeholder: "KEY=value,KEY2=value2 (replaces all plain env vars)"},
 	})
+}
+
+// latestReadyRevisionDetail finds svc's latest-ready revision entry in
+// svc.Revisions, which only carries the full per-revision detail fields
+// (resources/concurrency/timeout/scale/VPC connector/service account) once
+// the Revisions view has fetched them for this service. Returns nil
+// otherwise, in which case the Update form's corresponding fields start
+// blank ("leave unchanged").
+func latestReadyRevisionDetail(svc RunService) *Revision {
+	for i := range svc.Revisions {
+		if svc.Revisions[i].Name == svc.LatestReadyRevision {
+			return &svc.Revisions[i]
+		}
+	}
+	return nil
+}
+
+// validateOptionalInt allows an empty value (meaning "leave unchanged") or
+// a valid base-10 integer.
+func validateOptionalInt(v string) string {
+	if v == "" {
+		return ""
+	}
+	if _, err := strconv.ParseInt(v, 10, 64); err != nil {
+		return "must be a whole number"
+	}
+	return ""
 }
 
 // revisionTagPattern matches a valid Knative/Cloud Run traffic tag: lowercase
@@ -314,13 +365,13 @@ func (s *Service) ShortName() string {
 func (s *Service) HelpText() string {
 	if s.viewState == ViewList {
 		if s.activeTab == TabServices {
-			return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail  n:Create  u:Update  d:Delete"
+			return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail  n:Create  u:Edit & Deploy Revision  d:Delete"
 		}
 		return "[]:Tabs  r:Refresh  /:Filter  l:Logs  Ent:Detail"
 	}
 	if s.viewState == ViewDetail {
 		if s.activeTab == TabServices {
-			return "Esc/q:Back  v:Revisions  u:Update  i:IAM  d:Delete"
+			return "Esc/q:Back  v:Revisions  u:Edit & Deploy Revision  i:IAM  d:Delete"
 		}
 		return "Esc/q:Back"
 	}
@@ -1057,7 +1108,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				vals := s.updateForm.Values()
 				svc := *s.selectedService
 				s.viewState = ViewList
-				return s, s.UpdateServiceCmd(svc.Name, svc.Region, vals["Container Image"])
+				return s, s.UpdateServiceCmd(svc.Name, svc.Region, ServiceUpdateOpts{
+					Image:          vals["Container Image"],
+					CPULimit:       vals["CPU Limit"],
+					MemoryLimit:    vals["Memory Limit"],
+					Concurrency:    vals["Concurrency"],
+					TimeoutSeconds: vals["Timeout Seconds"],
+					MinScale:       vals["Min Scale"],
+					MaxScale:       vals["Max Scale"],
+					VPCConnector:   vals["VPC Connector"],
+					ServiceAccount: vals["Service Account"],
+					EnvVars:        vals["Env Vars"],
+				})
 			}
 			return s, fcmd
 		}
@@ -1454,17 +1516,17 @@ func (s *Service) CreateServiceCmd(name, region, image string, port int64) tea.C
 	}
 }
 
-// UpdateServiceCmd fires the UpdateServiceImage API call for the given
-// service, updating only its container image.
-func (s *Service) UpdateServiceCmd(name, region, image string) tea.Cmd {
+// UpdateServiceCmd fires the UpdateServiceSpec API call for the given
+// service, deploying a new revision with the given field changes.
+func (s *Service) UpdateServiceCmd(name, region string, opts ServiceUpdateOpts) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
 			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: name, action: "update"}
 		}
-		if err := s.client.UpdateServiceImage(s.projectID, region, name, image); err != nil {
+		if err := s.client.UpdateServiceSpec(s.projectID, region, name, opts); err != nil {
 			return actionResultMsg{err: err, resource: "service", name: name, action: "update"}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Updating service %s...", name), resource: "service", name: name, action: "update"}
+		return actionResultMsg{msg: fmt.Sprintf("Deploying new revision for %s...", name), resource: "service", name: name, action: "update"}
 	}
 }
 

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/yogirk/tgcp/internal/demo"
@@ -258,18 +260,20 @@ func (c *Client) CreateService(projectID, region, name, image string, port int64
 	return err
 }
 
-// UpdateServiceImage patches a single field on an existing Cloud Run
-// service: the container image of the first container in the revision
-// template. This is the minimal viable "update" flow for Cloud Run —
-// full service replace (env vars, resources, concurrency, VPC access,
-// ingress, etc.) is explicitly out of scope and skipped. See
-// PromoteRevision/TagRevision below for traffic-split management.
+// UpdateServiceSpec updates an existing Cloud Run service's revision
+// template, deploying a new revision -- gcloud's `run services update`
+// equivalent covering image, resource limits, concurrency, timeout,
+// min/max scale, VPC connector, service account, and plain-value env vars.
+// Each ServiceUpdateOpts field left at its zero value ("") is left
+// untouched. See PromoteRevision/TagRevision below for traffic-split
+// management, which this does not touch.
 //
 // The run/v1 API has no field-level PATCH for services, so this reads the
-// current service, mutates only the image, and calls ReplaceService with
-// the full object (as gcloud's `run services update --image` does under
-// the hood).
-func (c *Client) UpdateServiceImage(projectID, region, name, image string) error {
+// current service, mutates only the requested fields, and calls
+// ReplaceService with the full object -- the same Get-then-mutate-then-
+// Replace pattern PromoteRevision/TagRevision/SetTrafficSplit/UntagRevision
+// already use below.
+func (c *Client) UpdateServiceSpec(projectID, region, name string, opts ServiceUpdateOpts) error {
 	if demo.Enabled {
 		return nil
 	}
@@ -286,10 +290,84 @@ func (c *Client) UpdateServiceImage(projectID, region, name, image string) error
 	if svc.Spec == nil || svc.Spec.Template == nil || svc.Spec.Template.Spec == nil || len(svc.Spec.Template.Spec.Containers) == 0 {
 		return fmt.Errorf("service %s has no container spec to update", name)
 	}
-	svc.Spec.Template.Spec.Containers[0].Image = image
+	revSpec := svc.Spec.Template.Spec
+	container := revSpec.Containers[0]
+
+	if opts.Image != "" {
+		container.Image = opts.Image
+	}
+	if opts.CPULimit != "" || opts.MemoryLimit != "" {
+		if container.Resources == nil {
+			container.Resources = &run.ResourceRequirements{}
+		}
+		if container.Resources.Limits == nil {
+			container.Resources.Limits = map[string]string{}
+		}
+		if opts.CPULimit != "" {
+			container.Resources.Limits["cpu"] = opts.CPULimit
+		}
+		if opts.MemoryLimit != "" {
+			container.Resources.Limits["memory"] = opts.MemoryLimit
+		}
+	}
+	if opts.Concurrency != "" {
+		n, err := strconv.ParseInt(opts.Concurrency, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid concurrency %q: %w", opts.Concurrency, err)
+		}
+		revSpec.ContainerConcurrency = n
+	}
+	if opts.TimeoutSeconds != "" {
+		n, err := strconv.ParseInt(opts.TimeoutSeconds, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid timeout %q: %w", opts.TimeoutSeconds, err)
+		}
+		revSpec.TimeoutSeconds = n
+	}
+	if opts.ServiceAccount != "" {
+		revSpec.ServiceAccountName = opts.ServiceAccount
+	}
+	if opts.MinScale != "" || opts.MaxScale != "" || opts.VPCConnector != "" {
+		if svc.Spec.Template.Metadata == nil {
+			svc.Spec.Template.Metadata = &run.ObjectMeta{}
+		}
+		if svc.Spec.Template.Metadata.Annotations == nil {
+			svc.Spec.Template.Metadata.Annotations = map[string]string{}
+		}
+		if opts.MinScale != "" {
+			svc.Spec.Template.Metadata.Annotations["autoscaling.knative.dev/minScale"] = opts.MinScale
+		}
+		if opts.MaxScale != "" {
+			svc.Spec.Template.Metadata.Annotations["autoscaling.knative.dev/maxScale"] = opts.MaxScale
+		}
+		if opts.VPCConnector != "" {
+			svc.Spec.Template.Metadata.Annotations["run.googleapis.com/vpc-access-connector"] = opts.VPCConnector
+		}
+	}
+	if opts.EnvVars != "" {
+		container.Env = parseEnvVars(opts.EnvVars)
+	}
 
 	_, err = c.service.Projects.Locations.Services.ReplaceService(fqName, svc).Do()
 	return err
+}
+
+// parseEnvVars parses a "KEY=value,KEY2=value2" free-text field into plain
+// (non-secret-backed) container env vars.
+func parseEnvVars(s string) []*run.EnvVar {
+	var out []*run.EnvVar
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		kv := strings.SplitN(pair, "=", 2)
+		if len(kv) != 2 {
+			continue
+		}
+		out = append(out, &run.EnvVar{Name: strings.TrimSpace(kv[0]), Value: strings.TrimSpace(kv[1])})
+	}
+	return out
 }
 
 // PromoteRevision sends 100% of traffic to a single named revision, matching

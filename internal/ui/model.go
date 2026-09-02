@@ -1187,7 +1187,7 @@ type subServiceTab struct {
 
 // serviceSubTabs lists the extra (non-default) tabs per service short name.
 // Keys here must match the case strings each service's own SetActiveTab
-// switches on (internal/services/{gce,net,monitoring,loadbalancing,cloudrun,pubsub}).
+// switches on (internal/services/{gce,net,monitoring,loadbalancing,cloudrun,pubsub,cloudbuild}).
 var serviceSubTabs = map[string][]subServiceTab{
 	"gce":        {{Key: "instance-groups", Label: "Instance Groups (MIGs)"}},
 	"net":        {{Key: "firewalls", Label: "Firewall Rules"}},
@@ -1200,6 +1200,11 @@ var serviceSubTabs = map[string][]subServiceTab{
 	},
 	"run":    {{Key: "functions", Label: "Functions"}},
 	"pubsub": {{Key: "subscriptions", Label: "Subscriptions"}},
+	"cloudbuild": {
+		{Key: "triggers", Label: "Triggers"},
+		{Key: "worker-pools", Label: "Worker Pools"},
+		{Key: "connections", Label: "Connections"},
+	},
 }
 
 // serviceCommands builds one command-palette entry per registered service,

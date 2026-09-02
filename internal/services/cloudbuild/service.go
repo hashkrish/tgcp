@@ -70,6 +70,8 @@ const (
 	ViewCreate
 	ViewConfirmation
 	ViewTriggers
+	ViewTriggerDetail
+	ViewTriggerEdit
 	ViewTriggerCreate
 	ViewWorkerPools
 	ViewWorkerPoolCreate
@@ -157,7 +159,7 @@ type Service struct {
 func NewService(cache *core.Cache) *Service {
 	columns := []table.Column{
 		{Title: "ID", Width: 14},
-		{Title: "Status", Width: 12},
+		{Title: "Status", Width: 14},
 		{Title: "Trigger", Width: 14},
 		{Title: "Created", Width: 19},
 		{Title: "Duration", Width: 10},
@@ -200,12 +202,14 @@ func (s *Service) HelpText() string {
 		return "r:Refresh  /:Filter  Enter:Detail  s:Submit Build  g:Triggers  p:Worker Pools  x:Connections"
 	case ViewDetail:
 		return "Esc/q:Back  t:Retry  c:Cancel  l:Logs"
-	case ViewCreate, ViewTriggerCreate, ViewWorkerPoolCreate:
+	case ViewCreate, ViewTriggerCreate, ViewTriggerEdit, ViewWorkerPoolCreate:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
 	case ViewTriggers:
-		return "Esc/q:Back  n:New  R:Run  d:Delete"
+		return "Esc/q:Back  n:New  Enter:Detail  R:Run  d:Delete"
+	case ViewTriggerDetail:
+		return "Esc/q:Back  e:Edit  E:Enable/Disable  R:Run  d:Delete"
 	case ViewWorkerPools:
 		return "Esc/q:Back  n:New  d:Delete"
 	case ViewConnections:
@@ -271,6 +275,29 @@ func (s *Service) Reset() {
 // IsRootView returns true if at the top-level list (used for 'q' navigation)
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
+}
+
+// SetActiveTab switches directly to one of Cloud Build's sub-views by string
+// key, so the command palette can deep-link into it (e.g. "Triggers")
+// instead of it only being reachable by first opening Builds and then
+// pressing 'g'/'p'/'x' (see serviceSubTabs in internal/ui/model.go).
+// Returns false for an unrecognized key, treated as a harmless no-op by
+// callers. Mirrors the "g"/"p"/"x" key handlers in handleKeyMsg, including
+// the lazy fetch each already does when its list hasn't been loaded yet.
+func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
+	switch tab {
+	case "triggers":
+		s.viewState = ViewTriggers
+		return true, s.fetchTriggersCmd()
+	case "worker-pools":
+		s.viewState = ViewWorkerPools
+		return true, s.fetchWorkerPoolsCmd()
+	case "connections":
+		s.viewState = ViewConnections
+		return true, s.fetchConnectionsCmd()
+	default:
+		return false, nil
+	}
 }
 
 // Focus handles input focus - triggers initial load if needed
@@ -368,6 +395,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.width = msg.Width
 		s.height = msg.Height
 		s.table.HandleWindowSizeDefault(msg)
+		s.triggersTable.HandleWindowSizeDefault(msg)
+		s.workerPoolsTable.HandleWindowSizeDefault(msg)
+		s.connectionsTable.HandleWindowSizeDefault(msg)
+		s.cbRepositoriesTable.HandleWindowSizeDefault(msg)
 
 	case tea.MouseMsg:
 		if s.viewState == ViewList {
@@ -712,7 +743,7 @@ func (s *Service) updateTable(items []BuildItem) {
 		}
 		rows[i] = table.Row{
 			shortID(item.ID),
-			components.RenderStatus(item.Status),
+			item.Status,
 			shortID(item.TriggerID),
 			created,
 			duration,

@@ -191,8 +191,13 @@ func (c *Client) CreateBuildTrigger(projectID string, opts TriggerCreateOpts) er
 }
 
 // RunBuildTrigger manually invokes a trigger against its configured branch,
-// matching `gcloud builds triggers run`.
-func (c *Client) RunBuildTrigger(projectID, triggerID, branchName string) error {
+// matching `gcloud builds triggers run`. repoName is required by the API
+// alongside branchName -- a RepoSource with only a branch name (no repo_name)
+// is rejected as INVALID_ARGUMENT. Triggers with no Cloud Source Repository
+// (e.g. GitHub App-backed 2nd-gen triggers) have no repoName to give, so for
+// those the trigger is run with no override source, using its own configured
+// source instead.
+func (c *Client) RunBuildTrigger(projectID, triggerID, repoName, branchName string) error {
 	if demo.Enabled {
 		return nil
 	}
@@ -200,13 +205,17 @@ func (c *Client) RunBuildTrigger(projectID, triggerID, branchName string) error 
 		return fmt.Errorf("client not initialized")
 	}
 	ctx := context.Background()
-	_, err := c.client.RunBuildTrigger(ctx, &cloudbuildpb.RunBuildTriggerRequest{
+	req := &cloudbuildpb.RunBuildTriggerRequest{
 		ProjectId: projectID,
 		TriggerId: triggerID,
-		Source: &cloudbuildpb.RepoSource{
+	}
+	if repoName != "" {
+		req.Source = &cloudbuildpb.RepoSource{
+			RepoName: repoName,
 			Revision: &cloudbuildpb.RepoSource_BranchName{BranchName: branchName},
-		},
-	})
+		}
+	}
+	_, err := c.client.RunBuildTrigger(ctx, req)
 	return err
 }
 
@@ -226,6 +235,57 @@ func (c *Client) DeleteBuildTrigger(projectID, triggerID string) error {
 	return err
 }
 
+// TriggerUpdateOpts holds the fields the Edit form / enable-disable action
+// can change on a trigger. Empty string / nil means "leave unchanged".
+type TriggerUpdateOpts struct {
+	Description     string
+	BranchPattern   string
+	BuildConfigPath string
+	Disabled        *bool
+}
+
+// UpdateBuildTrigger updates a build trigger, matching `gcloud builds
+// triggers update`. UpdateBuildTriggerRequest requires the whole BuildTrigger
+// message (not a true field-mask patch client-side), so this fetches the
+// current trigger first and mutates only the requested fields -- mirroring
+// Cloud Run's Get-then-mutate-then-Replace UpdateServiceImage pattern -- to
+// avoid clobbering fields this form doesn't expose (Tags, Substitutions,
+// GitHub config, etc.).
+func (c *Client) UpdateBuildTrigger(projectID, triggerID string, opts TriggerUpdateOpts) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.client == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	ctx := context.Background()
+	cur, err := c.client.GetBuildTrigger(ctx, &cloudbuildpb.GetBuildTriggerRequest{
+		ProjectId: projectID,
+		TriggerId: triggerID,
+	})
+	if err != nil {
+		return fmt.Errorf("get trigger: %w", err)
+	}
+	if opts.Description != "" {
+		cur.Description = opts.Description
+	}
+	if opts.BranchPattern != "" && cur.GetTriggerTemplate() != nil {
+		cur.TriggerTemplate.Revision = &cloudbuildpb.RepoSource_BranchName{BranchName: opts.BranchPattern}
+	}
+	if opts.BuildConfigPath != "" {
+		cur.BuildTemplate = &cloudbuildpb.BuildTrigger_Filename{Filename: opts.BuildConfigPath}
+	}
+	if opts.Disabled != nil {
+		cur.Disabled = *opts.Disabled
+	}
+	_, err = c.client.UpdateBuildTrigger(ctx, &cloudbuildpb.UpdateBuildTriggerRequest{
+		ProjectId: projectID,
+		TriggerId: triggerID,
+		Trigger:   cur,
+	})
+	return err
+}
+
 // toTriggerItem maps a BuildTrigger proto into the UI-facing TriggerItem.
 func toTriggerItem(t *cloudbuildpb.BuildTrigger) TriggerItem {
 	var created time.Time
@@ -239,13 +299,16 @@ func toTriggerItem(t *cloudbuildpb.BuildTrigger) TriggerItem {
 		branch = tpl.GetBranchName()
 	}
 	return TriggerItem{
-		ID:          t.GetId(),
-		Name:        t.GetName(),
-		Description: t.GetDescription(),
-		RepoName:    repoName,
-		BranchName:  branch,
-		Disabled:    t.GetDisabled(),
-		CreateTime:  created,
+		ID:              t.GetId(),
+		Name:            t.GetName(),
+		Description:     t.GetDescription(),
+		RepoName:        repoName,
+		BranchName:      branch,
+		BuildConfigPath: t.GetFilename(),
+		Tags:            t.GetTags(),
+		Substitutions:   t.GetSubstitutions(),
+		Disabled:        t.GetDisabled(),
+		CreateTime:      created,
 	}
 }
 
