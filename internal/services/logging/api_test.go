@@ -53,3 +53,22 @@ func TestCleanPayload_StripsDockerProgressControlChars(t *testing.T) {
 		})
 	}
 }
+
+// TestPrettyJSON covers the entry detail view's raw-JSON-payload formatting
+// (e.g. an AuditLog entry with no extracted "message"/"msg"/"log" field),
+// including that keys are sorted alphabetically -- unlike json.Indent alone,
+// which only re-whitespaces and preserves the original (API-response) key
+// order.
+func TestPrettyJSON(t *testing.T) {
+	in := `{"zebra":1,"apple":2,"nested":{"z":1,"a":2}}`
+	want := "{\n  \"apple\": 2,\n  \"nested\": {\n    \"a\": 2,\n    \"z\": 1\n  },\n  \"zebra\": 1\n}"
+	if got := prettyJSON([]byte(in)); got != want {
+		t.Errorf("prettyJSON(%q) = %q, want %q", in, got, want)
+	}
+
+	// Invalid JSON falls back to the raw bytes rather than erroring out.
+	invalid := "not json"
+	if got := prettyJSON([]byte(invalid)); got != invalid {
+		t.Errorf("prettyJSON(%q) = %q, want %q (verbatim fallback)", invalid, got, invalid)
+	}
+}

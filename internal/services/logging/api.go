@@ -153,12 +153,18 @@ func parseLogEntries(rawEntries []*logging.LogEntry) []LogEntry {
 			ts, _ = time.Parse(time.RFC3339, entry.Timestamp)
 		}
 
-		// Determine Payload and Severity
+		// Determine Payload and Severity. fullPayload mirrors payload except
+		// when there's no extracted message text and we're showing the raw
+		// JSON/proto payload verbatim -- there it's indented for readability
+		// in the (unconstrained-width) entry detail view, while payload
+		// stays compact for the table's single-line Message column.
 		payload := ""
+		fullPayload := ""
 		severity := strings.ToUpper(entry.Severity)
 
 		if entry.TextPayload != "" {
 			payload = cleanPayload(entry.TextPayload, ts)
+			fullPayload = payload
 		} else if len(entry.JsonPayload) > 0 {
 			var data map[string]interface{}
 			if err := json.Unmarshal(entry.JsonPayload, &data); err == nil {
@@ -172,21 +178,27 @@ func parseLogEntries(rawEntries []*logging.LogEntry) []LogEntry {
 				// extract useful message
 				if msg, ok := data["message"].(string); ok {
 					payload = cleanPayload(msg, ts)
+					fullPayload = payload
 				} else if msg, ok := data["msg"].(string); ok {
 					payload = cleanPayload(msg, ts)
+					fullPayload = payload
 				} else if msg, ok := data["log"].(string); ok {
 					payload = cleanPayload(msg, ts)
+					fullPayload = payload
 				} else {
 					// Fallback to raw JSON string
 					payload = string(entry.JsonPayload)
+					fullPayload = prettyJSON(entry.JsonPayload)
 				}
 			} else {
 				// Fallback to string
 				payload = string(entry.JsonPayload)
+				fullPayload = prettyJSON(entry.JsonPayload)
 			}
 		} else if len(entry.ProtoPayload) > 0 {
 			b, _ := json.Marshal(entry.ProtoPayload)
 			payload = string(b)
+			fullPayload = prettyJSON(b)
 		}
 
 		// Extract Resource Info
@@ -239,7 +251,7 @@ func parseLogEntries(rawEntries []*logging.LogEntry) []LogEntry {
 			LogName:     entry.LogName,
 			Labels:      entry.Labels,
 			InsertID:    entry.InsertId,
-			FullPayload: payload, // Simplified for now
+			FullPayload: fullPayload,
 		})
 	}
 
@@ -262,6 +274,26 @@ func StripTerminalControlChars(raw string) string {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	raw = strings.ReplaceAll(raw, "\r", "\n")
 	return raw
+}
+
+// prettyJSON re-encodes raw JSON bytes indented and with object keys sorted
+// alphabetically at every nesting level (encoding/json's map[string]any
+// marshaling always sorts keys, which json.Indent alone -- a pure
+// re-whitespacing pass that preserves original key order -- does not) for
+// display in the entry detail view. Falls back to the raw bytes verbatim if
+// they don't parse (defensive -- they're already known-valid JSON from the
+// API response, but this keeps display code from ever erroring out on that
+// assumption).
+func prettyJSON(raw []byte) string {
+	var data interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return string(raw)
+	}
+	out, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return string(raw)
+	}
+	return string(out)
 }
 
 // cleanPayload removes redundant timestamps and prefixes using regex

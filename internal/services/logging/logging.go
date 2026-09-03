@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/ui/components"
@@ -19,6 +20,9 @@ const CacheTTL = 10 * time.Second // Logs change frequently
 // older entries are dropped from the front once exceeded, so a long-running
 // build's log can't grow unbounded.
 const maxLiveBufferEntries = 2000
+
+// defaultPageSize is how many entries a single (non-live) page fetch pulls.
+const defaultPageSize = 200
 
 // Tick message for background refresh
 type tickMsg time.Time
@@ -65,9 +69,12 @@ type Service struct {
 	lastEntryTime      time.Time
 	lastEntryInsertIDs map[string]bool
 
-	// Detail view
-	selectedEntry *LogEntry
-	viewingDetail bool
+	// Detail view -- a scrolling text pane (its content can easily exceed
+	// one screen, especially a pretty-printed JSON payload), not a static
+	// render.
+	selectedEntry  *LogEntry
+	viewingDetail  bool
+	detailViewport viewport.Model
 
 	// Resources mode: a secondary browser (toggled with "R") for the
 	// project-scoped configuration resources this service manages besides
@@ -178,15 +185,16 @@ func NewService(cache *core.Cache) *Service {
 	})
 
 	s := &Service{
-		table:        t,
-		spinner:      components.NewSpinner(),
-		cache:        cache,
-		sinkTable:    sinkTable,
-		metricTable:  metricTable,
-		bucketTable:  bucketTable,
-		viewTable:    viewTable,
-		viewBucketID: "_Default",
-		viewLocation: "global",
+		table:          t,
+		spinner:        components.NewSpinner(),
+		cache:          cache,
+		sinkTable:      sinkTable,
+		metricTable:    metricTable,
+		bucketTable:    bucketTable,
+		viewTable:      viewTable,
+		viewBucketID:   "_Default",
+		viewLocation:   "global",
+		detailViewport: viewport.New(80, 20),
 	}
 	return s
 }
@@ -216,7 +224,7 @@ func (s *Service) HelpText() string {
 		return hint
 	}
 	if s.viewingDetail {
-		return "Esc/q:Back"
+		return "Esc/q:Back  ↑↓/PgUp/PgDn:Scroll"
 	}
 	liveLabel := "L:Live Tail"
 	if s.live {
@@ -454,6 +462,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.table.HandleWindowSizeDefault(msg)
 		// Adjust message column to fill available width
 		s.adjustTableColumns()
+		s.detailViewport.Width = msg.Width - 4
+		s.detailViewport.Height = msg.Height - 4
 
 	case tea.MouseMsg:
 		// Forward mouse events to table for click selection
@@ -484,7 +494,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.selectedEntry = nil
 				return s, nil
 			}
-			return s, nil
+			var vp viewport.Model
+			vp, cmd = s.detailViewport.Update(msg)
+			s.detailViewport = vp
+			return s, cmd
 		}
 
 		switch msg.String() {
@@ -504,6 +517,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if idx := s.table.Cursor(); idx >= 0 && idx < len(s.entries) {
 				s.selectedEntry = &s.entries[idx]
 				s.viewingDetail = true
+				s.detailViewport.SetContent(s.renderDetailContent())
+				s.detailViewport.GotoTop()
 			}
 			return s, nil
 
@@ -975,7 +990,7 @@ func (s *Service) fetchEntriesCmd(token string) tea.Cmd {
 
 		// Use the stored filter value
 		filter := s.filter
-		pageSize := 25 // More entries fit now with compact table format
+		pageSize := defaultPageSize
 
 		entries, nextToken, err := s.client.ListEntries(context.Background(), filter, pageSize, token)
 		if err != nil {

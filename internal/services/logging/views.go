@@ -150,9 +150,21 @@ func (s *Service) renderDetailView() string {
 		return "No entry selected"
 	}
 
-	e := s.selectedEntry
-
 	breadcrumb := components.Breadcrumb(s.Name(), "Entry Detail")
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		breadcrumb,
+		"",
+		s.detailViewport.View(),
+	)
+}
+
+// renderDetailContent renders the selected entry's metadata/payload/labels
+// for the scrolling detailViewport -- separated from renderDetailView so it
+// can be (re-)computed once, on entry (see the "enter" key handler), rather
+// than every frame.
+func (s *Service) renderDetailContent() string {
+	e := s.selectedEntry
 
 	// Format the full payload with word wrap
 	wrapWidth := s.width - 10
@@ -209,8 +221,6 @@ func (s *Service) renderDetailView() string {
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
-		breadcrumb,
-		"",
 		metaCard,
 		"",
 		"Message:",
