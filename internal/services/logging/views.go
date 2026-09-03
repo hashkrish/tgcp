@@ -125,11 +125,12 @@ func (s *Service) renderListView() string {
 	countInfo := fmt.Sprintf("(%d entries%s)", len(s.entries), pageInfo)
 	countStyle := lipgloss.NewStyle().Foreground(styles.ColorTextMuted)
 
-	header := lipgloss.JoinHorizontal(lipgloss.Left,
-		breadcrumb,
-		"  ",
-		countStyle.Render(countInfo),
-	)
+	headerParts := []string{breadcrumb, "  ", countStyle.Render(countInfo)}
+	if s.live {
+		liveStyle := lipgloss.NewStyle().Foreground(styles.ColorSuccess).Bold(true)
+		headerParts = append(headerParts, "  ", liveStyle.Render("● LIVE"))
+	}
+	header := lipgloss.JoinHorizontal(lipgloss.Left, headerParts...)
 
 	content := s.table.View()
 	if len(s.entries) == 0 {

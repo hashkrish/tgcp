@@ -792,14 +792,18 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if logSvc, ok := svc.(interface{ SetHeading(string) }); ok {
 				logSvc.SetHeading(msg.Heading)
 			}
+			if logSvc, ok := svc.(interface{ SetLive(bool) }); ok {
+				logSvc.SetLive(msg.Live)
+			}
 
 			svc.Focus()
 
 			// Sync Window Size
 			if m.Width > 0 && m.Height > 0 {
 				availWidth := m.Width
-				// We force sidebar visible below, so account for it now
-				availWidth -= m.Sidebar.Width
+				if m.Sidebar.Visible {
+					availWidth -= m.Sidebar.Width
+				}
 
 				newModel, _ := svc.Update(tea.WindowSizeMsg{
 					Width:  availWidth,
@@ -817,7 +821,10 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.Focus = FocusMain
 		m.Sidebar.Active = false
-		m.Sidebar.Visible = true
+		// Respect whatever visibility the user already had (matches
+		// SwitchToServiceMsg below) -- this used to force the sidebar open
+		// unconditionally, which re-opened it every time even if the user had
+		// explicitly hidden it before jumping to logs.
 		return m, tea.Batch(cmds...)
 
 	case core.SwitchToServiceMsg:

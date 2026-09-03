@@ -26,6 +26,16 @@ var (
 	// Matches standard Go/K8s log prefixes
 	// e.g. I0108 13:51:34.701761    1213 scope.go:117]
 	reK8sHeader = regexp.MustCompile(`^[IVWE]\d{4}\s+\d{2}:\d{2}:\d{2}\.\d+\s+\d+\s+\S+:\d+\]\s+`)
+
+	// Matches ANSI/VT100 CSI escape sequences (cursor movement, erase-line,
+	// color, etc.) -- e.g. "\x1b[2K", "\x1b[1A", "\x1b[37m", "\x1b[?25l".
+	// Docker/buildkit's TTY progress output is full of these (used to redraw
+	// and reposition several in-flight layer-status lines in place). Passed
+	// through unstripped, they get interpreted by whatever terminal is
+	// actually rendering tgcp's own output, moving its cursor around and
+	// visually corrupting/truncating text that has nothing to do with the
+	// log line itself.
+	reAnsiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 )
 
 // Client wraps the Cloud Logging API (v2 REST)
@@ -87,8 +97,55 @@ func (c *Client) ListEntries(
 		return nil, "", fmt.Errorf("failed to list entries: %w", err)
 	}
 
+	return parseLogEntries(resp.Entries), resp.NextPageToken, nil
+}
+
+// maxLiveEntries caps how many newly-arrived entries a single live-tail poll
+// fetches, so a burst of log lines between polls can't stall the UI --
+// anything past the cap is picked up on the next poll instead.
+const maxLiveEntries = 500
+
+// ListEntriesSince fetches entries matching filter at or after since
+// (inclusive), oldest-first, for live-tail polling (see Service.SetLive).
+// Inclusive rather than "newer than" so entries sharing since's exact
+// timestamp can't be silently skipped if a previous poll didn't return all
+// of them (e.g. cut off by maxLiveEntries, or same-timestamp ordering ties)
+// -- the caller (Service's liveEntriesMsg handling) is responsible for
+// de-duplicating against what it already appended for that timestamp. If
+// since is zero, fetches from the beginning of the filter's matching
+// history -- used for a live tail's initial batch (e.g. a build's full log
+// so far), which is safely bounded since the filter already scopes to one
+// resource (e.g. one build ID), not the whole project's logs.
+func (c *Client) ListEntriesSince(ctx context.Context, filter string, since time.Time) ([]LogEntry, error) {
+	if demo.Enabled {
+		return nil, nil
+	}
+
+	finalFilter := filter
+	if !since.IsZero() {
+		finalFilter = fmt.Sprintf(`%s AND timestamp >= "%s"`, filter, since.UTC().Format(time.RFC3339Nano))
+	}
+
+	req := c.service.Entries.List(&logging.ListLogEntriesRequest{
+		ResourceNames: []string{"projects/" + c.projectID},
+		Filter:        finalFilter,
+		PageSize:      maxLiveEntries,
+		OrderBy:       "timestamp asc",
+	})
+
+	resp, err := req.Context(ctx).Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list entries: %w", err)
+	}
+
+	return parseLogEntries(resp.Entries), nil
+}
+
+// parseLogEntries converts raw API log entries into the UI-facing LogEntry
+// type, shared by ListEntries and ListEntriesSince.
+func parseLogEntries(rawEntries []*logging.LogEntry) []LogEntry {
 	var entries []LogEntry
-	for _, entry := range resp.Entries {
+	for _, entry := range rawEntries {
 		// Parse Timestamp
 		ts, _ := time.Parse(time.RFC3339Nano, entry.Timestamp)
 		// Try fallback if Nano fails
@@ -186,11 +243,31 @@ func (c *Client) ListEntries(
 		})
 	}
 
-	return entries, resp.NextPageToken, nil
+	return entries
+}
+
+// StripTerminalControlChars removes ANSI CSI escape sequences (cursor
+// movement, erase-line, color) and normalizes carriage returns to newlines,
+// so raw terminal/TTY-oriented text -- e.g. a Cloud Build step's raw stdout,
+// full of Docker/buildkit progress redraws -- can be displayed safely
+// outside a real terminal. Exported for reuse by other services that show
+// raw log text directly (see internal/services/cloudbuild's build-log tail,
+// which reads this from the build's GCS log object rather than through
+// Cloud Logging entries -- Cloud Logging's own ingestion of TTY-heavy build
+// step output already collapses "\r" redraws into truncated fragments
+// *before* this package ever sees them, which no amount of client-side
+// cleaning here can undo).
+func StripTerminalControlChars(raw string) string {
+	raw = reAnsiEscape.ReplaceAllString(raw, "")
+	raw = strings.ReplaceAll(raw, "\r\n", "\n")
+	raw = strings.ReplaceAll(raw, "\r", "\n")
+	return raw
 }
 
 // cleanPayload removes redundant timestamps and prefixes using regex
 func cleanPayload(raw string, ts time.Time) string {
+	raw = StripTerminalControlChars(raw)
+
 	// 1. Remove Timestamp
 	// If the line starts with a timestamp string that looks like our log timestamp, strip it.
 	// We rely on Regex for general shape match.

@@ -15,6 +15,11 @@ import (
 
 const CacheTTL = 10 * time.Second // Logs change frequently
 
+// maxLiveBufferEntries caps how many entries a live tail keeps in memory --
+// older entries are dropped from the front once exceeded, so a long-running
+// build's log can't grow unbounded.
+const maxLiveBufferEntries = 2000
+
 // Tick message for background refresh
 type tickMsg time.Time
 
@@ -47,6 +52,18 @@ type Service struct {
 
 	// Filter for API calls
 	filter string
+
+	// Live-tail mode (see SetLive): while true, the background tick polls
+	// for and appends newly-arrived entries (oldest-first) instead of
+	// replacing page 1 with a fresh newest-first fetch. lastEntryTime is the
+	// timestamp of the most recently appended entry, used as the polling
+	// cursor ("fetch entries at or after this"). lastEntryInsertIDs holds the
+	// InsertIDs of every already-appended entry exactly at lastEntryTime, so
+	// a ">="-based poll (inclusive, to avoid silently skipping entries that
+	// share that exact timestamp) can dedup instead of re-appending them.
+	live               bool
+	lastEntryTime      time.Time
+	lastEntryInsertIDs map[string]bool
 
 	// Detail view
 	selectedEntry *LogEntry
@@ -201,16 +218,20 @@ func (s *Service) HelpText() string {
 	if s.viewingDetail {
 		return "Esc/q:Back"
 	}
-	base := "r:Refresh  Enter:Detail  R:Resources"
+	liveLabel := "L:Live Tail"
+	if s.live {
+		liveLabel = "L:Stop Live Tail"
+	}
+	base := fmt.Sprintf("r:Refresh  %s  Enter:Detail  R:Resources", liveLabel)
 	if s.returnTo != "" {
-		base = fmt.Sprintf("Esc:Back to %s  r:Refresh  Enter:Detail  R:Resources", s.returnTo)
+		base = fmt.Sprintf("Esc:Back to %s  r:Refresh  %s  Enter:Detail  R:Resources", s.returnTo, liveLabel)
 	} else {
 		base += "  Esc/q:Back"
 	}
-	if len(s.tokenStack) > 0 {
+	if !s.live && len(s.tokenStack) > 0 {
 		base += "  n:Newer"
 	}
-	if s.nextPageToken != "" {
+	if !s.live && s.nextPageToken != "" {
 		base += "  p:Older"
 	}
 	return base
@@ -267,6 +288,15 @@ type entriesMsg struct {
 	entries   []LogEntry
 	nextToken string
 }
+
+// liveEntriesMsg carries a live-tail poll's result. filter is the filter the
+// poll was issued for, so a response that arrives after the user has since
+// jumped to a different filter (e.g. a different build's log tail) can be
+// detected and dropped instead of being mixed into the new filter's entries.
+type liveEntriesMsg struct {
+	filter  string
+	entries []LogEntry
+}
 type errMsg error
 
 // InitService initializes the service logic (API clients)
@@ -310,6 +340,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, cmd
 
 	case tickMsg:
+		if s.live {
+			// Never auto-poll while inspecting a single entry's detail, so a
+			// background tick doesn't yank it out from under the user.
+			if s.viewingDetail {
+				return s, s.tick()
+			}
+			return s, tea.Batch(s.fetchLiveEntriesCmd(), s.tick())
+		}
 		// Only auto-refresh when on page 1 and not inspecting a single entry's
 		// detail, so a background tick never yanks the user's paging position
 		// or the list backing an open detail view out from under them.
@@ -323,6 +361,51 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.entries = msg.entries
 		s.nextPageToken = msg.nextToken
 		s.updateTable()
+		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
+
+	case liveEntriesMsg:
+		s.spinner.Stop()
+		if msg.filter != s.filter {
+			// Stale response for a filter the user has since navigated away
+			// from (e.g. jumped to a different build's log tail) -- drop it
+			// rather than mixing its entries into the new filter's tail.
+			return s, nil
+		}
+		if len(msg.entries) > 0 {
+			// The poll is inclusive of lastEntryTime (">=", not ">") so ties
+			// at that exact timestamp aren't silently skipped -- dedup
+			// against what was already appended for it.
+			fresh := make([]LogEntry, 0, len(msg.entries))
+			for _, e := range msg.entries {
+				if e.Timestamp.Equal(s.lastEntryTime) && s.lastEntryInsertIDs[e.InsertID] {
+					continue
+				}
+				fresh = append(fresh, e)
+			}
+			if len(fresh) > 0 {
+				s.entries = append(s.entries, fresh...)
+				if excess := len(s.entries) - maxLiveBufferEntries; excess > 0 {
+					s.entries = s.entries[excess:]
+				}
+				newMax := s.lastEntryTime
+				for _, e := range fresh {
+					if e.Timestamp.After(newMax) {
+						newMax = e.Timestamp
+					}
+				}
+				if newMax.After(s.lastEntryTime) {
+					s.lastEntryTime = newMax
+					s.lastEntryInsertIDs = make(map[string]bool)
+				}
+				for _, e := range fresh {
+					if e.Timestamp.Equal(s.lastEntryTime) {
+						s.lastEntryInsertIDs[e.InsertID] = true
+					}
+				}
+				s.updateTable()
+				s.table.GotoBottom()
+			}
+		}
 		return s, func() tea.Msg { return core.LastUpdatedMsg(time.Now()) }
 
 	case sinksMsg:
@@ -406,6 +489,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "r":
+			return s, s.Refresh()
+
+		case "L": // Toggle live-tail mode
+			s.SetLive(!s.live)
 			return s, s.Refresh()
 
 		case "R":
@@ -784,6 +871,13 @@ func (s *Service) SetFilter(filter string) {
 	s.filter = filter
 }
 
+// SetLive toggles live-tail mode (see the `live` field doc comment). The
+// next Refresh -- either the one SwitchToLogsMsg triggers on entry, or a
+// manual "r" -- starts (or resumes) tailing accordingly.
+func (s *Service) SetLive(live bool) {
+	s.live = live
+}
+
 // SetReturnTo sets the service to return to when Esc is pressed
 func (s *Service) SetReturnTo(service string) {
 	s.returnTo = service
@@ -817,7 +911,7 @@ func (s *Service) updateTable() {
 	rows := make([]table.Row, len(s.entries))
 	for i, e := range s.entries {
 		ts := e.Timestamp.Local().Format("01-02 15:04:05")
-		sev := formatSeverityShort(e.Severity)
+		sev := formatSeverityCell(e.Severity)
 
 		// Truncate message for table display
 		msg := e.Payload
@@ -832,24 +926,44 @@ func (s *Service) updateTable() {
 	s.table.SetRows(rows)
 }
 
+// formatSeverityShort renders a severity as the full padded/background
+// RenderStatus badge, for the (unconstrained-width) entry detail view only
+// -- see formatSeverityCell for the table-safe plain-text version.
 func formatSeverityShort(severity string) string {
+	return components.RenderStatus(severityAbbrev(severity))
+}
+
+// formatSeverityCell renders a severity as plain text (no lipgloss styling)
+// for the log-entries table's narrow, fixed-width "Sev" column. The table
+// library truncates overflowing cells with a rune-width algorithm that
+// isn't ANSI-escape-aware, so a styled badge here (as this used to be)
+// silently corrupts the row -- mangling the severity text itself and
+// bleeding stray characters into the table's own border, exactly like the
+// Cloud Build Builds list's Status column before it got the same fix.
+func formatSeverityCell(severity string) string {
+	return severityAbbrev(severity)
+}
+
+// severityAbbrev shortens the longer Cloud Logging severity names so they
+// comfortably fit the table's 8-wide Sev column.
+func severityAbbrev(severity string) string {
 	switch severity {
 	case "EMERGENCY":
-		return components.RenderStatus("EMERG")
+		return "EMERG"
 	case "CRITICAL":
-		return components.RenderStatus("CRIT")
+		return "CRIT"
 	case "ERROR":
-		return components.RenderStatus("ERROR")
+		return "ERROR"
 	case "WARNING":
-		return components.RenderStatus("WARN")
+		return "WARN"
 	case "NOTICE":
-		return components.RenderStatus("NOTICE")
+		return "NOTICE"
 	case "INFO":
-		return components.RenderStatus("INFO")
+		return "INFO"
 	case "DEBUG":
-		return components.RenderStatus("DEBUG")
+		return "DEBUG"
 	default:
-		return components.RenderStatus("DEFAULT")
+		return "DEFAULT"
 	}
 }
 
@@ -871,10 +985,34 @@ func (s *Service) fetchEntriesCmd(token string) tea.Cmd {
 	}
 }
 
+// fetchLiveEntriesCmd polls for entries newer than lastEntryTime (or, on the
+// first call after SetLive(true)/Refresh, the filter's full matching
+// history), oldest-first, for live-tail mode.
+func (s *Service) fetchLiveEntriesCmd() tea.Cmd {
+	filter := s.filter
+	since := s.lastEntryTime
+	return func() tea.Msg {
+		if s.client == nil {
+			return errMsg(fmt.Errorf("client not initialized"))
+		}
+		entries, err := s.client.ListEntriesSince(context.Background(), filter, since)
+		if err != nil {
+			return errMsg(err)
+		}
+		return liveEntriesMsg{filter: filter, entries: entries}
+	}
+}
+
 func (s *Service) Refresh() tea.Cmd {
 	s.spinner.Start("")
 	s.currentToken = ""
 	s.tokenStack = nil
+	if s.live {
+		s.entries = nil
+		s.lastEntryTime = time.Time{}
+		s.lastEntryInsertIDs = nil
+		return s.fetchLiveEntriesCmd()
+	}
 	return s.fetchEntriesCmd("")
 }
 
@@ -887,6 +1025,9 @@ func (s *Service) Reset() {
 	s.currentToken = ""
 	s.tokenStack = nil
 	s.filter = "" // Clear filter on reset
+	s.live = false
+	s.lastEntryTime = time.Time{}
+	s.lastEntryInsertIDs = nil
 	s.resourcesMode = false
 	s.resourceViewState = ResourceViewList
 	s.pendingResourceDelete = ""

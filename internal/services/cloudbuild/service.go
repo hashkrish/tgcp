@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
+	"github.com/yogirk/tgcp/internal/services/logging"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
@@ -35,8 +37,17 @@ type BuildItem struct {
 	Source         string
 	ServiceAccount string
 	LogsBucket     string
-	Tags           []string
-	Substitutions  map[string]string
+	// LoggingMode is Build.Options.Logging's raw enum string (e.g.
+	// "STACKDRIVER_ONLY", "GCS_ONLY", "LEGACY", "NONE", or "" if unset).
+	// STACKDRIVER_ONLY ("Cloud Logging only") -- the modern default -- means
+	// there is no GCS log object at all: LogsBucket is empty, and "l"
+	// (LogTail) falls back to the shared Cloud Logging view. See that
+	// fallback's doc comment for why heavily \r-redrawn output (e.g. `docker
+	// push` progress) is unrecoverably corrupted for such builds, by Cloud
+	// Logging's own ingestion, not by anything in this app.
+	LoggingMode   string
+	Tags          []string
+	Substitutions map[string]string
 }
 
 // formatSubstitutions renders a build's substitution variables as "key=value" pairs.
@@ -77,11 +88,37 @@ const (
 	ViewWorkerPoolCreate
 	ViewConnections
 	ViewCBRepositories
+	ViewBuildLogs
 )
 
 // Message types for async operations
 type dataMsg []BuildItem
 type errMsg error
+
+// buildLogTickMsg drives the build-log live-tail poll, separately from the
+// main tickMsg (which refreshes the Builds list every CacheTTL=30s) -- a
+// faster, dedicated cadence so a live tail actually feels live, matching the
+// shared Cloud Logging view's own live-tail tick.
+type buildLogTickMsg time.Time
+
+const buildLogTickInterval = 3 * time.Second
+
+func (s *Service) buildLogTick() tea.Cmd {
+	return tea.Tick(buildLogTickInterval, func(t time.Time) tea.Msg { return buildLogTickMsg(t) })
+}
+
+// buildLogMsg carries a chunk of newly-read raw build-log text (see
+// FetchBuildLogTail), or an error. text is "" and err is nil when a poll
+// found nothing new since newOffset. buildID identifies which build the
+// fetch was for, so a response that arrives after the user has switched to
+// (or backed out to a different) build's log tail can be detected and
+// dropped instead of being spliced into the wrong build's pane.
+type buildLogMsg struct {
+	buildID   string
+	text      string
+	newOffset int64
+	err       error
+}
 
 // actionResultMsg carries the result of an async mutating action (e.g.
 // build submission). resource/name/action identify what was acted on, for
@@ -151,6 +188,16 @@ type Service struct {
 	cbRepositoriesTable  *components.StandardTable
 	selectedCBRepository *CBRepositoryItem
 
+	// Build log tail sub-view state (raw GCS log object, see api.go's
+	// FetchBuildLogTail) -- a scrolling text pane, not a table, since a raw
+	// build log has no structured Time/Severity/Message columns.
+	buildLogViewport viewport.Model
+	buildLogBuildID  string
+	buildLogBucket   string
+	buildLogText     string
+	buildLogOffset   int64
+	buildLogLive     bool
+
 	// Cache
 	cache *core.Cache
 }
@@ -178,6 +225,7 @@ func NewService(cache *core.Cache) *Service {
 		workerPoolsTable:    newWorkerPoolsTable(),
 		connectionsTable:    newConnectionsTable(),
 		cbRepositoriesTable: newCBRepositoriesTable(),
+		buildLogViewport:    viewport.New(80, 20),
 		wpRegion:            "us-central1",
 		connRegion:          "us-central1",
 	}
@@ -201,7 +249,7 @@ func (s *Service) HelpText() string {
 	case ViewList:
 		return "r:Refresh  /:Filter  Enter:Detail  s:Submit Build  g:Triggers  p:Worker Pools  x:Connections"
 	case ViewDetail:
-		return "Esc/q:Back  t:Retry  c:Cancel  l:Logs"
+		return "Esc/q:Back  t:Retry  c:Cancel  l:Log Tail"
 	case ViewCreate, ViewTriggerCreate, ViewTriggerEdit, ViewWorkerPoolCreate:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	case ViewConfirmation:
@@ -216,6 +264,12 @@ func (s *Service) HelpText() string {
 		return "Esc/q:Back  Enter:Repositories  d:Delete"
 	case ViewCBRepositories:
 		return "Esc/q:Back  d:Delete"
+	case ViewBuildLogs:
+		liveLabel := "L:Live Tail"
+		if s.buildLogLive {
+			liveLabel = "L:Stop Live Tail"
+		}
+		return fmt.Sprintf("Esc/q:Back  %s  ↑↓/PgUp/PgDn:Scroll", liveLabel)
 	default:
 		return ""
 	}
@@ -270,6 +324,9 @@ func (s *Service) Reset() {
 	s.err = nil // CRITICAL: Always clear errors on reset
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
+	s.buildLogLive = false
+	s.buildLogText = ""
+	s.buildLogOffset = 0
 }
 
 // IsRootView returns true if at the top-level list (used for 'q' navigation)
@@ -324,6 +381,33 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return s, tea.Batch(s.fetchDataCmd(false), s.tick())
+
+	case buildLogTickMsg:
+		if s.viewState == ViewBuildLogs && s.buildLogLive {
+			return s, tea.Batch(s.fetchBuildLogCmd(), s.buildLogTick())
+		}
+		return s, nil
+
+	case buildLogMsg:
+		if msg.buildID != s.buildLogBuildID {
+			// Stale response for a build the user has since navigated away
+			// from (e.g. backed out and opened a different build's log tail
+			// before this fetch returned) -- drop it rather than splicing
+			// its text/offset into whatever's now selected.
+			return s, nil
+		}
+		if msg.err != nil {
+			s.err = msg.err
+			return s, nil
+		}
+		s.err = nil // Clear any earlier transient poll error now that one succeeded.
+		if msg.text != "" {
+			s.buildLogText += msg.text
+			s.buildLogOffset = msg.newOffset
+			s.buildLogViewport.SetContent(logging.StripTerminalControlChars(s.buildLogText))
+			s.buildLogViewport.GotoBottom()
+		}
+		return s, nil
 
 	case dataMsg:
 		s.spinner.Stop()
@@ -399,6 +483,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.workerPoolsTable.HandleWindowSizeDefault(msg)
 		s.connectionsTable.HandleWindowSizeDefault(msg)
 		s.cbRepositoriesTable.HandleWindowSizeDefault(msg)
+		s.buildLogViewport.Width = msg.Width - 4
+		s.buildLogViewport.Height = msg.Height - 8
 
 	case tea.MouseMsg:
 		if s.viewState == ViewList {
@@ -501,16 +587,58 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewConfirmation
 			}
 		case "l":
-			// Cloud Build has no dedicated log-streaming API for v1 builds; this
-			// reuses the shared Cloud Logging view (see core.SwitchToLogsMsg)
-			// filtered to this build's ID, matching how Cloud Run's "l" key
-			// works. It's a one-shot fetch-and-display, not a live tail.
-			if s.selectedItem != nil {
+			if s.selectedItem == nil {
+				return s, nil
+			}
+			if s.selectedItem.LogsBucket == "" {
+				// No GCS logs bucket on this build (e.g. a CLOUD_LOGGING_ONLY
+				// build) -- fall back to the shared Cloud Logging view
+				// filtered to this build's ID, in live-tail mode whenever the
+				// build is still in progress.
 				filter := fmt.Sprintf(`resource.type="build" AND resource.labels.build_id="%s"`, s.selectedItem.ID)
 				heading := fmt.Sprintf("Build: %s", s.selectedItem.ID)
-				return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "cloudbuild", Heading: heading} }
+				live := isBuildInProgress(s.selectedItem.Status)
+				return s, func() tea.Msg {
+					return core.SwitchToLogsMsg{Filter: filter, Source: "cloudbuild", Heading: heading, Live: live}
+				}
 			}
+			// Read the build's raw GCS log object directly. Cloud Logging's
+			// own ingestion of TTY-progress-heavy build step output (e.g.
+			// `docker push`) has already collapsed "\r"-redrawn lines into
+			// truncated fragments by the time it reaches the Logging API --
+			// the raw GCS object is the same unmangled byte stream
+			// `gcloud builds log` itself reads.
+			s.buildLogBuildID = s.selectedItem.ID
+			s.buildLogBucket = s.selectedItem.LogsBucket
+			s.buildLogText = ""
+			s.buildLogOffset = 0
+			s.buildLogLive = isBuildInProgress(s.selectedItem.Status)
+			s.buildLogViewport.SetContent("")
+			s.viewState = ViewBuildLogs
+			if s.buildLogLive {
+				return s, tea.Batch(s.fetchBuildLogCmd(), s.buildLogTick())
+			}
+			return s, s.fetchBuildLogCmd()
 		}
+	}
+
+	if s.viewState == ViewBuildLogs {
+		switch msg.String() {
+		case "q", "esc":
+			s.viewState = ViewDetail
+			s.buildLogLive = false
+			return s, nil
+		case "L":
+			s.buildLogLive = !s.buildLogLive
+			if s.buildLogLive {
+				return s, tea.Batch(s.fetchBuildLogCmd(), s.buildLogTick())
+			}
+			return s, nil
+		}
+		var vp viewport.Model
+		vp, cmd = s.buildLogViewport.Update(msg)
+		s.buildLogViewport = vp
+		return s, cmd
 	}
 
 	if s.viewState == ViewConfirmation {
@@ -556,6 +684,9 @@ func (s *Service) View() string {
 
 	if s.viewState == ViewDetail {
 		return s.renderDetailView()
+	}
+	if s.viewState == ViewBuildLogs {
+		return s.renderBuildLogView()
 	}
 	if s.viewState == ViewConfirmation {
 		return s.renderConfirmation()
@@ -667,6 +798,11 @@ func (s *Service) renderDetailView() string {
 	if s.selectedItem.LogsBucket != "" {
 		rows = append(rows, components.KeyValue{Key: "Logs Bucket", Value: s.selectedItem.LogsBucket})
 	}
+	logStorage := describeLoggingMode(s.selectedItem.LoggingMode)
+	if s.selectedItem.LogsBucket == "" {
+		logStorage += " (no raw GCS log file -- \"l\" falls back to Cloud Logging, which may show corrupted TTY-progress lines for tools like `docker push`)"
+	}
+	rows = append(rows, components.KeyValue{Key: "Log Storage", Value: logStorage})
 	if len(s.selectedItem.Tags) > 0 {
 		rows = append(rows, components.KeyValue{Key: "Tags", Value: strings.Join(s.selectedItem.Tags, ", ")})
 	}
@@ -690,6 +826,33 @@ func (s *Service) renderDetailView() string {
 		card,
 		"",
 		actions,
+	)
+}
+
+// renderBuildLogView renders the raw build-log tail as a scrolling text pane.
+func (s *Service) renderBuildLogView() string {
+	breadcrumb := components.Breadcrumb(
+		fmt.Sprintf("Project: %s", s.projectID),
+		s.Name(),
+		s.buildLogBuildID,
+		"Log Tail",
+	)
+
+	liveIndicator := ""
+	if s.buildLogLive {
+		liveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
+		liveIndicator = "  " + liveStyle.Render("● LIVE")
+	}
+
+	content := s.buildLogViewport.View()
+	if s.buildLogText == "" {
+		content = components.EmptyState("logs")
+	}
+
+	return lipgloss.JoinVertical(lipgloss.Left,
+		breadcrumb+liveIndicator,
+		"",
+		content,
 	)
 }
 
@@ -752,6 +915,37 @@ func (s *Service) updateTable(items []BuildItem) {
 	s.table.SetRows(rows)
 }
 
+// isBuildInProgress reports whether status is one of Cloud Build's
+// non-terminal Build.Status enum values, i.e. still producing log lines.
+func isBuildInProgress(status string) bool {
+	switch status {
+	case "QUEUED", "WORKING", "PENDING":
+		return true
+	default:
+		return false
+	}
+}
+
+// describeLoggingMode renders Build.Options.Logging's raw enum string as a
+// human-readable description, and notes when there's no GCS log object to
+// read a raw log tail from ("l") -- see BuildItem.LoggingMode's doc comment.
+func describeLoggingMode(mode string) string {
+	switch mode {
+	case "STACKDRIVER_ONLY":
+		return "Cloud Logging only"
+	case "LOGGING_UNSPECIFIED", "":
+		return "Default"
+	case "GCS_ONLY":
+		return "GCS only"
+	case "LEGACY":
+		return "Legacy (Cloud Logging + GCS)"
+	case "NONE":
+		return "Disabled"
+	default:
+		return mode
+	}
+}
+
 // shortID trims a UUID-style identifier down to a readable prefix for
 // table display; the full value is still shown in the detail view.
 func shortID(id string) string {
@@ -792,5 +986,24 @@ func (s *Service) cancelBuildCmd(item BuildItem) tea.Cmd {
 			return actionResultMsg{err: err, resource: "build", name: shortID(item.ID), action: "cancel"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Cancelling build %s...", shortID(item.ID)), resource: "build", name: shortID(item.ID), action: "cancel"}
+	}
+}
+
+// fetchBuildLogCmd reads the next unread chunk of the current build's raw
+// GCS log object (see Client.FetchBuildLogTail), starting from
+// buildLogOffset.
+func (s *Service) fetchBuildLogCmd() tea.Cmd {
+	bucket := s.buildLogBucket
+	buildID := s.buildLogBuildID
+	offset := s.buildLogOffset
+	return func() tea.Msg {
+		if s.client == nil {
+			return buildLogMsg{buildID: buildID, err: fmt.Errorf("client not initialized")}
+		}
+		text, newOffset, err := s.client.FetchBuildLogTail(context.Background(), bucket, buildID, offset)
+		if err != nil {
+			return buildLogMsg{buildID: buildID, err: err}
+		}
+		return buildLogMsg{buildID: buildID, text: text, newOffset: newOffset}
 	}
 }

@@ -16,6 +16,10 @@ type SwitchToLogsMsg struct {
 	Filter  string
 	Source  string // The short name of the service initiating the switch
 	Heading string // Optional heading to display (e.g. resource name)
+	// Live starts the logging view in live-tail mode: it polls for and
+	// appends newly-arrived entries (oldest-first) instead of showing a
+	// static newest-first page, auto-following the bottom as they arrive.
+	Live bool
 }
 
 // SwitchToServiceMsg requests a context switch to a specific service

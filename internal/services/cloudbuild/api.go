@@ -3,6 +3,7 @@ package cloudbuild
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	cloudbuildv2 "cloud.google.com/go/cloudbuild/apiv2"
 	cloudbuildpbv2 "cloud.google.com/go/cloudbuild/apiv2/cloudbuildpb"
 	iampb "cloud.google.com/go/iam/apiv1/iampb"
+	"cloud.google.com/go/storage"
 	"github.com/yogirk/tgcp/internal/demo"
 	"google.golang.org/api/iterator"
 )
@@ -22,10 +24,12 @@ const maxBuilds = 100
 // Client wraps the real Cloud Build API client(s). repoMgr is the 2nd-gen
 // "Repository Manager" client (Connections/Repositories, GitHub App-backed
 // source integrations) -- a separate API surface from the 1st-gen client
-// used for builds/triggers/worker-pools.
+// used for builds/triggers/worker-pools. storage reads a build's raw GCS log
+// object directly (see FetchBuildLogTail) rather than through Cloud Logging.
 type Client struct {
 	client  *cloudbuild.Client
 	repoMgr *cloudbuildv2.RepositoryManagerClient
+	storage *storage.Client
 }
 
 // NewClient constructs a Client using Application Default Credentials, the
@@ -39,7 +43,11 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cloud build repository manager client: %w", err)
 	}
-	return &Client{client: c, repoMgr: repoMgr}, nil
+	storageClient, err := storage.NewClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("cloud storage client: %w", err)
+	}
+	return &Client{client: c, repoMgr: repoMgr, storage: storageClient}, nil
 }
 
 // ListBuilds lists the most recent Cloud Build builds for the given project
@@ -128,6 +136,72 @@ func (c *Client) CancelBuild(projectID, buildID string) error {
 		Id:        buildID,
 	})
 	return err
+}
+
+// -----------------------------------------------------------------------------
+// Raw build log (GCS)
+// -----------------------------------------------------------------------------
+
+// gcsLogObjectName returns the deterministic object name Cloud Build writes
+// a build's full raw log to, at the root of its logs bucket.
+func gcsLogObjectName(buildID string) string {
+	return fmt.Sprintf("log-%s.txt", buildID)
+}
+
+// parseLogsBucketName strips a "gs://" prefix (and any path beyond the
+// bucket root -- Cloud Build always writes the log object at the bucket
+// root regardless of a configured subdirectory) from a Build's LogsBucket
+// field, returning the bare bucket name the Storage client needs.
+func parseLogsBucketName(logsBucket string) string {
+	b := strings.TrimPrefix(logsBucket, "gs://")
+	if idx := strings.Index(b, "/"); idx >= 0 {
+		b = b[:idx]
+	}
+	return b
+}
+
+// FetchBuildLogTail reads a build's raw GCS log object starting at byte
+// offset (0 for the initial fetch), returning the newly-read text and the
+// offset to resume from next time. Unlike Cloud Logging's ListEntries, this
+// is the single continuous byte stream `gcloud builds log` itself reads --
+// Cloud Logging ingests build step stdout as discrete entries and, for
+// TTY-progress-heavy tools like `docker push`, has already collapsed "\r"-
+// redrawn lines into truncated fragments by the time it reaches the Logging
+// API. The raw GCS object preserves every byte exactly as the build wrote
+// it, which logging.StripTerminalControlChars can then correctly clean up
+// client-side.
+func (c *Client) FetchBuildLogTail(ctx context.Context, logsBucket, buildID string, offset int64) (text string, newOffset int64, err error) {
+	if demo.Enabled {
+		return "", offset, nil
+	}
+	if c.storage == nil {
+		return "", offset, fmt.Errorf("storage client not initialized")
+	}
+	bucket := parseLogsBucketName(logsBucket)
+	if bucket == "" {
+		return "", offset, fmt.Errorf("build has no logs bucket")
+	}
+
+	obj := c.storage.Bucket(bucket).Object(gcsLogObjectName(buildID))
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		return "", offset, fmt.Errorf("stat build log: %w", err)
+	}
+	if attrs.Size <= offset {
+		return "", offset, nil // Nothing new since the last read.
+	}
+
+	r, err := obj.NewRangeReader(ctx, offset, -1)
+	if err != nil {
+		return "", offset, fmt.Errorf("read build log: %w", err)
+	}
+	defer r.Close()
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", offset, fmt.Errorf("read build log: %w", err)
+	}
+	return string(data), offset + int64(len(data)), nil
 }
 
 // -----------------------------------------------------------------------------
@@ -628,6 +702,7 @@ func toBuildItem(b *cloudbuildpb.Build) BuildItem {
 		Source:         formatSource(b.GetSource()),
 		ServiceAccount: b.GetServiceAccount(),
 		LogsBucket:     b.GetLogsBucket(),
+		LoggingMode:    b.GetOptions().GetLogging().String(),
 		Tags:           b.GetTags(),
 		Substitutions:  b.GetSubstitutions(),
 	}
