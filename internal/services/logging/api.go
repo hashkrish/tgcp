@@ -327,10 +327,18 @@ func cleanPayload(raw string, ts time.Time) string {
 	return strings.TrimSpace(raw)
 }
 
+// SeverityLevels is GCP's LogSeverity enum, in ascending order of severity.
+// Shared by entry parsing (isValidSeverity) and the log viewer's severity
+// threshold filter control (see nextSeverityLevel in logging.go).
+var SeverityLevels = []string{
+	"DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY",
+}
+
 func isValidSeverity(s string) bool {
-	switch s {
-	case "DEFAULT", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY":
-		return true
+	for _, lvl := range SeverityLevels {
+		if lvl == s {
+			return true
+		}
 	}
 	return false
 }

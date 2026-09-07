@@ -10,7 +10,9 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/yogirk/tgcp/internal/core"
+	"github.com/yogirk/tgcp/internal/styles"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
@@ -54,8 +56,33 @@ type Service struct {
 	returnTo string
 	heading  string
 
-	// Filter for API calls
-	filter string
+	// baseFilter is the resource-scoping filter set externally via SetFilter
+	// (e.g. by SwitchToLogsMsg from GCE/Cloud Run/Cloud SQL/GKE/Cloud
+	// Build). Read-only from the user's perspective inside the log viewer.
+	baseFilter string
+
+	// userQuery is the free-text LQL the user types in the log viewer
+	// itself (activated with "/"), ANDed onto baseFilter by composeFilter.
+	userQuery string
+
+	// queryFilter drives the "/"-activated text-entry UX for userQuery,
+	// reusing components.FilterModel's textinput/styling only -- its
+	// client-side FilterSlice semantics are NOT used here; submitting
+	// (Enter) triggers a refetch via composeFilter, not local row
+	// filtering.
+	queryFilter components.FilterModel
+
+	// severityThreshold is the minimum severity to show ("" or "DEFAULT"
+	// means no filtering), chosen via the "s"-triggered severitySelect
+	// picker below.
+	severityThreshold string
+
+	// selectingSeverity/severitySelect back the "s" key's severity-level
+	// picker -- a modal list (see components.SelectModel) rather than a
+	// one-at-a-time cycle, so jumping straight to e.g. EMERGENCY doesn't
+	// require stepping through every level in between.
+	selectingSeverity bool
+	severitySelect    components.SelectModel
 
 	// Live-tail mode (see SetLive): while true, the background tick polls
 	// for and appends newly-arrived entries (oldest-first) instead of
@@ -132,6 +159,15 @@ func nextResourceTab(t ResourceTab) ResourceTab {
 	return resourceTabOrder[0]
 }
 
+func prevResourceTab(t ResourceTab) ResourceTab {
+	for i, cur := range resourceTabOrder {
+		if cur == t {
+			return resourceTabOrder[(i-1+len(resourceTabOrder))%len(resourceTabOrder)]
+		}
+	}
+	return resourceTabOrder[0]
+}
+
 // ResourceViewState tracks the resource-mode sub-view, independent of the
 // log-entries viewingDetail bool.
 type ResourceViewState int
@@ -195,8 +231,57 @@ func NewService(cache *core.Cache) *Service {
 		viewBucketID:   "_Default",
 		viewLocation:   "global",
 		detailViewport: viewport.New(80, 20),
+		queryFilter:    components.NewFilterWithPlaceholder(`LQL query, e.g. severity>=ERROR AND textPayload:"timeout"`),
 	}
+	s.queryFilter.TextInput.ShowSuggestions = true
+	s.queryFilter.TextInput.CompletionStyle = lipgloss.NewStyle().Foreground(styles.ColorTextMuted)
+	s.queryFilter.TextInput.SetSuggestions(lqlSuggestions())
 	return s
+}
+
+// lqlSuggestions seeds the query input's built-in ghost-text autocomplete
+// (bubbles/textinput's ShowSuggestions: type a prefix, see the rest greyed
+// out inline, Tab to accept, Up/Down to cycle other matches) with commonly
+// used Cloud Logging LQL fields and values, so the user rarely has to type
+// LQL syntax from memory. Suggestions are matched against the *whole*
+// current input as a prefix (see bubbles/textinput), so this only speeds up
+// the clause currently being typed -- not clauses after an already-typed
+// "AND " -- which is still the common case (starting a new query, or a
+// severity threshold) worth optimizing for.
+func lqlSuggestions() []string {
+	sugs := []string{
+		`resource.type="cloud_run_revision"`,
+		`resource.type="gce_instance"`,
+		`resource.type="gae_app"`,
+		`resource.type="k8s_container"`,
+		`resource.type="cloudsql_database"`,
+		`resource.type="cloud_function"`,
+		`resource.type="build"`,
+		`resource.labels.service_name=`,
+		`resource.labels.instance_id=`,
+		`resource.labels.namespace_name=`,
+		`resource.labels.container_name=`,
+	}
+	for _, lvl := range SeverityLevels {
+		if lvl == "DEFAULT" {
+			continue
+		}
+		sugs = append(sugs, fmt.Sprintf("severity>=%s", lvl))
+	}
+	sugs = append(sugs,
+		`logName=`,
+		`textPayload:`,
+		`jsonPayload.message:`,
+		`jsonPayload.`,
+		`labels.`,
+		`trace=`,
+		`insertId=`,
+		`httpRequest.status=`,
+		`protoPayload.methodName=`,
+		`timestamp>=`,
+		`timestamp<=`,
+	)
+	return sugs
 }
 
 func (s *Service) Name() string {
@@ -226,13 +311,23 @@ func (s *Service) HelpText() string {
 	if s.viewingDetail {
 		return "Esc/q:Back  ↑↓/PgUp/PgDn:Scroll"
 	}
+	if s.queryFilter.Active {
+		return "Enter:Apply  Tab:Complete  ↑↓:Cycle Suggestion  Esc:Cancel"
+	}
+	if s.selectingSeverity {
+		return "↑↓:Move  Enter:Select  Esc:Cancel"
+	}
 	liveLabel := "L:Live Tail"
 	if s.live {
 		liveLabel = "L:Stop Live Tail"
 	}
-	base := fmt.Sprintf("r:Refresh  %s  Enter:Detail  R:Resources", liveLabel)
+	sevLabel := "Any"
+	if s.severityThreshold != "" && s.severityThreshold != "DEFAULT" {
+		sevLabel = s.severityThreshold
+	}
+	base := fmt.Sprintf("r:Refresh  %s  /:Query  s:Severity(%s)  Enter:Detail  R:Resources", liveLabel, sevLabel)
 	if s.returnTo != "" {
-		base = fmt.Sprintf("Esc:Back to %s  r:Refresh  %s  Enter:Detail  R:Resources", s.returnTo, liveLabel)
+		base = fmt.Sprintf("Esc:Back to %s  r:Refresh  %s  /:Query  s:Severity(%s)  Enter:Detail  R:Resources", s.returnTo, liveLabel, sevLabel)
 	} else {
 		base += "  Esc/q:Back"
 	}
@@ -373,7 +468,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case liveEntriesMsg:
 		s.spinner.Stop()
-		if msg.filter != s.filter {
+		if msg.filter != s.composeFilter() {
 			// Stale response for a filter the user has since navigated away
 			// from (e.g. jumped to a different build's log tail) -- drop it
 			// rather than mixing its entries into the new filter's tail.
@@ -500,9 +595,51 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, cmd
 		}
 
+		if s.queryFilter.Active {
+			switch msg.String() {
+			case "enter":
+				s.userQuery = s.queryFilter.TextInput.Value()
+				s.queryFilter.ExitFilterMode()
+				return s, s.Refresh()
+			case "esc":
+				// Cancel edit without discarding the previously applied query.
+				s.queryFilter.TextInput.SetValue(s.userQuery)
+				s.queryFilter.ExitFilterMode()
+				return s, nil
+			}
+			var fcmd tea.Cmd
+			s.queryFilter, fcmd = s.queryFilter.Update(msg)
+			return s, fcmd
+		}
+
+		if s.selectingSeverity {
+			switch msg.String() {
+			case "up", "k":
+				s.severitySelect.SelectPrev()
+			case "down", "j":
+				s.severitySelect.SelectNext()
+			case "enter":
+				s.severityThreshold = s.severitySelect.Value()
+				s.selectingSeverity = false
+				return s, s.Refresh()
+			case "esc":
+				s.selectingSeverity = false
+			}
+			return s, nil
+		}
+
 		switch msg.String() {
 		case "r":
 			return s, s.Refresh()
+
+		case "/": // Edit the free-text LQL query
+			s.queryFilter.TextInput.SetValue(s.userQuery)
+			return s, s.queryFilter.EnterFilterMode()
+
+		case "s": // Open the minimum-severity picker
+			s.severitySelect = components.NewSelect("Minimum Severity", SeverityLevels, severityLevelLabels, s.severityThreshold)
+			s.selectingSeverity = true
+			return s, nil
 
 		case "L": // Toggle live-tail mode
 			s.SetLive(!s.live)
@@ -611,7 +748,10 @@ func (s *Service) updateResourcesMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return s, nil
 	case "r":
 		return s, tea.Batch(s.spinner.Start(""), s.fetchResourceTabCmd(s.resourceTab))
-	case "[", "]", "tab":
+	case "[":
+		s.resourceTab = prevResourceTab(s.resourceTab)
+		return s, tea.Batch(s.spinner.Start(""), s.fetchResourceTabCmd(s.resourceTab))
+	case "]":
 		s.resourceTab = nextResourceTab(s.resourceTab)
 		return s, tea.Batch(s.spinner.Start(""), s.fetchResourceTabCmd(s.resourceTab))
 	case "n":
@@ -881,9 +1021,36 @@ func (s *Service) updateViewTable() {
 	s.viewTable.SetRows(rows)
 }
 
-// SetFilter sets the filter string (used by other components to jump to logs)
+// SetFilter sets the base resource-scoping filter (used by other components
+// to jump to logs, e.g. SwitchToLogsMsg). It is combined with the user's own
+// query and severity threshold by composeFilter, not replaced by them.
 func (s *Service) SetFilter(filter string) {
-	s.filter = filter
+	s.baseFilter = filter
+}
+
+// composeFilter builds the final LQL filter sent to the API by ANDing
+// together the resource-scoping base filter (set externally via SetFilter),
+// the user's free-text query (typed in this view via "/"), and the severity
+// threshold (cycled with "s"). Empty parts are omitted. This does not
+// validate LQL syntax -- each part is treated as an opaque string, same
+// convention as the sinks/metrics Filter form fields elsewhere in this
+// package.
+func (s *Service) composeFilter() string {
+	return composeFilter(s.baseFilter, s.userQuery, s.severityThreshold)
+}
+
+func composeFilter(base, query, severity string) string {
+	var parts []string
+	if base != "" {
+		parts = append(parts, base)
+	}
+	if q := strings.TrimSpace(query); q != "" {
+		parts = append(parts, "("+q+")")
+	}
+	if severity != "" && severity != "DEFAULT" {
+		parts = append(parts, fmt.Sprintf("severity>=%s", severity))
+	}
+	return strings.Join(parts, " AND ")
 }
 
 // SetLive toggles live-tail mode (see the `live` field doc comment). The
@@ -982,14 +1149,21 @@ func severityAbbrev(severity string) string {
 	}
 }
 
+// severityLevelLabels are the display labels shown in the severity picker,
+// parallel to SeverityLevels -- only DEFAULT gets a friendlier label since
+// "no filter" is clearer to a user than the raw enum value.
+var severityLevelLabels = []string{
+	"Any (no filter)", "DEBUG", "INFO", "NOTICE", "WARNING", "ERROR", "CRITICAL", "ALERT", "EMERGENCY",
+}
+
 func (s *Service) fetchEntriesCmd(token string) tea.Cmd {
 	return func() tea.Msg {
 		if s.client == nil {
 			return errMsg(fmt.Errorf("client not initialized"))
 		}
 
-		// Use the stored filter value
-		filter := s.filter
+		// Use the composed filter (base + user query + severity threshold)
+		filter := s.composeFilter()
 		pageSize := defaultPageSize
 
 		entries, nextToken, err := s.client.ListEntries(context.Background(), filter, pageSize, token)
@@ -1004,7 +1178,7 @@ func (s *Service) fetchEntriesCmd(token string) tea.Cmd {
 // first call after SetLive(true)/Refresh, the filter's full matching
 // history), oldest-first, for live-tail mode.
 func (s *Service) fetchLiveEntriesCmd() tea.Cmd {
-	filter := s.filter
+	filter := s.composeFilter()
 	since := s.lastEntryTime
 	return func() tea.Msg {
 		if s.client == nil {
@@ -1039,7 +1213,12 @@ func (s *Service) Reset() {
 	s.SetHeading("")
 	s.currentToken = ""
 	s.tokenStack = nil
-	s.filter = "" // Clear filter on reset
+	s.baseFilter = ""
+	s.userQuery = ""
+	s.severityThreshold = ""
+	s.queryFilter.ExitFilterMode()
+	s.queryFilter.TextInput.SetValue("")
+	s.selectingSeverity = false
 	s.live = false
 	s.lastEntryTime = time.Time{}
 	s.lastEntryInsertIDs = nil
@@ -1048,6 +1227,32 @@ func (s *Service) Reset() {
 	s.pendingResourceDelete = ""
 }
 
+// IsRootView reports whether the top-level UI's Tab/Shift+Tab -> "]"/"["
+// remap (see internal/ui/model.go) is safe to apply. It must be false while
+// the query filter is being edited or the severity picker is open, since
+// Tab there means "accept autocomplete suggestion"/list-navigation, not
+// "cycle resource tab" -- otherwise the remap turns a real Tab keystroke
+// into a synthetic "]" KeyRunes event that the query text input just
+// inserts as a literal character.
 func (s *Service) IsRootView() bool {
-	return !s.viewingDetail && !s.resourcesMode
+	return !s.viewingDetail && !s.resourcesMode && !s.queryFilter.Active && !s.selectingSeverity
+}
+
+// NextTab/PrevTab implement services.TabCycler: cycling the Sinks/Metrics/
+// Buckets/Views resource tabs only makes sense while resourcesMode is on
+// and its own list (not a create/grant/confirm sub-flow) is showing.
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if !s.resourcesMode || s.resourceViewState != ResourceViewList {
+		return nil, false
+	}
+	s.resourceTab = nextResourceTab(s.resourceTab)
+	return tea.Batch(s.spinner.Start(""), s.fetchResourceTabCmd(s.resourceTab)), true
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	if !s.resourcesMode || s.resourceViewState != ResourceViewList {
+		return nil, false
+	}
+	s.resourceTab = prevResourceTab(s.resourceTab)
+	return tea.Batch(s.spinner.Start(""), s.fetchResourceTabCmd(s.resourceTab)), true
 }

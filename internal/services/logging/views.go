@@ -28,6 +28,10 @@ func (s *Service) View() string {
 		return s.renderDetailView()
 	}
 
+	if s.selectingSeverity {
+		return s.severitySelect.View(s.width, s.height)
+	}
+
 	// Default: List View
 	return s.renderListView()
 }
@@ -134,14 +138,53 @@ func (s *Service) renderListView() string {
 
 	content := s.table.View()
 	if len(s.entries) == 0 {
-		content = components.EmptyState("logs")
+		if s.userQuery != "" || (s.severityThreshold != "" && s.severityThreshold != "DEFAULT") {
+			content = lipgloss.NewStyle().Foreground(styles.ColorTextMuted).
+				Render("No logs match your filter. Press / to edit the query, s to change severity.")
+		} else {
+			content = components.EmptyState("logs")
+		}
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		header,
+		s.renderFilterBar(),
 		"",
 		content,
 	)
+}
+
+// renderFilterBar renders the base (resource-scoping) filter badge, the
+// user-editable LQL query input, and the current severity threshold.
+func (s *Service) renderFilterBar() string {
+	mutedStyle := lipgloss.NewStyle().Foreground(styles.ColorTextMuted)
+	sepStyle := lipgloss.NewStyle().Foreground(styles.ColorBorderSubtle)
+
+	var parts []string
+	if s.baseFilter != "" {
+		scope := s.baseFilter
+		const maxScopeLen = 60
+		if len(scope) > maxScopeLen {
+			scope = scope[:maxScopeLen-3] + "..."
+		}
+		parts = append(parts, mutedStyle.Render("Scope: "+scope))
+	}
+
+	parts = append(parts, s.queryFilter.View())
+
+	if s.severityThreshold == "" || s.severityThreshold == "DEFAULT" {
+		parts = append(parts, mutedStyle.Render("s: Severity (any)"))
+	} else {
+		badge := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("232")).
+			Background(styles.ColorBrandAccent).
+			Padding(0, 1).
+			Render("≥" + s.severityThreshold)
+		parts = append(parts, badge)
+	}
+
+	sep := sepStyle.Render(" │ ")
+	return strings.Join(parts, sep)
 }
 
 // renderDetailView shows full log entry details
