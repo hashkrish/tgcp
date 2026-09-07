@@ -46,3 +46,21 @@ type Service interface {
 	// Used to determine if 'q' should exit the service or go back
 	IsRootView() bool
 }
+
+// TabCycler is implemented by services with their own internal sub-tabs
+// (e.g. Cloud Run's Services/Functions tabs, Cloud Logging's resource
+// tabs). The top-level model calls NextTab/PrevTab directly for a real
+// Tab/Shift+Tab keypress instead of re-injecting a synthetic "]"/"["
+// keystroke through Update -- each service decides for itself, from its
+// own state, whether Tab means "cycle tabs" right now, so a Tab that
+// actually belongs to a focused text input (a filter box, a form field)
+// can never be misinterpreted as a tab switch (or vice versa).
+type TabCycler interface {
+	// NextTab/PrevTab cycle to the adjacent tab if that's currently
+	// appropriate (e.g. the plain list view, not a filter or a form). ok
+	// reports whether it did; when false, the real Tab/Shift+Tab keystroke
+	// falls through to the service's normal Update handling instead (e.g.
+	// a form's own "next field" behavior).
+	NextTab() (tea.Cmd, bool)
+	PrevTab() (tea.Cmd, bool)
+}

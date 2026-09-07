@@ -288,6 +288,29 @@ func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }
 
+// cycleTab toggles between the Subnets/Firewalls tabs (network detail view
+// only), shared by the direct "[", "]" keys and NextTab/PrevTab.
+func (s *Service) cycleTab() {
+	if s.activeTab == TabSubnets {
+		s.activeTab = TabFirewalls
+	} else {
+		s.activeTab = TabSubnets
+	}
+}
+
+// NextTab/PrevTab implement services.TabCycler.
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if s.viewState != ViewDetail {
+		return nil, false
+	}
+	s.cycleTab()
+	return nil, true
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	return s.NextTab()
+}
+
 func (s *Service) Focus() {
 	s.networksTable.Focus()
 	s.subnetsTable.Focus()
@@ -538,12 +561,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.createReturnTo = ViewDetail
 				s.viewState = ViewCreate
 				return s, nil
-			case "[", "]", "tab": // Allow tab-like switching
-				if s.activeTab == TabSubnets {
-					s.activeTab = TabFirewalls
-				} else {
-					s.activeTab = TabSubnets
-				}
+			case "[", "]": // Direct tab-cycle keys; real Tab/Shift+Tab go through NextTab/PrevTab
+				s.cycleTab()
 				return s, nil
 			case "u": // Update firewall rule priority (Firewalls tab only)
 				if s.activeTab == TabFirewalls {

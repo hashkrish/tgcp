@@ -326,6 +326,23 @@ func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }
 
+// NextTab/PrevTab implement services.TabCycler.
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if s.viewState != ViewList {
+		return nil, false
+	}
+	s.activeTab = nextTab(s.activeTab)
+	return nil, true
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	if s.viewState != ViewList {
+		return nil, false
+	}
+	s.activeTab = prevTab(s.activeTab)
+	return nil, true
+}
+
 func (s *Service) Focus() {
 	s.uptimeTable.Focus()
 	s.alertTable.Focus()
@@ -531,7 +548,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.viewState = ViewCreate
 				}
 				return s, nil
-			case "[", "]", "tab":
+			case "[":
+				s.activeTab = prevTab(s.activeTab)
+				return s, nil
+			case "]":
 				s.activeTab = nextTab(s.activeTab)
 				return s, nil
 			case "d":
@@ -621,6 +641,15 @@ func nextTab(t Tab) Tab {
 	for i, cur := range tabOrder {
 		if cur == t {
 			return tabOrder[(i+1)%len(tabOrder)]
+		}
+	}
+	return tabOrder[0]
+}
+
+func prevTab(t Tab) Tab {
+	for i, cur := range tabOrder {
+		if cur == t {
+			return tabOrder[(i-1+len(tabOrder))%len(tabOrder)]
 		}
 	}
 	return tabOrder[0]

@@ -434,36 +434,33 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "tab", "shift+tab":
 				// Cycle the active service's own tabs (e.g. Cloud Run's
-				// Services/Functions, Load Balancing's 5 resource tabs) --
-				// exactly equivalent to pressing "]"/"[", which each such
-				// service already handles internally. Forwarding a
-				// synthetic KeyMsg (rather than teaching every tabbed
-				// service a new "tab"/"shift+tab" case) keeps this a
-				// one-place change.
-				//
-				// Only do this remapping at the service's root (list) view.
-				// Away from root -- e.g. a create/update form -- Tab already
-				// means "next field" (components.FormModel.Update handles
-				// "tab"/"shift+tab" itself), and remapping it to "]"/"["
-				// there fed the form a synthetic KeyRunes event that its
-				// text input just inserted as a literal character instead
-				// of moving focus.
-				if m.ViewMode == ViewService && m.CurrentSvc != nil && m.CurrentSvc.IsRootView() {
-					key := "]"
-					if msg.String() == "shift+tab" {
-						key = "["
+				// Services/Functions, Load Balancing's 5 resource tabs) by
+				// calling the service directly via TabCycler, rather than
+				// re-injecting a synthetic "]"/"[" KeyMsg through Update --
+				// a fake keystroke could be misdelivered to (or mistaken
+				// for) real input elsewhere in the service (e.g. a filter
+				// box or query input focused at what still counts as the
+				// service's "root" view), exactly as a real Tab used to be
+				// misinterpreted as "]" while Cloud Logging's query filter
+				// was focused. The service itself now decides, from its own
+				// state, whether Tab means "cycle tabs" right now; if not
+				// (ok == false), the real Tab/Shift+Tab key falls through
+				// to the normal service-forwarding path below instead (e.g.
+				// components.FormModel's own "next field" handling).
+				if m.ViewMode == ViewService && m.CurrentSvc != nil {
+					if tc, ok := m.CurrentSvc.(services.TabCycler); ok {
+						var svcCmd tea.Cmd
+						var handled bool
+						if msg.String() == "shift+tab" {
+							svcCmd, handled = tc.PrevTab()
+						} else {
+							svcCmd, handled = tc.NextTab()
+						}
+						if handled {
+							return m, svcCmd
+						}
 					}
-					newModel, svcCmd := m.CurrentSvc.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-					if updatedSvc, ok := newModel.(services.Service); ok {
-						m.CurrentSvc = updatedSvc
-						m.ServiceMap[m.CurrentSvc.ShortName()] = updatedSvc
-					}
-					return m, svcCmd
 				}
-				// Not at root view (or no active service/service view): let
-				// the real Tab/Shift+Tab key fall through to the normal
-				// service-forwarding path below instead of being consumed
-				// here.
 			}
 		} else {
 			// Palette specific keys (Esc to close)

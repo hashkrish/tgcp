@@ -485,6 +485,33 @@ func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }
 
+// cycleTab toggles between the Services/Functions tabs, shared by the
+// direct "[", "]" keys and NextTab/PrevTab.
+func (s *Service) cycleTab() (tea.Cmd, bool) {
+	s.filter.ExitFilterMode()
+	if s.activeTab == TabServices {
+		s.activeTab = TabFunctions
+		s.functionFilterSession.Apply(s.functions)
+		return tea.Batch(s.fetchFunctionsCmd(true), s.spinner.Start("")), true
+	}
+	s.activeTab = TabServices
+	s.serviceFilterSession.Apply(s.services)
+	return nil, true
+}
+
+// NextTab/PrevTab implement services.TabCycler. There are only two tabs, so
+// either direction toggles the same way.
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if s.viewState != ViewList || s.filter.IsActive() {
+		return nil, false
+	}
+	return s.cycleTab()
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	return s.NextTab()
+}
+
 // Focus handles input focus (Visual Highlight)
 func (s *Service) Focus() {
 	s.table.Focus()
@@ -709,17 +736,9 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case ViewList:
 			switch msg.String() {
 			case "[", "]":
-				// Switch Tab (Cycle)
-				s.filter.ExitFilterMode()
-				if s.activeTab == TabServices {
-					s.activeTab = TabFunctions
-					s.functionFilterSession.Apply(s.functions)
-					return s, tea.Batch(s.fetchFunctionsCmd(true), s.spinner.Start(""))
-				} else {
-					s.activeTab = TabServices
-					s.serviceFilterSession.Apply(s.services)
-					return s, nil
-				}
+				// Direct tab-cycle keys; real Tab/Shift+Tab go through NextTab/PrevTab.
+				cmd, _ := s.cycleTab()
+				return s, cmd
 			case "r":
 				return s, s.Refresh()
 			case "/":

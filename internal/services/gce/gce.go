@@ -393,19 +393,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		// Tab switching (list view only, either tab)
-		if s.viewState == ViewList {
+		// Tab switching (list view only, either tab) -- real Tab/Shift+Tab
+		// go through NextTab/PrevTab (services.TabCycler) instead; this
+		// case remains for the direct "[", "]" keys.
+		if s.viewState == ViewList && !s.filter.IsActive() {
 			switch msg.String() {
 			case "[", "]":
-				if s.activeTab == TabInstances {
-					s.activeTab = TabInstanceGroups
-					if s.groups == nil {
-						return s, tea.Batch(s.spinner.Start(""), s.fetchGroupsCmd(false))
-					}
-				} else {
-					s.activeTab = TabInstances
-				}
-				return s, nil
+				cmd, _ := s.cycleTab()
+				return s, cmd
 			}
 		}
 
@@ -1183,4 +1178,34 @@ func (s *Service) SetActiveTab(tab string) (bool, tea.Cmd) {
 // IsRootView checks if we are in the main list view
 func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
+}
+
+// cycleTab toggles between the Instances/Instance Groups tabs, shared by
+// the direct "[", "]" keys and NextTab/PrevTab. There are only two tabs, so
+// either direction toggles the same way.
+func (s *Service) cycleTab() (tea.Cmd, bool) {
+	if s.activeTab == TabInstances {
+		s.activeTab = TabInstanceGroups
+		if s.groups == nil {
+			return tea.Batch(s.spinner.Start(""), s.fetchGroupsCmd(false)), true
+		}
+	} else {
+		s.activeTab = TabInstances
+	}
+	return nil, true
+}
+
+// NextTab/PrevTab implement services.TabCycler. Tab cycling only makes
+// sense in the plain list view with no filter box focused -- otherwise a
+// real Tab keystroke falls through to the service's normal Update handling
+// (e.g. so it reaches the filter's own key handling).
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if s.viewState != ViewList || s.filter.IsActive() {
+		return nil, false
+	}
+	return s.cycleTab()
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	return s.NextTab()
 }

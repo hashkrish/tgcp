@@ -354,6 +354,39 @@ func (s *Service) IsRootView() bool {
 	return s.viewState == ViewList
 }
 
+// nextTab/prevTab cycle s.activeTab, fetching that tab's data if not
+// already loaded. Shared by the direct "[", "]" keys and NextTab/PrevTab.
+func (s *Service) nextTab() (tea.Cmd, bool) {
+	s.activeTab = Tab((int(s.activeTab) + 1) % int(tabCount))
+	if !s.tabHasData(s.activeTab) {
+		return tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.spinner.Start("")), true
+	}
+	return nil, true
+}
+
+func (s *Service) prevTab() (tea.Cmd, bool) {
+	s.activeTab = Tab((int(s.activeTab) - 1 + int(tabCount)) % int(tabCount))
+	if !s.tabHasData(s.activeTab) {
+		return tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.spinner.Start("")), true
+	}
+	return nil, true
+}
+
+// NextTab/PrevTab implement services.TabCycler.
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if s.viewState != ViewList {
+		return nil, false
+	}
+	return s.nextTab()
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	if s.viewState != ViewList {
+		return nil, false
+	}
+	return s.prevTab()
+}
+
 func (s *Service) Focus() {
 	s.backendTable.Focus()
 	s.healthTable.Focus()
@@ -602,17 +635,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return s, nil
 			case "[":
-				s.activeTab = Tab((int(s.activeTab) - 1 + int(tabCount)) % int(tabCount))
-				if !s.tabHasData(s.activeTab) {
-					return s, tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.spinner.Start(""))
-				}
-				return s, nil
+				cmd, _ := s.prevTab()
+				return s, cmd
 			case "]":
-				s.activeTab = Tab((int(s.activeTab) + 1) % int(tabCount))
-				if !s.tabHasData(s.activeTab) {
-					return s, tea.Batch(s.fetchCmdForTab(s.activeTab, false), s.spinner.Start(""))
-				}
-				return s, nil
+				cmd, _ := s.nextTab()
+				return s, cmd
 			case "r":
 				return s, s.Refresh()
 			case "enter":

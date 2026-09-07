@@ -334,6 +334,53 @@ func (s *Service) IsRootView() bool {
 	return s.viewState == ViewListTopics || s.viewState == ViewListSubs
 }
 
+// toSubs/toTopics switch the Topics/Subs "tabs" (folded into viewState
+// itself rather than a separate activeTab field), shared by the direct
+// "s"/"]" and "t"/"[" keys and NextTab/PrevTab. ok reports whether a switch
+// happened (false if already on that side).
+func (s *Service) toSubs() (tea.Cmd, bool) {
+	if s.viewState != ViewListTopics {
+		return nil, false
+	}
+	s.viewState = ViewListSubs
+	s.filter.ExitFilterMode() // Clear topic filter so it doesn't leak into subs
+	s.table.SetCursor(0)
+	s.subFilterSession.Apply(s.subs) // Render existing if available
+	if len(s.subs) == 0 {
+		return tea.Batch(s.fetchSubsCmd(true), s.spinner.Start("")), true
+	}
+	return nil, true
+}
+
+func (s *Service) toTopics() (tea.Cmd, bool) {
+	if s.viewState != ViewListSubs {
+		return nil, false
+	}
+	s.viewState = ViewListTopics
+	s.filter.ExitFilterMode() // Clear sub filter so it doesn't leak into topics
+	s.table.SetCursor(0)
+	s.topicFilterSession.Apply(s.topics)
+	if len(s.topics) == 0 {
+		return tea.Batch(s.fetchTopicsCmd(true), s.spinner.Start("")), true
+	}
+	return nil, true
+}
+
+// NextTab/PrevTab implement services.TabCycler.
+func (s *Service) NextTab() (tea.Cmd, bool) {
+	if !s.IsRootView() || s.filter.IsActive() {
+		return nil, false
+	}
+	return s.toSubs()
+}
+
+func (s *Service) PrevTab() (tea.Cmd, bool) {
+	if !s.IsRootView() || s.filter.IsActive() {
+		return nil, false
+	}
+	return s.toTopics()
+}
+
 func (s *Service) Focus() {
 	s.table.Focus()
 }
@@ -755,25 +802,13 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				s.viewState = ViewCreate
 				return s, nil
-			case "s", "]": // Switch to Subs (also Tab, via the global "]" forward)
-				if s.viewState == ViewListTopics {
-					s.viewState = ViewListSubs
-					s.filter.ExitFilterMode() // Clear topic filter so it doesn't leak into subs
-					s.table.SetCursor(0)
-					s.subFilterSession.Apply(s.subs) // Render existing if available
-					if len(s.subs) == 0 {
-						return s, tea.Batch(s.fetchSubsCmd(true), s.spinner.Start(""))
-					}
+			case "s", "]": // Switch to Subs
+				if cmd, ok := s.toSubs(); ok {
+					return s, cmd
 				}
-			case "t", "[": // Switch to Topics (also Shift+Tab, via the global "[" forward)
-				if s.viewState == ViewListSubs {
-					s.viewState = ViewListTopics
-					s.filter.ExitFilterMode() // Clear sub filter so it doesn't leak into topics
-					s.table.SetCursor(0)
-					s.topicFilterSession.Apply(s.topics)
-					if len(s.topics) == 0 {
-						return s, tea.Batch(s.fetchTopicsCmd(true), s.spinner.Start(""))
-					}
+			case "t", "[": // Switch to Topics
+				if cmd, ok := s.toTopics(); ok {
+					return s, cmd
 				}
 			case "enter":
 				if s.viewState == ViewListTopics {
