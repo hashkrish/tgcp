@@ -132,6 +132,7 @@ func NewHomeMenu() HomeMenuModel {
 					{Name: "Compute Engine (GCE)", ShortName: "gce"},
 					{Name: "Kubernetes Engine (GKE)", ShortName: "gke"},
 					{Name: "Cloud Run", ShortName: "run"},
+					{Name: "App Engine", ShortName: "appengine"},
 					{Name: "Cloud Functions", ShortName: "functions"},
 				},
 			},

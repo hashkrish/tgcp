@@ -29,13 +29,13 @@ type SidebarModel struct {
 // This creates subtle spacing between service categories
 var groupBreaks = map[int]bool{
 	0:  true, // After Overview
-	4:  true, // After Compute (GCE, GKE, Cloud Run, Cloud Functions)
-	7:  true, // After Storage (GCS, Disks, Filestore)
-	12: true, // After Databases (Cloud SQL, Spanner, Bigtable, Memorystore, Firestore)
-	18: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
-	26: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking, Load Balancing, DNS, KMS, IP Addresses)
-	28: true, // After Observability (Cloud Logging, Cloud Monitoring)
-	30: true, // After DevOps (Cloud Build, Artifact Registry)
+	5:  true, // After Compute (GCE, GKE, Cloud Run, App Engine, Cloud Functions)
+	8:  true, // After Storage (GCS, Disks, Filestore)
+	13: true, // After Databases (Cloud SQL, Spanner, Bigtable, Memorystore, Firestore)
+	19: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
+	27: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking, Load Balancing, DNS, KMS, IP Addresses)
+	29: true, // After Observability (Cloud Logging, Cloud Monitoring)
+	31: true, // After DevOps (Cloud Build, Artifact Registry)
 }
 
 // Icons here are deliberately plain ASCII rather than Unicode
@@ -52,6 +52,7 @@ func NewSidebar() SidebarModel {
 			{Name: "Compute Engine", ShortName: "gce", Icon: "#"},
 			{Name: "Kubernetes", ShortName: "gke", Icon: "K"},
 			{Name: "Cloud Run", ShortName: "run", Icon: ">"},
+			{Name: "App Engine", ShortName: "appengine", Icon: "E"},
 			{Name: "Cloud Functions", ShortName: "functions", Icon: "f"},
 			// Storage
 			{Name: "Cloud Storage", ShortName: "gcs", Icon: "S"},

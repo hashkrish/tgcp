@@ -41,6 +41,7 @@ var serviceCategory = map[string]string{
 	"gce":              catCompute,
 	"gke":              catCompute,
 	"run":              catCompute,
+	"appengine":        catCompute,
 	"functions":        catCompute,
 	"gcs":              catStorage,
 	"disks":            catStorage,

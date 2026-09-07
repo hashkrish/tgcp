@@ -234,6 +234,33 @@ func InlineError(err error) string {
 	return icon + " " + msg
 }
 
+// RenderNotice renders a calm, non-alarming informational box for expected/
+// recoverable conditions -- a resource genuinely not enabled yet, a missing
+// IAM role -- that shouldn't be presented with RenderError's red
+// unexpected-failure styling (no "⚠ Error" header, no red border, no
+// "Suggestions" list of guesses; the caller already knows exactly what's
+// wrong and says so directly in body). hint is an optional short footer
+// like "r Refresh | q Back"; pass "" to omit it.
+func RenderNotice(title, body, hint string, borderColor lipgloss.Color) string {
+	boxWidth := errorBoxWidth()
+	contentWidth := boxWidth - errorBoxOverhead
+
+	header := styles.SectionStyle.Render(title)
+	wrapped := lipgloss.NewStyle().Width(contentWidth).Render(body)
+
+	parts := []string{header, "", styles.ValueStyle.Render(wrapped)}
+	if hint != "" {
+		parts = append(parts, "", RenderFooterHint(hint))
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	return styles.OverlayBoxStyle.
+		BorderForeground(borderColor).
+		Padding(styles.SpaceS, styles.SpaceM).
+		Width(boxWidth).
+		Render(content)
+}
+
 // RenderError is a convenience function for services to render errors
 func RenderError(err error, serviceName, resourceType string) string {
 	title := fmt.Sprintf("Error Loading %s", resourceType)
