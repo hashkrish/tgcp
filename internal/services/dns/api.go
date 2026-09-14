@@ -219,6 +219,40 @@ func (c *Client) UpdateRecordSet(projectID, zoneName, name, recordType string, t
 	return err
 }
 
+// CreateRecordSet creates a new resource record set in a managed zone,
+// matching `gcloud dns record-sets create`.
+func (c *Client) CreateRecordSet(projectID, zoneName, name, recordType string, ttl int64, rrdatas []string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	rrset := &gdns.ResourceRecordSet{
+		Name:    name,
+		Type:    recordType,
+		Ttl:     ttl,
+		Rrdatas: rrdatas,
+	}
+	_, err := c.service.ResourceRecordSets.Create(projectID, zoneName, rrset).Do()
+	return err
+}
+
+// DeleteRecordSet deletes a resource record set from a managed zone,
+// matching `gcloud dns record-sets delete`. The API itself refuses to
+// delete the zone's apex NS/SOA records, which is the safety behavior this
+// app relies on.
+func (c *Client) DeleteRecordSet(projectID, zoneName, name, recordType string) error {
+	if demo.Enabled {
+		return nil
+	}
+	if c.service == nil {
+		return fmt.Errorf("dns client not initialized")
+	}
+	_, err := c.service.ResourceRecordSets.Delete(projectID, zoneName, name, recordType).Do()
+	return err
+}
+
 func toZone(z *gdns.ManagedZone) Zone {
 	visibility := strings.ToUpper(z.Visibility)
 	if visibility == "" {

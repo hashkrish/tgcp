@@ -32,6 +32,7 @@ const (
 	ViewIAM
 	ViewIAMForm
 	ViewUpdateRecord
+	ViewCreateRecord
 )
 
 type zonesMsg []Zone
@@ -68,6 +69,17 @@ func newRecordUpdateForm(r RecordSet) components.FormModel {
 	})
 }
 
+// newRecordCreateForm builds the FormModel for creating a new record set in
+// the given zone.
+func newRecordCreateForm(z Zone) components.FormModel {
+	return components.NewForm("New Record in "+z.Name, []components.FormField{
+		{Label: "Name", Placeholder: z.DNSName, Required: true},
+		{Label: "Type", Placeholder: "A", Default: "A", Required: true},
+		{Label: "TTL", Default: "300", Required: true},
+		{Label: "Data (comma-separated)", Required: true},
+	})
+}
+
 // -----------------------------------------------------------------------------
 // Service Definition
 // -----------------------------------------------------------------------------
@@ -94,6 +106,7 @@ type Service struct {
 	createForm       components.FormModel
 	updateZoneForm   components.FormModel
 	updateRecordForm components.FormModel
+	createRecordForm components.FormModel
 	iamForm          components.FormModel
 
 	// IAM State: current bindings for the selected zone, and the
@@ -151,12 +164,12 @@ func (s *Service) HelpText() string {
 	case ViewZones:
 		return "r:Refresh  /:Filter  n:New Zone  Ent:Records  u:Update  i:IAM  d:Delete"
 	case ViewRecords:
-		return "Esc/q:Back  u:Update Record"
+		return "Esc/q:Back  n:New Record  u:Update Record  d:Delete Record"
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
 	case ViewIAM:
 		return "a:Add Binding  q/Esc:Back"
-	case ViewCreate, ViewUpdateZone, ViewIAMForm, ViewUpdateRecord:
+	case ViewCreate, ViewUpdateZone, ViewIAMForm, ViewUpdateRecord, ViewCreateRecord:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
 		return ""
@@ -315,6 +328,41 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
+		if s.pendingAction == "delete-record" {
+			s.pendingAction = ""
+			name := ""
+			if s.selectedRecord != nil {
+				name = s.selectedRecord.Name
+			}
+			if msg.err != nil {
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "record",
+					Name:      name,
+					Action:    "delete",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
+				return s, func() tea.Msg {
+					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+				}
+			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "record",
+				Name:      name,
+				Action:    "delete",
+				Status:    core.JobSuccess,
+			})
+			s.selectedRecord = nil
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			if s.selectedZone != nil {
+				return s, tea.Batch(toast, s.fetchRecordsCmd(s.selectedZone.Name))
+			}
+			return s, toast
+		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			name := ""
@@ -407,6 +455,36 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				Resource:  "record",
 				Name:      name,
 				Action:    "update",
+				Status:    core.JobSuccess,
+			})
+			s.viewState = ViewRecords
+			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+			if s.selectedZone != nil {
+				return s, tea.Batch(toast, s.fetchRecordsCmd(s.selectedZone.Name))
+			}
+			return s, toast
+		}
+		if s.viewState == ViewCreateRecord {
+			name := s.createRecordForm.Value("Name")
+			if msg.err != nil {
+				s.createRecordForm.SubmitErr = msg.err.Error()
+				core.RecordJob(core.Job{
+					Service:   s.ShortName(),
+					ProjectID: s.projectID,
+					Resource:  "record",
+					Name:      name,
+					Action:    "create",
+					Status:    core.JobFailed,
+					Error:     msg.err.Error(),
+				})
+				return s, nil
+			}
+			core.RecordJob(core.Job{
+				Service:   s.ShortName(),
+				ProjectID: s.projectID,
+				Resource:  "record",
+				Name:      name,
+				Action:    "create",
 				Status:    core.JobSuccess,
 			})
 			s.viewState = ViewRecords
@@ -601,6 +679,8 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			var actionCmd tea.Cmd
 			if s.pendingAction == "delete" && s.selectedZone != nil {
 				actionCmd = s.deleteZoneCmd(*s.selectedZone)
+			} else if s.pendingAction == "delete-record" && s.selectedZone != nil && s.selectedRecord != nil {
+				actionCmd = s.deleteRecordCmd(*s.selectedZone, *s.selectedRecord)
 			} else if s.pendingAction == "grant" && s.selectedZone != nil {
 				actionCmd = s.addIAMBindingCmd(*s.selectedZone, s.pendingIAMRole, s.pendingIAMMember)
 			}
@@ -629,6 +709,20 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				s.viewState = ViewUpdateRecord
 				return s, nil
 			}
+		case "n":
+			if s.selectedZone != nil {
+				s.createRecordForm = newRecordCreateForm(*s.selectedZone)
+				s.viewState = ViewCreateRecord
+				return s, nil
+			}
+		case "d":
+			if idx := s.recordTable.Cursor(); idx >= 0 && idx < len(s.records) {
+				s.selectedRecord = &s.records[idx]
+				s.pendingAction = "delete-record"
+				s.actionSource = ViewRecords
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
 		}
 
 		var updatedTable *components.StandardTable
@@ -654,6 +748,27 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				rrdatas[i] = strings.TrimSpace(rrdatas[i])
 			}
 			return s, s.updateRecordCmd(*s.selectedZone, *s.selectedRecord, ttl, rrdatas)
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewCreateRecord {
+		result, formCmd := s.createRecordForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewRecords
+			return s, nil
+		}
+		if result.Submitted && s.selectedZone != nil {
+			ttl, err := strconv.ParseInt(s.createRecordForm.Value("TTL"), 10, 64)
+			if err != nil {
+				s.createRecordForm.SubmitErr = "TTL must be a whole number of seconds"
+				return s, nil
+			}
+			rrdatas := strings.Split(s.createRecordForm.Value("Data (comma-separated)"), ",")
+			for i := range rrdatas {
+				rrdatas[i] = strings.TrimSpace(rrdatas[i])
+			}
+			return s, s.createRecordCmd(*s.selectedZone, s.createRecordForm.Value("Name"), s.createRecordForm.Value("Type"), ttl, rrdatas)
 		}
 		return s, formCmd
 	}
@@ -694,6 +809,10 @@ func (s *Service) View() string {
 		return s.updateRecordForm.View()
 	}
 
+	if s.viewState == ViewCreateRecord {
+		return s.createRecordForm.View()
+	}
+
 	if s.viewState == ViewIAM {
 		return s.renderIAMView()
 	}
@@ -725,8 +844,20 @@ func (s *Service) renderIAMView() string {
 	return components.RenderIAMBindings(breadcrumb, s.selectedZone.Name, rows)
 }
 
-// renderConfirmation renders the zone-delete confirmation dialog.
+// renderConfirmation renders the zone-delete or record-delete confirmation
+// dialog, depending on s.pendingAction.
 func (s *Service) renderConfirmation() string {
+	if s.pendingAction == "delete-record" {
+		if s.selectedRecord == nil {
+			return "Error: No record selected"
+		}
+		return components.RenderConfirmationWithMessage(
+			"delete",
+			s.selectedRecord.Name,
+			"record",
+			fmt.Sprintf("Are you sure you want to DELETE record %s (%s)? The zone's apex NS/SOA records cannot be deleted.", s.selectedRecord.Name, s.selectedRecord.Type),
+		)
+	}
 	if s.selectedZone == nil {
 		return "Error: No zone selected"
 	}
@@ -785,6 +916,19 @@ func (s *Service) deleteZoneCmd(zone Zone) tea.Cmd {
 	}
 }
 
+// deleteRecordCmd deletes a record set from the given zone.
+func (s *Service) deleteRecordCmd(zone Zone, record RecordSet) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.DeleteRecordSet(s.projectID, zone.Name, record.Name, record.Type); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Deleted record %s", record.Name)}
+	}
+}
+
 // updateZoneCmd patches zone's description.
 func (s *Service) updateZoneCmd(zone Zone, description string) tea.Cmd {
 	return func() tea.Msg {
@@ -808,6 +952,19 @@ func (s *Service) updateRecordCmd(zone Zone, record RecordSet, ttl int64, rrdata
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updated record %s", record.Name)}
+	}
+}
+
+// createRecordCmd creates a new record set in the given zone.
+func (s *Service) createRecordCmd(zone Zone, name, recordType string, ttl int64, rrdatas []string) tea.Cmd {
+	return func() tea.Msg {
+		if s.client == nil {
+			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		}
+		if err := s.client.CreateRecordSet(s.projectID, zone.Name, name, recordType, ttl, rrdatas); err != nil {
+			return actionResultMsg{err: err}
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Created record %s", name)}
 	}
 }
 

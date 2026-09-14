@@ -91,6 +91,8 @@
 - [x] Cloud DNS: no zone/record update — zone description update (`u` in zones list) and record-set TTL/data update (`u` in records view) added.
 - [x] Cloud DNS: no IAM — add-only `GetZoneIAMPolicy`/`AddZoneIAMBinding` (`i` in zones list, verified real via `go doc dns/v1 ManagedZonesService`); remove/set declined (lockout risk).
 - [x] Cloud DNS: no record-sets transaction/export/import — **Declined**: the transaction API (start/add/remove/execute as a batch) and BIND-zone-file export/import are a different interaction model (multi-step staged edits, file I/O) than this codebase's direct record CRUD (list/update; create/delete were never in scope here and remain a separate follow-up).
+- [x] Cloud DNS: no record-set create — `CreateRecordSet` (`ResourceRecordSets.Create`) added; `n` in records view opens a form (Name/Type/TTL/Data) and follows the same create pattern as zone create.
+- [x] Cloud DNS: no record-set delete — `DeleteRecordSet` (`ResourceRecordSets.Delete`) added; `d` in records view opens a confirmation dialog and follows the same delete pattern as zone delete. The API itself refuses to delete the zone's apex NS/SOA records.
 
 ### Networking
 - [x] VPC: networks/subnets not covered at all (firewall rules only) — Create/Delete for networks (list view) and subnets (network detail, Subnets tab).
