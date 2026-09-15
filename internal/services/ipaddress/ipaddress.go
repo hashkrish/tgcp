@@ -53,8 +53,8 @@ type errMsg error
 // actionResultMsg carries the result of an async address action (reserve,
 // release). action/name/region are captured at Cmd-creation time (rather
 // than read back off s.pendingAction, which is already reset by the time
-// this message arrives) so the core.RecordJob call in Update can label the
-// job correctly.
+// this message arrives) so callers can label toasts and other handling
+// correctly.
 type actionResultMsg struct {
 	err    error
 	msg    string
@@ -224,27 +224,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionResultMsg:
 		if msg.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID,
-				Service:   s.ShortName(),
-				Resource:  "address",
-				Name:      msg.name,
-				Action:    msg.action,
-				Status:    core.JobFailed,
-				Error:     msg.err.Error(),
-			})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
-		core.RecordJob(core.Job{
-			ProjectID: s.projectID,
-			Service:   s.ShortName(),
-			Resource:  "address",
-			Name:      msg.name,
-			Action:    msg.action,
-			Status:    core.JobSuccess,
-		})
 		if msg.msg != "" {
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -371,10 +354,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // CreateAddressCmd triggers reservation of a new static IP address.
 func (s *Service) CreateAddressCmd(name, region, addressType string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "create", name: name, region: region}
-		}
-		if err := s.client.CreateAddress(s.projectID, region, name, addressType); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "address", Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateAddress(s.projectID, region, name, addressType)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, action: "create", name: name, region: region}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Reserving address %s...", name), action: "create", name: name, region: region}
@@ -384,10 +372,15 @@ func (s *Service) CreateAddressCmd(name, region, addressType string) tea.Cmd {
 // DeleteAddressCmd triggers release of the given address.
 func (s *Service) DeleteAddressCmd(addr Address) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), action: "delete", name: addr.Name, region: addr.Region}
-		}
-		if err := s.client.DeleteAddress(s.projectID, addr.Region, addr.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "address", Name: addr.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteAddress(s.projectID, addr.Region, addr.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, action: "delete", name: addr.Name, region: addr.Region}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Releasing address %s...", addr.Name), action: "delete", name: addr.Name, region: addr.Region}

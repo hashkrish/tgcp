@@ -288,18 +288,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			instName := ""
-			if s.selectedInstance != nil {
-				instName = s.selectedInstance.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: "delete", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -316,42 +304,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			instName := ""
-			if s.selectedInstance != nil {
-				instName = s.selectedInstance.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: "grant", Status: status, Error: errStr,
-			})
 			return s, func() tea.Msg {
 				if msg.err != nil {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
 			}
-		}
-		{
-			action := "create"
-			instName := s.createForm.Value("Instance ID")
-			if s.viewState == ViewUpdate {
-				action = "update"
-				if s.selectedInstance != nil {
-					instName = s.selectedInstance.Name
-				}
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: action, Status: status, Error: errStr,
-			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
@@ -563,10 +521,16 @@ func (s *Service) createInstanceCmd() tea.Cmd {
 		nodeCount = 1
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateInstance(s.projectID, id, displayName, config, nodeCount); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: id, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateInstance(s.projectID, id, displayName, config, nodeCount)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Instance %s created", id)}
@@ -581,10 +545,16 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 		nodeCount = inst.NodeCount
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateInstanceNodeCount(s.projectID, inst.Name, nodeCount); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateInstanceNodeCount(s.projectID, inst.Name, nodeCount)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating instance %s to %d nodes...", inst.Name, nodeCount)}
@@ -594,10 +564,16 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 // addIAMBindingCmd fires the AddInstanceIAMBinding API call.
 func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddInstanceIAMBinding(s.projectID, inst.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddInstanceIAMBinding(s.projectID, inst.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on %s", role, member, inst.Name)}
@@ -651,10 +627,16 @@ func (s *Service) updateQueryTable(result *QueryResult) {
 // deleteInstanceCmd triggers deletion of the given Spanner instance
 func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteInstance(s.projectID, inst.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteInstance(s.projectID, inst.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name)}

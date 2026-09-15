@@ -362,34 +362,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			resource, name := "key ring", ""
-			if s.iamOnKey && s.selectedKey != nil {
-				resource, name = "crypto key", s.selectedKey.Name
-			} else if s.selectedRing != nil {
-				name = s.selectedRing.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  resource,
-					Name:      name,
-					Action:    "grant",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  resource,
-				Name:      name,
-				Action:    "grant",
-				Status:    core.JobSuccess,
-			})
 			if s.iamOnKey && s.selectedKey != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -405,34 +382,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if isVersionAction(s.pendingAction) {
-			verb := strings.TrimSuffix(s.pendingAction, "-version")
 			s.pendingAction = ""
-			versionID := ""
-			if s.selectedVersion != nil {
-				versionID = s.selectedVersion.VersionID
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "crypto key version",
-					Name:      versionID,
-					Action:    verb,
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "crypto key version",
-				Name:      versionID,
-				Action:    verb,
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewVersions
 			if s.selectedKey == nil {
 				return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
@@ -445,32 +400,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedKey != nil {
-				name = s.selectedKey.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "crypto key",
-					Name:      name,
-					Action:    "delete",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "crypto key",
-				Name:      name,
-				Action:    "delete",
-				Status:    core.JobSuccess,
-			})
 			s.selectedKey = nil
 			s.viewState = ViewKeys
 			return s, tea.Batch(
@@ -481,68 +415,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		wasUpdate := s.viewState == ViewUpdate
-		wasKeyRing := s.createReturnView == ViewRings
 		if msg.err != nil {
 			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
-				name := ""
-				if s.selectedKey != nil {
-					name = s.selectedKey.Name
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "crypto key",
-					Name:      name,
-					Action:    "update",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
-				resource, name := "crypto key", s.createForm.Value("Key ID")
-				if wasKeyRing {
-					resource, name = "key ring", s.createForm.Value("Key Ring ID")
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  resource,
-					Name:      name,
-					Action:    "create",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			}
 			return s, nil
 		}
 		if wasUpdate {
-			name := ""
-			if s.selectedKey != nil {
-				name = s.selectedKey.Name
-			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "crypto key",
-				Name:      name,
-				Action:    "update",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewKeys
 		} else {
-			resource, name := "crypto key", s.createForm.Value("Key ID")
-			if wasKeyRing {
-				resource, name = "key ring", s.createForm.Value("Key Ring ID")
-			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  resource,
-				Name:      name,
-				Action:    "create",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = s.createReturnView
 		}
 		if msg.msg != "" {
@@ -1111,29 +994,49 @@ func (s *Service) renderKeysView() string {
 // -----------------------------------------------------------------------------
 
 func (s *Service) submitCreateCmd() tea.Cmd {
+	wasKeyRing := s.createReturnView == ViewRings
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if s.createReturnView == ViewRings {
+		if wasKeyRing {
 			keyRingID := s.createForm.Value("Key Ring ID")
 			location := s.createForm.Value("Location")
-			if err := s.client.CreateKeyRing(s.projectID, location, keyRingID); err != nil {
+			err := core.TrackJob(core.Job{
+				Service: s.ShortName(), ProjectID: s.projectID, Resource: "key ring",
+				Name: keyRingID, Action: "create",
+			}, func() error {
+				if s.client == nil {
+					return fmt.Errorf("client not initialized")
+				}
+				return s.client.CreateKeyRing(s.projectID, location, keyRingID)
+			})
+			if err != nil {
 				return actionResultMsg{err: err}
 			}
 			return actionResultMsg{msg: fmt.Sprintf("Key ring %s created in %s", keyRingID, location)}
 		}
 
-		if s.selectedRing == nil {
-			return actionResultMsg{err: fmt.Errorf("no key ring selected")}
-		}
 		keyID := s.createForm.Value("Key ID")
 		purpose := s.createForm.Value("Purpose")
 		algorithm := s.createForm.Value("Algorithm")
-		if err := s.client.CreateCryptoKey(s.selectedRing.FullName, keyID, purpose, algorithm); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key",
+			Name: keyID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			if s.selectedRing == nil {
+				return fmt.Errorf("no key ring selected")
+			}
+			return s.client.CreateCryptoKey(s.selectedRing.FullName, keyID, purpose, algorithm)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
-		return actionResultMsg{msg: fmt.Sprintf("Key %s created in %s", keyID, s.selectedRing.Name)}
+		ringName := ""
+		if s.selectedRing != nil {
+			ringName = s.selectedRing.Name
+		}
+		return actionResultMsg{msg: fmt.Sprintf("Key %s created in %s", keyID, ringName)}
 	}
 }
 
@@ -1146,11 +1049,17 @@ func (s *Service) submitUpdateCmd(key CryptoKey) tea.Cmd {
 		period = 2160 * time.Hour
 	}
 	return func() tea.Msg {
-		if s.client == nil || s.selectedRing == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateCryptoKeyRotationSchedule(s.selectedRing.FullName, key.Name, period); err != nil {
-			return actionResultMsg{err: err}
+		trackErr := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key",
+			Name: key.Name, Action: "update",
+		}, func() error {
+			if s.client == nil || s.selectedRing == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateCryptoKeyRotationSchedule(s.selectedRing.FullName, key.Name, period)
+		})
+		if trackErr != nil {
+			return actionResultMsg{err: trackErr}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating rotation schedule for key %s...", key.Name)}
 	}
@@ -1159,10 +1068,16 @@ func (s *Service) submitUpdateCmd(key CryptoKey) tea.Cmd {
 // deleteKeyCmd triggers deletion of the given crypto key
 func (s *Service) deleteKeyCmd(key CryptoKey) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil || s.selectedRing == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteCryptoKey(s.selectedRing.FullName, key.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key",
+			Name: key.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil || s.selectedRing == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteCryptoKey(s.selectedRing.FullName, key.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting key %s...", key.Name)}
@@ -1202,10 +1117,16 @@ func (s *Service) fetchPublicKeyCmd(ring KeyRing, key CryptoKey) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given key ring.
 func (s *Service) addIAMBindingCmd(ring KeyRing, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddKeyRingIAMBinding(ring.FullName, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "key ring",
+			Name: ring.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddKeyRingIAMBinding(ring.FullName, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on key ring %s", role, member, ring.Name)}
@@ -1229,10 +1150,16 @@ func (s *Service) fetchKeyIAMCmd(key CryptoKey) tea.Cmd {
 // addKeyIAMBindingCmd grants role to member on the selected crypto key.
 func (s *Service) addKeyIAMBindingCmd(ring KeyRing, key CryptoKey, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddCryptoKeyIAMBinding(cryptoKeyFullName(ring, key), role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key",
+			Name: key.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddCryptoKeyIAMBinding(cryptoKeyFullName(ring, key), role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on key %s", role, member, key.Name)}
@@ -1267,10 +1194,16 @@ func isVersionAction(action string) bool {
 // setPrimaryVersionCmd sets version as the selected crypto key's primary version.
 func (s *Service) setPrimaryVersionCmd(key CryptoKey, version CryptoKeyVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil || s.selectedRing == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.SetPrimaryVersion(cryptoKeyFullName(*s.selectedRing, key), version.VersionID); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key version",
+			Name: version.VersionID, Action: "set-primary",
+		}, func() error {
+			if s.client == nil || s.selectedRing == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.SetPrimaryVersion(cryptoKeyFullName(*s.selectedRing, key), version.VersionID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Set version %s as primary for %s", version.VersionID, key.Name)}
@@ -1280,10 +1213,16 @@ func (s *Service) setPrimaryVersionCmd(key CryptoKey, version CryptoKeyVersion) 
 // enableVersionCmd re-enables a disabled crypto key version.
 func (s *Service) enableVersionCmd(version CryptoKeyVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.EnableCryptoKeyVersion(version.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key version",
+			Name: version.VersionID, Action: "enable",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.EnableCryptoKeyVersion(version.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Enabled version %s", version.VersionID)}
@@ -1293,10 +1232,16 @@ func (s *Service) enableVersionCmd(version CryptoKeyVersion) tea.Cmd {
 // disableVersionCmd disables a crypto key version.
 func (s *Service) disableVersionCmd(version CryptoKeyVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DisableCryptoKeyVersion(version.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key version",
+			Name: version.VersionID, Action: "disable",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DisableCryptoKeyVersion(version.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Disabled version %s", version.VersionID)}
@@ -1306,10 +1251,16 @@ func (s *Service) disableVersionCmd(version CryptoKeyVersion) tea.Cmd {
 // destroyVersionCmd schedules a crypto key version for destruction.
 func (s *Service) destroyVersionCmd(version CryptoKeyVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DestroyCryptoKeyVersion(version.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key version",
+			Name: version.VersionID, Action: "destroy",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DestroyCryptoKeyVersion(version.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Destruction scheduled for version %s", version.VersionID)}
@@ -1319,10 +1270,16 @@ func (s *Service) destroyVersionCmd(version CryptoKeyVersion) tea.Cmd {
 // restoreVersionCmd undoes a pending destroy on a crypto key version.
 func (s *Service) restoreVersionCmd(version CryptoKeyVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RestoreCryptoKeyVersion(version.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "crypto key version",
+			Name: version.VersionID, Action: "restore",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RestoreCryptoKeyVersion(version.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Restored version %s", version.VersionID)}

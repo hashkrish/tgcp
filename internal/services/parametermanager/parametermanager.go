@@ -286,32 +286,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedParameter != nil {
-				name = s.selectedParameter.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "parameter",
-					Name:      name,
-					Action:    "delete",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "parameter",
-				Name:      name,
-				Action:    "delete",
-				Status:    core.JobSuccess,
-			})
 			s.selectedParameter = nil
 			s.viewState = ViewList
 			return s, tea.Batch(
@@ -323,29 +302,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "create-version" {
 			s.pendingAction = ""
-			versionID := s.versionCreateForm.Value("Version ID")
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "parameter version",
-					Name:      versionID,
-					Action:    "create",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				s.versionCreateForm.SubmitErr = msg.err.Error()
 				s.viewState = ViewCreateVersion
 				return s, nil
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "parameter version",
-				Name:      versionID,
-				Action:    "create",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewVersions
 			if s.selectedParameter == nil {
 				return s, nil
@@ -362,56 +323,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
-				name := ""
-				if s.selectedParameter != nil {
-					name = s.selectedParameter.Name
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "parameter",
-					Name:      name,
-					Action:    "update",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "parameter",
-					Name:      s.createForm.Value("Parameter ID"),
-					Action:    "create",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			}
 			return s, nil
 		}
 		if wasUpdate {
-			name := ""
-			if s.selectedParameter != nil {
-				name = s.selectedParameter.Name
-			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "parameter",
-				Name:      name,
-				Action:    "update",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewDetail
 		} else {
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "parameter",
-				Name:      s.createForm.Value("Parameter ID"),
-				Action:    "create",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewList
 		}
 		if msg.msg != "" {
@@ -823,10 +742,16 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 	parameterID := s.createForm.Value("Parameter ID")
 	format := s.createForm.Value("Format")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateParameter(s.projectID, parameterID, format); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "parameter",
+			Name: parameterID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateParameter(s.projectID, parameterID, format)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Parameter %s created", parameterID)}
@@ -849,10 +774,16 @@ func (s *Service) submitUpdateCmd(p Parameter) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateParameterLabels(p.FullName, labels); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "parameter",
+			Name: p.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateParameterLabels(p.FullName, labels)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating parameter %s...", p.Name)}
@@ -862,10 +793,16 @@ func (s *Service) submitUpdateCmd(p Parameter) tea.Cmd {
 // deleteParameterCmd triggers deletion of the given parameter
 func (s *Service) deleteParameterCmd(p Parameter) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteParameter(p.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "parameter",
+			Name: p.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteParameter(p.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting parameter %s...", p.Name)}
@@ -956,10 +893,16 @@ func (s *Service) submitCreateVersionCmd(param Parameter) tea.Cmd {
 	versionID := s.versionCreateForm.Value("Version ID")
 	payload := s.versionCreateForm.Value("Payload")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateVersion(param.FullName, versionID, payload); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "parameter version",
+			Name: versionID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateVersion(param.FullName, versionID, payload)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Created version %s on %s", versionID, param.Name)}

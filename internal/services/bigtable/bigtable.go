@@ -334,18 +334,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			instName := ""
-			if s.selectedInstance != nil {
-				instName = s.selectedInstance.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: "delete", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -363,18 +351,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete-table" {
 			s.pendingAction = ""
-			tableName := ""
-			if s.selectedTable != nil {
-				tableName = s.selectedTable.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
-				Name: tableName, Action: "delete", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
 			}
@@ -387,18 +363,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			instName := ""
-			if s.selectedInstance != nil {
-				instName = s.selectedInstance.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: "grant", Status: status, Error: errStr,
-			})
 			return s, func() tea.Msg {
 				if msg.err != nil {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -407,15 +371,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.viewState == ViewCreateTable {
-			tableID := s.tableCreateForm.Value("Table ID")
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
-				Name: tableID, Action: "create", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				s.tableCreateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -428,15 +383,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, toast
 		}
 		if s.viewState == ViewUndeleteTable {
-			tableID := s.undeleteTableForm.Value("Table ID")
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
-				Name: tableID, Action: "undelete", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				s.undeleteTableForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -449,15 +395,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, toast
 		}
 		if s.viewState == ViewRestoreTable {
-			tableID := s.restoreTableForm.Value("New Table ID")
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
-				Name: tableID, Action: "restore", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				s.restoreTableForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -468,24 +405,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return s, tea.Batch(toast, s.fetchTablesCmd(s.selectedInstance.Name))
 			}
 			return s, toast
-		}
-		{
-			action := "create"
-			instName := s.createForm.Value("Instance ID")
-			if s.viewState == ViewUpdate {
-				action = "update"
-				if s.selectedInstance != nil {
-					instName = s.selectedInstance.Name
-				}
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: action, Status: status, Error: errStr,
-			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
@@ -772,10 +691,16 @@ func (s *Service) createInstanceCmd() tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateInstance(s.projectID, instanceID, displayName, clusterID, zone, storageType, numNodes); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: instanceID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateInstance(s.projectID, instanceID, displayName, clusterID, zone, storageType, numNodes)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Instance %s created", instanceID)}
@@ -799,20 +724,29 @@ func (s *Service) updateClusterCmd(inst Instance) tea.Cmd {
 	instanceType := s.updateForm.Value("Instance Type")
 
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if autoMin > 0 {
-			if err := s.client.SetClusterAutoscaling(s.projectID, inst.Name, clusterID, autoMin, autoMax, autoCPU); err != nil {
-				return actionResultMsg{err: err}
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
 			}
-		} else if err := s.client.UpdateClusterNodes(s.projectID, inst.Name, clusterID, numNodes); err != nil {
+			if autoMin > 0 {
+				if err := s.client.SetClusterAutoscaling(s.projectID, inst.Name, clusterID, autoMin, autoMax, autoCPU); err != nil {
+					return err
+				}
+			} else if err := s.client.UpdateClusterNodes(s.projectID, inst.Name, clusterID, numNodes); err != nil {
+				return err
+			}
+			if instanceType != "" && instanceType != inst.Type {
+				if err := s.client.UpdateInstanceType(s.projectID, inst.Name, instanceType); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
-		}
-		if instanceType != "" && instanceType != inst.Type {
-			if err := s.client.UpdateInstanceType(s.projectID, inst.Name, instanceType); err != nil {
-				return actionResultMsg{err: err}
-			}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating cluster %s...", clusterID)}
 	}
@@ -821,10 +755,16 @@ func (s *Service) updateClusterCmd(inst Instance) tea.Cmd {
 // createTableCmd fires the CreateTable API call.
 func (s *Service) createTableCmd(inst Instance, tableID string, columnFamilies []string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateTable(s.projectID, inst.Name, tableID, columnFamilies); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+			Name: tableID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateTable(s.projectID, inst.Name, tableID, columnFamilies)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Table %s created", tableID)}
@@ -834,10 +774,16 @@ func (s *Service) createTableCmd(inst Instance, tableID string, columnFamilies [
 // deleteTableCmd fires the DeleteTable API call.
 func (s *Service) deleteTableCmd(inst Instance, t TableInfo) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteTable(s.projectID, inst.Name, t.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+			Name: t.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteTable(s.projectID, inst.Name, t.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting table %s...", t.Name)}
@@ -847,10 +793,16 @@ func (s *Service) deleteTableCmd(inst Instance, t TableInfo) tea.Cmd {
 // undeleteTableCmd fires the UndeleteTable API call.
 func (s *Service) undeleteTableCmd(inst Instance, tableID string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UndeleteTable(s.projectID, inst.Name, tableID); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+			Name: tableID, Action: "undelete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UndeleteTable(s.projectID, inst.Name, tableID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Undeleting table %s...", tableID)}
@@ -860,10 +812,16 @@ func (s *Service) undeleteTableCmd(inst Instance, tableID string) tea.Cmd {
 // restoreTableCmd fires the RestoreTable API call.
 func (s *Service) restoreTableCmd(inst Instance, newTableID, backupName string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RestoreTable(s.projectID, inst.Name, newTableID, backupName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "table",
+			Name: newTableID, Action: "restore",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RestoreTable(s.projectID, inst.Name, newTableID, backupName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Restoring table %s from backup...", newTableID)}
@@ -873,10 +831,16 @@ func (s *Service) restoreTableCmd(inst Instance, newTableID, backupName string) 
 // addIAMBindingCmd fires the AddInstanceIAMBinding API call.
 func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddInstanceIAMBinding(s.projectID, inst.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddInstanceIAMBinding(s.projectID, inst.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on %s", role, member, inst.Name)}
@@ -886,10 +850,16 @@ func (s *Service) addIAMBindingCmd(inst Instance, role, member string) tea.Cmd {
 // deleteInstanceCmd triggers deletion of the given Bigtable instance
 func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteInstance(s.projectID, inst.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteInstance(s.projectID, inst.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name)}

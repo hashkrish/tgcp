@@ -253,17 +253,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "pause" || s.pendingAction == "resume" || s.pendingAction == "run" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			name := ""
-			if s.selectedJob != nil {
-				name = s.selectedJob.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				s.selectedJob = nil
 				s.viewState = ViewList
@@ -277,42 +271,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate || s.viewState == ViewUpdateTarget {
-				name := ""
-				if s.selectedJob != nil {
-					name = s.selectedJob.Name
-				}
-				action := "update"
-				if s.viewState == ViewUpdateTarget {
-					action = "update-target"
-				}
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
 		}
 		if s.viewState == ViewUpdateTarget {
-			name := ""
-			if s.selectedJob != nil {
-				name = s.selectedJob.Name
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: "update-target", Status: core.JobSuccess})
 			s.viewState = ViewDetail
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.Refresh(),
 			)
-		}
-		if s.viewState == ViewUpdate {
-			name := ""
-			if s.selectedJob != nil {
-				name = s.selectedJob.Name
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: name, Action: "update", Status: core.JobSuccess})
-		} else {
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobSuccess})
 		}
 		s.viewState = ViewList
 		if msg.msg != "" {
@@ -598,10 +568,16 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 	schedule := s.createForm.Value("Schedule (cron)")
 	uri := s.createForm.Value("Target URI")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateHTTPJob(s.projectID, region, name, schedule, uri); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateHTTPJob(s.projectID, region, name, schedule, uri)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Job %s created in %s", name, region)}
@@ -617,10 +593,16 @@ func (s *Service) submitCreatePubSubCmd() tea.Cmd {
 	topic := s.createForm.Value("Topic")
 	message := s.createForm.Value("Message")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreatePubSubJob(s.projectID, region, name, schedule, topic, message); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreatePubSubJob(s.projectID, region, name, schedule, topic, message)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Job %s created in %s", name, region)}
@@ -635,10 +617,16 @@ func (s *Service) submitCreateAppEngineCmd() tea.Cmd {
 	schedule := s.createForm.Value("Schedule (cron)")
 	uri := s.createForm.Value("Relative URI")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateAppEngineJob(s.projectID, region, name, schedule, uri); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateAppEngineJob(s.projectID, region, name, schedule, uri)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Job %s created in %s", name, region)}
@@ -653,10 +641,16 @@ func (s *Service) submitUpdateTargetCmd(job Job) tea.Cmd {
 		topic := s.updateForm.Value("Topic")
 		message := s.updateForm.Value("Message")
 		return func() tea.Msg {
-			if s.client == nil {
-				return actionResultMsg{err: fmt.Errorf("client not initialized")}
-			}
-			if err := s.client.UpdateJobPubSubTarget(s.projectID, job.Location, job.Name, topic, message); err != nil {
+			err := core.TrackJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: "job", Name: job.Name, Action: "update-target",
+			}, func() error {
+				if s.client == nil {
+					return fmt.Errorf("client not initialized")
+				}
+				return s.client.UpdateJobPubSubTarget(s.projectID, job.Location, job.Name, topic, message)
+			})
+			if err != nil {
 				return actionResultMsg{err: err}
 			}
 			return actionResultMsg{msg: fmt.Sprintf("Updated target for job %s", job.Name)}
@@ -664,10 +658,16 @@ func (s *Service) submitUpdateTargetCmd(job Job) tea.Cmd {
 	}
 	uri := s.updateForm.Value("Target URI")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateJobHTTPTarget(s.projectID, job.Location, job.Name, uri); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: job.Name, Action: "update-target",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateJobHTTPTarget(s.projectID, job.Location, job.Name, uri)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updated target for job %s", job.Name)}
@@ -678,10 +678,16 @@ func (s *Service) submitUpdateTargetCmd(job Job) tea.Cmd {
 func (s *Service) submitUpdateCmd(job Job) tea.Cmd {
 	schedule := s.updateForm.Value("Schedule (cron)")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateJobSchedule(s.projectID, job.Location, job.Name, schedule); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: job.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateJobSchedule(s.projectID, job.Location, job.Name, schedule)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating schedule for job %s...", job.Name)}
@@ -691,10 +697,16 @@ func (s *Service) submitUpdateCmd(job Job) tea.Cmd {
 // deleteJobCmd triggers deletion of the given job
 func (s *Service) deleteJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteJob(s.projectID, job.Location, job.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: job.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteJob(s.projectID, job.Location, job.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting job %s...", job.Name)}
@@ -704,10 +716,16 @@ func (s *Service) deleteJobCmd(job Job) tea.Cmd {
 // pauseJobCmd triggers pausing the given job
 func (s *Service) pauseJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.PauseJob(s.projectID, job.Location, job.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: job.Name, Action: "pause",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.PauseJob(s.projectID, job.Location, job.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Pausing job %s...", job.Name)}
@@ -717,10 +735,16 @@ func (s *Service) pauseJobCmd(job Job) tea.Cmd {
 // resumeJobCmd triggers resuming the given job
 func (s *Service) resumeJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ResumeJob(s.projectID, job.Location, job.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: job.Name, Action: "resume",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ResumeJob(s.projectID, job.Location, job.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Resuming job %s...", job.Name)}
@@ -730,10 +754,16 @@ func (s *Service) resumeJobCmd(job Job) tea.Cmd {
 // runJobCmd triggers an on-demand run of the given job
 func (s *Service) runJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RunJob(s.projectID, job.Location, job.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "job", Name: job.Name, Action: "run",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RunJob(s.projectID, job.Location, job.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Triggered job %s", job.Name)}

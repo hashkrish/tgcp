@@ -262,21 +262,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		status := core.JobSuccess
-		jobErr := ""
-		if msg.err != nil {
-			status = core.JobFailed
-			jobErr = msg.err.Error()
-		}
-		core.RecordJob(core.Job{
-			ProjectID: s.projectID,
-			Service:   s.ShortName(),
-			Resource:  msg.resource,
-			Name:      msg.name,
-			Action:    msg.action,
-			Status:    status,
-			Error:     jobErr,
-		})
 		if msg.err != nil {
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -615,10 +600,15 @@ func (s *Service) renderConfirmation() string {
 // DeleteFunctionCmd triggers deletion of the given Cloud Function
 func (s *Service) DeleteFunctionCmd(fn Function) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "function", name: fn.Name, action: "delete"}
-		}
-		if err := s.client.DeleteFunction(fn.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "function", Name: fn.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteFunction(fn.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "function", name: fn.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting function %s...", fn.Name), resource: "function", name: fn.Name, action: "delete"}
@@ -630,10 +620,17 @@ func (s *Service) DeleteFunctionCmd(fn Function) tea.Cmd {
 // callable here — see Client.CallFunction's doc comment.
 func (s *Service) CallFunctionCmd(fn Function, data string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "function", name: fn.Name, action: "call"}
-		}
-		result, err := s.client.CallFunction(fn, data)
+		var result string
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "function", Name: fn.Name, Action: "call",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			var err error
+			result, err = s.client.CallFunction(fn, data)
+			return err
+		})
 		if err != nil {
 			return actionResultMsg{err: err, resource: "function", name: fn.Name, action: "call"}
 		}
@@ -658,10 +655,15 @@ func (s *Service) fetchIAMCmd(fn Function) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given function.
 func (s *Service) addIAMBindingCmd(fn Function, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "function", name: fn.Name, action: "grant"}
-		}
-		if err := s.client.AddFunctionIAMBinding(fn.FullName, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "function", Name: fn.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddFunctionIAMBinding(fn.FullName, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "function", name: fn.Name, action: "grant"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on function %s", role, member, fn.Name), resource: "function", name: fn.Name, action: "grant"}

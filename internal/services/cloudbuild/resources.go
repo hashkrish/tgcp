@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/styles"
 	"github.com/yogirk/tgcp/internal/ui/components"
 )
@@ -158,10 +159,16 @@ func (s *Service) fetchCBRepositoriesCmd(connFullName string) tea.Cmd {
 
 func (s *Service) createTriggerCmd(opts TriggerCreateOpts) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateBuildTrigger(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "trigger", Name: opts.Name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateBuildTrigger(s.projectID, opts)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "trigger", name: opts.Name, action: "create"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Created trigger %s", opts.Name), resource: "trigger", name: opts.Name, action: "create"}
@@ -170,10 +177,16 @@ func (s *Service) createTriggerCmd(opts TriggerCreateOpts) tea.Cmd {
 
 func (s *Service) runTriggerCmd(t TriggerItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RunBuildTrigger(s.projectID, t.ID, t.RepoName, t.BranchName); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "trigger", Name: t.Name, Action: "run",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RunBuildTrigger(s.projectID, t.ID, t.RepoName, t.BranchName)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "run"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Running trigger %s...", t.Name), resource: "trigger", name: t.Name, action: "run"}
@@ -182,10 +195,16 @@ func (s *Service) runTriggerCmd(t TriggerItem) tea.Cmd {
 
 func (s *Service) updateTriggerCmd(t TriggerItem, opts TriggerUpdateOpts) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateBuildTrigger(s.projectID, t.ID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "trigger", Name: t.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateBuildTrigger(s.projectID, t.ID, opts)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "update"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Updated trigger %s", t.Name), resource: "trigger", name: t.Name, action: "update"}
@@ -194,10 +213,16 @@ func (s *Service) updateTriggerCmd(t TriggerItem, opts TriggerUpdateOpts) tea.Cm
 
 func (s *Service) deleteTriggerCmd(t TriggerItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteBuildTrigger(s.projectID, t.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "trigger", Name: t.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteBuildTrigger(s.projectID, t.ID)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "trigger", name: t.Name, action: "delete"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted trigger %s", t.Name), resource: "trigger", name: t.Name, action: "delete"}
@@ -206,10 +231,16 @@ func (s *Service) deleteTriggerCmd(t TriggerItem) tea.Cmd {
 
 func (s *Service) createWorkerPoolCmd(poolID, region string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateWorkerPool(s.projectID, region, poolID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "worker pool", Name: poolID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateWorkerPool(s.projectID, region, poolID)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "worker pool", name: poolID, action: "create"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Creating worker pool %s...", poolID), resource: "worker pool", name: poolID, action: "create"}
@@ -218,11 +249,17 @@ func (s *Service) createWorkerPoolCmd(poolID, region string) tea.Cmd {
 
 func (s *Service) deleteWorkerPoolCmd(wp WorkerPoolItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
 		region, id := parseRegionalName(wp.Name)
-		if err := s.client.DeleteWorkerPool(s.projectID, region, id); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "worker pool", Name: id, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteWorkerPool(s.projectID, region, id)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "worker pool", name: id, action: "delete"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Deleting worker pool %s", id), resource: "worker pool", name: id, action: "delete"}
@@ -231,11 +268,17 @@ func (s *Service) deleteWorkerPoolCmd(wp WorkerPoolItem) tea.Cmd {
 
 func (s *Service) deleteConnectionCmd(conn ConnectionItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
 		region, id := parseRegionalName(conn.Name)
-		if err := s.client.DeleteConnection(s.projectID, region, id); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "connection", Name: id, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteConnection(s.projectID, region, id)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "connection", name: id, action: "delete"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted connection %s", id), resource: "connection", name: id, action: "delete"}
@@ -244,10 +287,16 @@ func (s *Service) deleteConnectionCmd(conn ConnectionItem) tea.Cmd {
 
 func (s *Service) deleteCBRepositoryCmd(repo CBRepositoryItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteCBRepository(repo.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "repository", Name: repo.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteCBRepository(repo.Name)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "repository", name: repo.Name, action: "delete"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted repository %s", repo.Name), resource: "repository", name: repo.Name, action: "delete"}

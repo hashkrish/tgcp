@@ -327,19 +327,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		if msg.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobFailed, Error: msg.err.Error(),
-			})
-		} else {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobSuccess,
-			})
-		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -721,10 +708,16 @@ func (s *Service) renderConfirmation() string {
 // -f/--recursive), which is the safety behavior wanted here.
 func (s *Service) deleteDatasetCmd(ds Dataset) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteDataset(ds.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "dataset", Name: ds.ID, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteDataset(ds.ID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "dataset", name: ds.ID, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting dataset %s...", ds.ID), resource: "dataset", name: ds.ID, action: "delete"}
@@ -739,10 +732,16 @@ func (s *Service) createDatasetCmd() tea.Cmd {
 		location = "US"
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateDataset(id, location); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "dataset", Name: id, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateDataset(id, location)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "dataset", name: id, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Dataset %s created", id), resource: "dataset", name: id, action: "create"}
@@ -754,10 +753,16 @@ func (s *Service) createDatasetCmd() tea.Cmd {
 func (s *Service) updateDatasetCmd(ds Dataset) tea.Cmd {
 	description := s.updateForm.Value("Description")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateDatasetDescription(ds.ID, description); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "dataset", Name: ds.ID, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateDatasetDescription(ds.ID, description)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "dataset", name: ds.ID, action: "update"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating dataset %s...", ds.ID), resource: "dataset", name: ds.ID, action: "update"}
@@ -767,10 +772,16 @@ func (s *Service) updateDatasetCmd(ds Dataset) tea.Cmd {
 // createTableCmd fires the CreateTable API call.
 func (s *Service) createTableCmd(ds Dataset, tableID string, schema []SchemaField) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateTable(ds.ID, tableID, schema); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "table", Name: tableID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateTable(ds.ID, tableID, schema)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "table", name: tableID, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Table %s created", tableID), resource: "table", name: tableID, action: "create"}
@@ -780,10 +791,16 @@ func (s *Service) createTableCmd(ds Dataset, tableID string, schema []SchemaFiel
 // deleteTableCmd fires the DeleteTable API call.
 func (s *Service) deleteTableCmd(ds Dataset, t Table) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteTable(ds.ID, t.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "table", Name: t.ID, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteTable(ds.ID, t.ID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "table", name: t.ID, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting table %s...", t.ID), resource: "table", name: t.ID, action: "delete"}

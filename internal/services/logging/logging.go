@@ -538,10 +538,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resourceActionResultMsg:
 		s.spinner.Stop()
 		if msg.err != nil {
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: msg.name, Action: msg.action, Status: core.JobFailed, Error: msg.err.Error()})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
 		}
-		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: msg.name, Action: msg.action, Status: core.JobSuccess})
 		return s, tea.Batch(
 			func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 			s.fetchResourceTabCmd(s.resourceTab),
@@ -848,26 +846,36 @@ func (s *Service) createResourceCmd() tea.Cmd {
 	v := s.resourceCreateForm.Values()
 	tab := s.resourceTab
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		var err error
 		var name string
 		switch tab {
 		case ResourceTabSinks:
 			name = v["Name"]
-			err = s.client.CreateSink(name, v["Destination"], v["Filter"])
 		case ResourceTabMetrics:
 			name = v["Name"]
-			err = s.client.CreateLogMetric(name, v["Description"], v["Filter"])
 		case ResourceTabBuckets:
 			name = v["Bucket ID"]
-			days, _ := strconv.ParseInt(v["Retention Days"], 10, 64)
-			err = s.client.CreateLogBucket(v["Location"], name, days)
 		case ResourceTabViews:
 			name = v["View ID"]
-			err = s.client.CreateLogView(s.viewLocation, s.viewBucketID, name, v["Filter"])
 		}
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			switch tab {
+			case ResourceTabSinks:
+				return s.client.CreateSink(name, v["Destination"], v["Filter"])
+			case ResourceTabMetrics:
+				return s.client.CreateLogMetric(name, v["Description"], v["Filter"])
+			case ResourceTabBuckets:
+				days, _ := strconv.ParseInt(v["Retention Days"], 10, 64)
+				return s.client.CreateLogBucket(v["Location"], name, days)
+			case ResourceTabViews:
+				return s.client.CreateLogView(s.viewLocation, s.viewBucketID, name, v["Filter"])
+			}
+			return nil
+		})
 		if err != nil {
 			return resourceActionResultMsg{err: err, action: "create", name: name}
 		}
@@ -883,20 +891,24 @@ func (s *Service) deleteResourceCmd() tea.Cmd {
 	location := s.viewLocation
 	s.pendingResourceDelete = ""
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		var err error
-		switch tab {
-		case ResourceTabSinks:
-			err = s.client.DeleteSink(name)
-		case ResourceTabMetrics:
-			err = s.client.DeleteLogMetric(name)
-		case ResourceTabBuckets:
-			err = s.client.DeleteLogBucket(location, name)
-		case ResourceTabViews:
-			err = s.client.DeleteLogView(name)
-		}
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			switch tab {
+			case ResourceTabSinks:
+				return s.client.DeleteSink(name)
+			case ResourceTabMetrics:
+				return s.client.DeleteLogMetric(name)
+			case ResourceTabBuckets:
+				return s.client.DeleteLogBucket(location, name)
+			case ResourceTabViews:
+				return s.client.DeleteLogView(name)
+			}
+			return nil
+		})
 		if err != nil {
 			return resourceActionResultMsg{err: err, action: "delete", name: name}
 		}
@@ -913,10 +925,15 @@ func (s *Service) grantViewIAMCmd(role, member string) tea.Cmd {
 	}
 	fullName := s.views[idx].FullName
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddLogViewIAMBinding(fullName, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "resource", Name: fullName, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddLogViewIAMBinding(fullName, role, member)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, action: "grant", name: fullName}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Granted %s to %s", role, member), action: "grant", name: fullName}

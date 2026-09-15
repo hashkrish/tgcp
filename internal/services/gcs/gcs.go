@@ -400,17 +400,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete-object" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedObject != nil {
-				name = s.selectedObject.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "delete", Status: core.JobSuccess})
 			if s.selectedObject != nil {
 				s.objects = removeObjectByName(s.objects, s.selectedObject.Name)
 				s.objectFilterSession.Apply(s.objects)
@@ -422,17 +416,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			bucketName := ""
-			if s.selectedBucket != nil {
-				bucketName = s.selectedBucket.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "grant", Status: core.JobSuccess})
 			if s.selectedBucket != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -443,17 +431,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			bucketName := ""
-			if s.selectedBucket != nil {
-				bucketName = s.selectedBucket.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: bucketName, Action: "delete", Status: core.JobSuccess})
 			s.selectedBucket = nil
 			s.viewState = ViewList
 			return s, tea.Batch(
@@ -465,17 +447,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "move-object" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedObject != nil {
-				name = s.selectedObject.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "move", Status: core.JobFailed, Error: msg.err.Error()})
 				s.moveForm.SubmitErr = msg.err.Error()
 				s.viewState = ViewMoveObject
 				return s, nil
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: name, Action: "move", Status: core.JobSuccess})
 			s.selectedObject = nil
 			s.viewState = ViewObjects
 			return s, tea.Batch(
@@ -496,26 +472,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
-				name := ""
-				if s.selectedBucket != nil {
-					name = s.selectedBucket.Name
-				}
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: name, Action: "update", Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
-		}
-		if s.viewState == ViewUpdate {
-			name := ""
-			if s.selectedBucket != nil {
-				name = s.selectedBucket.Name
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: name, Action: "update", Status: core.JobSuccess})
-		} else {
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: s.createForm.Value("Name"), Action: "create", Status: core.JobSuccess})
 		}
 		s.viewState = ViewList
 		return s, tea.Batch(
@@ -1146,10 +1107,15 @@ func (s *Service) createBucketCmd() tea.Cmd {
 		storageClass = "STANDARD"
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateBucket(s.projectID, name, location, storageClass); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateBucket(s.projectID, name, location, storageClass)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Bucket %s created", name)}
@@ -1174,13 +1140,18 @@ func (s *Service) updateBucketCmd(b Bucket) tea.Cmd {
 		corsMethods = strings.Split(v, ",")
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateBucketStorageClass(b.Name, storageClass); err != nil {
-			return actionResultMsg{err: err}
-		}
-		if err := s.client.UpdateBucketSettings(b.Name, versioning, retentionDays, corsOrigins, corsMethods, lifecycleDeleteAgeDays); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: b.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			if err := s.client.UpdateBucketStorageClass(b.Name, storageClass); err != nil {
+				return err
+			}
+			return s.client.UpdateBucketSettings(b.Name, versioning, retentionDays, corsOrigins, corsMethods, lifecycleDeleteAgeDays)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating bucket %s...", b.Name)}
@@ -1193,17 +1164,22 @@ func (s *Service) updateBucketCmd(b Bucket) tea.Cmd {
 // happens client-side to give a clear error instead of a raw API failure.
 func (s *Service) DeleteBucketCmd(b Bucket) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		empty, err := s.client.IsBucketEmpty(b.Name)
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: b.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			empty, err := s.client.IsBucketEmpty(b.Name)
+			if err != nil {
+				return err
+			}
+			if !empty {
+				return fmt.Errorf("bucket %s is not empty; delete its objects first (not supported in this app)", b.Name)
+			}
+			return s.client.DeleteBucket(b.Name)
+		})
 		if err != nil {
-			return actionResultMsg{err: err}
-		}
-		if !empty {
-			return actionResultMsg{err: fmt.Errorf("bucket %s is not empty; delete its objects first (not supported in this app)", b.Name)}
-		}
-		if err := s.client.DeleteBucket(b.Name); err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting bucket %s...", b.Name)}
@@ -1213,10 +1189,15 @@ func (s *Service) DeleteBucketCmd(b Bucket) tea.Cmd {
 // deleteObjectCmd deletes a single object from a bucket (data-plane rm).
 func (s *Service) deleteObjectCmd(b Bucket, o Object) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteObject(b.Name, o.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: o.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteObject(b.Name, o.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleted object %s", o.Name)}
@@ -1228,10 +1209,15 @@ func (s *Service) deleteObjectCmd(b Bucket, o Object) tea.Cmd {
 // moveObjectCmd renames o within b to newName via copy-then-delete-source.
 func (s *Service) moveObjectCmd(b Bucket, o Object, newName string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.MoveObject(b.Name, o.Name, b.Name, newName); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "object", Name: o.Name, Action: "move",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.MoveObject(b.Name, o.Name, b.Name, newName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Moved %s to %s", o.Name, newName)}
@@ -1296,10 +1282,15 @@ func (s *Service) fetchIAMCmd(b Bucket) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given bucket.
 func (s *Service) addIAMBindingCmd(b Bucket, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddBucketIAMBinding(b.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "bucket", Name: b.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddBucketIAMBinding(b.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on bucket %s", role, member, b.Name)}

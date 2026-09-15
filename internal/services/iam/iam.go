@@ -253,35 +253,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			action := s.pendingAction
 			s.pendingAction = ""
 			acc := s.selectedAccount
-			key := s.selectedKey
 			if msg.err != nil {
-				resource, name := "service account", ""
-				if acc != nil {
-					name = acc.Email
-				}
-				if (action == "delete-key" || action == "create-key") && key != nil {
-					resource, name = "service account key", key.KeyID
-				}
-				jobAction := action
-				if action == "delete-confirm2" {
-					jobAction = "delete"
-				} else if action == "delete-key" {
-					jobAction = "delete"
-				} else if action == "create-key" {
-					jobAction = "create"
-				}
-				if action == "undelete" {
-					name = s.undeleteForm.Value("Unique ID")
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  resource,
-					Name:      name,
-					Action:    jobAction,
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
@@ -290,79 +262,27 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// account no longer exists. Disable/enable leave the detail
 			// view up so the refreshed status is visible in place.
 			if action == "delete-confirm2" {
-				if acc != nil {
-					core.RecordJob(core.Job{
-						Service:   s.ShortName(),
-						ProjectID: s.projectID,
-						Resource:  "service account",
-						Name:      acc.Email,
-						Action:    "delete",
-						Status:    core.JobSuccess,
-					})
-				}
 				s.viewDetail = false
 				s.selectedAccount = nil
 			}
 			if action == "grant" && acc != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "service account",
-					Name:      acc.Email,
-					Action:    "grant",
-					Status:    core.JobSuccess,
-				})
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 					s.fetchIAMPolicyCmd(*acc),
 				)
 			}
 			if (action == "delete-key" || action == "create-key") && acc != nil {
-				jobAction := "create"
-				resourceName := ""
-				if key != nil {
-					resourceName = key.KeyID
-				}
-				if action == "delete-key" {
-					jobAction = "delete"
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "service account key",
-					Name:      resourceName,
-					Action:    jobAction,
-					Status:    core.JobSuccess,
-				})
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 					s.fetchKeysCmd(*acc),
 				)
 			}
 			if action == "undelete" {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "service account",
-					Name:      s.undeleteForm.Value("Unique ID"),
-					Action:    "undelete",
-					Status:    core.JobSuccess,
-				})
 				s.viewUndelete = false
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 					s.Refresh(),
 				)
-			}
-			if (action == "enable" || action == "disable") && acc != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "service account",
-					Name:      acc.Email,
-					Action:    action,
-					Status:    core.JobSuccess,
-				})
 			}
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -375,49 +295,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
-				name := ""
-				if s.selectedAccount != nil {
-					name = s.selectedAccount.Email
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "service account",
-					Name:      name,
-					Action:    "update",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "service account",
-					Name:      s.createForm.Value("Account ID"),
-					Action:    "create",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			}
 			return s, nil
 		}
-		jobName := s.createForm.Value("Account ID")
-		jobAction := "create"
-		if wasUpdate {
-			jobAction = "update"
-			if s.selectedAccount != nil {
-				jobName = s.selectedAccount.Email
-			}
-		}
-		core.RecordJob(core.Job{
-			Service:   s.ShortName(),
-			ProjectID: s.projectID,
-			Resource:  "service account",
-			Name:      jobName,
-			Action:    jobAction,
-			Status:    core.JobSuccess,
-		})
 		s.viewCreate = false
 		s.viewUpdate = false
 		if msg.msg != "" {
@@ -900,10 +782,16 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 	accountID := s.createForm.Value("Account ID")
 	displayName := s.createForm.Value("Display Name")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateServiceAccount(s.projectID, accountID, displayName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: accountID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateServiceAccount(s.projectID, accountID, displayName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Service account %s created", accountID)}
@@ -915,10 +803,16 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 func (s *Service) submitUpdateCmd(acc ServiceAccount) tea.Cmd {
 	displayName := s.updateForm.Value("Display Name")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateServiceAccountDisplayName(acc.Name, displayName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: acc.Email, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateServiceAccountDisplayName(acc.Name, displayName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating service account %s...", acc.Email)}
@@ -928,10 +822,16 @@ func (s *Service) submitUpdateCmd(acc ServiceAccount) tea.Cmd {
 // deleteAccountCmd triggers deletion of the given service account
 func (s *Service) deleteAccountCmd(acc ServiceAccount) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteServiceAccount(acc.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: acc.Email, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteServiceAccount(acc.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting service account %s...", acc.Email)}
@@ -941,10 +841,16 @@ func (s *Service) deleteAccountCmd(acc ServiceAccount) tea.Cmd {
 // disableAccountCmd triggers disabling the given service account
 func (s *Service) disableAccountCmd(acc ServiceAccount) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DisableServiceAccount(acc.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: acc.Email, Action: "disable",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DisableServiceAccount(acc.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Disabling service account %s...", acc.Email)}
@@ -954,10 +860,16 @@ func (s *Service) disableAccountCmd(acc ServiceAccount) tea.Cmd {
 // enableAccountCmd triggers re-enabling the given service account
 func (s *Service) enableAccountCmd(acc ServiceAccount) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.EnableServiceAccount(acc.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: acc.Email, Action: "enable",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.EnableServiceAccount(acc.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Enabling service account %s...", acc.Email)}
@@ -968,10 +880,16 @@ func (s *Service) enableAccountCmd(acc ServiceAccount) tea.Cmd {
 // unique ID.
 func (s *Service) undeleteAccountCmd(uniqueID string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UndeleteServiceAccount(s.projectID, uniqueID); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: uniqueID, Action: "undelete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UndeleteServiceAccount(s.projectID, uniqueID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Undeleted service account %s", uniqueID)}
@@ -996,10 +914,16 @@ func (s *Service) fetchIAMPolicyCmd(acc ServiceAccount) tea.Cmd {
 // IAM policy (who can act as/impersonate it).
 func (s *Service) addIAMBindingCmd(acc ServiceAccount, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddServiceAccountIAMBinding(acc.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account",
+			Name: acc.Email, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddServiceAccountIAMBinding(acc.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on service account %s", role, member, acc.Email)}
@@ -1024,10 +948,20 @@ func (s *Service) fetchKeysCmd(acc ServiceAccount) tea.Cmd {
 // key JSON to outputPath.
 func (s *Service) createKeyCmd(acc ServiceAccount, outputPath string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
+		name := ""
+		if s.selectedKey != nil {
+			name = s.selectedKey.KeyID
 		}
-		if err := s.client.CreateServiceAccountKey(acc.Name, outputPath); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account key",
+			Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateServiceAccountKey(acc.Name, outputPath)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Created key for %s, written to %s", acc.Email, outputPath)}
@@ -1037,10 +971,16 @@ func (s *Service) createKeyCmd(acc ServiceAccount, outputPath string) tea.Cmd {
 // deleteKeyCmd deletes a user-managed key.
 func (s *Service) deleteKeyCmd(key ServiceAccountKey) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteServiceAccountKey(key.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "service account key",
+			Name: key.KeyID, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteServiceAccountKey(key.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleted key %s", key.KeyID)}

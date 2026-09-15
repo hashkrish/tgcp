@@ -278,17 +278,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedInstance != nil {
-				name = s.selectedInstance.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: name, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: name, Action: "delete", Status: core.JobSuccess})
 			s.selectedInstance = nil
 			s.viewState = ViewList
 			return s, tea.Batch(
@@ -299,22 +293,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.pendingAction == "create-snapshot" || s.pendingAction == "delete-snapshot" {
-			action := "delete"
-			if s.pendingAction == "create-snapshot" {
-				action = "create"
-			}
 			s.pendingAction = ""
-			name := ""
-			if s.selectedSnapshot != nil {
-				name = s.selectedSnapshot.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "snapshot", Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "snapshot", Name: name, Action: action, Status: core.JobSuccess})
 			return s, tea.Batch(
 				func() tea.Msg {
 					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
@@ -326,28 +310,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// update-instance, promote-replica, revert. pendingAction (still set
 		// for the latter two) and viewState (ViewUpdate for update)
 		// disambiguate which one this is.
-		genericAction := "create"
-		genericName := s.createForm.Value("Instance ID")
-		switch {
-		case s.viewState == ViewUpdate:
-			genericAction = "update"
-			if s.selectedInstance != nil {
-				genericName = s.selectedInstance.Name
-			}
-		case s.pendingAction == "promote-replica":
-			genericAction = "promote"
-			if s.selectedInstance != nil {
-				genericName = s.selectedInstance.Name
-			}
-		case s.pendingAction == "revert":
-			genericAction = "revert"
-			if s.selectedInstance != nil {
-				genericName = s.selectedInstance.Name
-			}
-		}
 		s.pendingAction = ""
 		if msg.err != nil {
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: genericName, Action: genericAction, Status: core.JobFailed, Error: msg.err.Error()})
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -356,7 +320,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
-		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance", Name: genericName, Action: genericAction, Status: core.JobSuccess})
 		if s.viewState == ViewUpdate {
 			s.viewState = ViewDetail
 		}
@@ -671,10 +634,16 @@ func (s *Service) createInstanceCmd() tea.Cmd {
 	}
 	s.viewState = ViewList
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateInstance(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance",
+			Name: opts.InstanceID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateInstance(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating instance %s...", opts.InstanceID)}
@@ -692,10 +661,16 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateInstanceCapacity(inst.FullName, shareName, capacity); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance",
+			Name: inst.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateInstanceCapacity(inst.FullName, shareName, capacity)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Resizing instance %s...", inst.Name)}
@@ -705,10 +680,16 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 // deleteInstanceCmd triggers deletion of the given Filestore instance
 func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteInstance(inst.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance",
+			Name: inst.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteInstance(inst.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting instance %s...", inst.Name)}
@@ -718,10 +699,16 @@ func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 // promoteReplicaCmd promotes a standby replica instance to active.
 func (s *Service) promoteReplicaCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.PromoteReplica(inst.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance",
+			Name: inst.Name, Action: "promote",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.PromoteReplica(inst.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Promoting replica %s...", inst.Name)}
@@ -733,10 +720,16 @@ func (s *Service) promoteReplicaCmd(inst Instance) tea.Cmd {
 func (s *Service) revertInstanceCmd(inst Instance) tea.Cmd {
 	snapshotID := s.revertForm.Value("Snapshot ID")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RevertInstance(inst.FullName, snapshotID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "instance",
+			Name: inst.Name, Action: "revert",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RevertInstance(inst.FullName, snapshotID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Reverting instance %s to snapshot %s...", inst.Name, snapshotID)}
@@ -753,10 +746,16 @@ func (s *Service) createSnapshotCmd() tea.Cmd {
 		instanceFullName = s.selectedInstance.FullName
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateSnapshot(instanceFullName, snapshotID, description); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "snapshot",
+			Name: snapshotID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateSnapshot(instanceFullName, snapshotID, description)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating snapshot %s...", snapshotID)}
@@ -766,10 +765,16 @@ func (s *Service) createSnapshotCmd() tea.Cmd {
 // deleteSnapshotCmd triggers deletion of the given snapshot.
 func (s *Service) deleteSnapshotCmd(snap Snapshot) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteSnapshot(snap.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "snapshot",
+			Name: snap.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteSnapshot(snap.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting snapshot %s...", snap.Name)}

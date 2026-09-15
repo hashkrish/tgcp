@@ -293,32 +293,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedZone != nil {
-				name = s.selectedZone.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "managed zone",
-					Name:      name,
-					Action:    "delete",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "managed zone",
-				Name:      name,
-				Action:    "delete",
-				Status:    core.JobSuccess,
-			})
 			s.selectedZone = nil
 			s.viewState = ViewZones
 			return s, tea.Batch(
@@ -330,32 +309,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "delete-record" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedRecord != nil {
-				name = s.selectedRecord.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "record",
-					Name:      name,
-					Action:    "delete",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "record",
-				Name:      name,
-				Action:    "delete",
-				Status:    core.JobSuccess,
-			})
 			s.selectedRecord = nil
 			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 			if s.selectedZone != nil {
@@ -365,32 +323,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedZone != nil {
-				name = s.selectedZone.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "managed zone",
-					Name:      name,
-					Action:    "grant",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "managed zone",
-				Name:      name,
-				Action:    "grant",
-				Status:    core.JobSuccess,
-			})
 			if s.selectedZone != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -400,31 +337,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.viewState == ViewUpdateZone {
-			name := ""
-			if s.selectedZone != nil {
-				name = s.selectedZone.Name
-			}
 			if msg.err != nil {
 				s.updateZoneForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "managed zone",
-					Name:      name,
-					Action:    "update",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, nil
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "managed zone",
-				Name:      name,
-				Action:    "update",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewZones
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -432,31 +348,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.viewState == ViewUpdateRecord {
-			name := ""
-			if s.selectedRecord != nil {
-				name = s.selectedRecord.Name
-			}
 			if msg.err != nil {
 				s.updateRecordForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "record",
-					Name:      name,
-					Action:    "update",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, nil
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "record",
-				Name:      name,
-				Action:    "update",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewRecords
 			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 			if s.selectedZone != nil {
@@ -465,28 +360,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, toast
 		}
 		if s.viewState == ViewCreateRecord {
-			name := s.createRecordForm.Value("Name")
 			if msg.err != nil {
 				s.createRecordForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "record",
-					Name:      name,
-					Action:    "create",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, nil
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "record",
-				Name:      name,
-				Action:    "create",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewRecords
 			toast := func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 			if s.selectedZone != nil {
@@ -496,25 +373,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			s.createForm.SubmitErr = msg.err.Error()
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "managed zone",
-				Name:      s.createForm.Value("Zone Name"),
-				Action:    "create",
-				Status:    core.JobFailed,
-				Error:     msg.err.Error(),
-			})
 			return s, nil
 		}
-		core.RecordJob(core.Job{
-			Service:   s.ShortName(),
-			ProjectID: s.projectID,
-			Resource:  "managed zone",
-			Name:      s.createForm.Value("Zone Name"),
-			Action:    "create",
-			Status:    core.JobSuccess,
-		})
 		s.viewState = ViewZones
 		if msg.msg != "" {
 			return s, tea.Batch(
@@ -893,10 +753,19 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 	description := s.createForm.Value("Description")
 	visibility := s.createForm.Value("Visibility")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateZone(s.projectID, name, dnsName, description, visibility); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "managed zone",
+			Name:      name,
+			Action:    "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateZone(s.projectID, name, dnsName, description, visibility)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Zone %s created", name)}
@@ -906,10 +775,19 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 // deleteZoneCmd triggers deletion of the given zone
 func (s *Service) deleteZoneCmd(zone Zone) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteZone(s.projectID, zone.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "managed zone",
+			Name:      zone.Name,
+			Action:    "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteZone(s.projectID, zone.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting zone %s...", zone.Name)}
@@ -919,10 +797,19 @@ func (s *Service) deleteZoneCmd(zone Zone) tea.Cmd {
 // deleteRecordCmd deletes a record set from the given zone.
 func (s *Service) deleteRecordCmd(zone Zone, record RecordSet) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteRecordSet(s.projectID, zone.Name, record.Name, record.Type); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "record",
+			Name:      record.Name,
+			Action:    "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteRecordSet(s.projectID, zone.Name, record.Name, record.Type)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleted record %s", record.Name)}
@@ -932,10 +819,19 @@ func (s *Service) deleteRecordCmd(zone Zone, record RecordSet) tea.Cmd {
 // updateZoneCmd patches zone's description.
 func (s *Service) updateZoneCmd(zone Zone, description string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateZoneDescription(s.projectID, zone.Name, description); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "managed zone",
+			Name:      zone.Name,
+			Action:    "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateZoneDescription(s.projectID, zone.Name, description)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updated zone %s", zone.Name)}
@@ -945,10 +841,19 @@ func (s *Service) updateZoneCmd(zone Zone, description string) tea.Cmd {
 // updateRecordCmd replaces record's TTL and rrdata.
 func (s *Service) updateRecordCmd(zone Zone, record RecordSet, ttl int64, rrdatas []string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateRecordSet(s.projectID, zone.Name, record.Name, record.Type, ttl, rrdatas); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "record",
+			Name:      record.Name,
+			Action:    "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateRecordSet(s.projectID, zone.Name, record.Name, record.Type, ttl, rrdatas)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updated record %s", record.Name)}
@@ -958,10 +863,19 @@ func (s *Service) updateRecordCmd(zone Zone, record RecordSet, ttl int64, rrdata
 // createRecordCmd creates a new record set in the given zone.
 func (s *Service) createRecordCmd(zone Zone, name, recordType string, ttl int64, rrdatas []string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateRecordSet(s.projectID, zone.Name, name, recordType, ttl, rrdatas); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "record",
+			Name:      name,
+			Action:    "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateRecordSet(s.projectID, zone.Name, name, recordType, ttl, rrdatas)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Created record %s", name)}
@@ -985,10 +899,19 @@ func (s *Service) fetchIAMCmd(zone Zone) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given zone.
 func (s *Service) addIAMBindingCmd(zone Zone, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddZoneIAMBinding(s.projectID, zone.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service:   s.ShortName(),
+			ProjectID: s.projectID,
+			Resource:  "managed zone",
+			Name:      zone.Name,
+			Action:    "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddZoneIAMBinding(s.projectID, zone.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on zone %s", role, member, zone.Name)}

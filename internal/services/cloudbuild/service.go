@@ -423,20 +423,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case actionResultMsg:
 		if msg.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobFailed, Error: msg.err.Error(),
-			})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
-		core.RecordJob(core.Job{
-			ProjectID: s.projectID, Service: s.ShortName(),
-			Resource: msg.resource, Name: msg.name, Action: msg.action,
-			Status: core.JobSuccess,
-		})
 		if msg.msg != "" {
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -454,20 +444,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case resourceActionResultMsg:
 		model, rcmd, _ := s.handleResourceMsg(msg)
 		if msg.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobFailed, Error: msg.err.Error(),
-			})
 			return model, tea.Batch(rcmd, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			})
 		}
-		core.RecordJob(core.Job{
-			ProjectID: s.projectID, Service: s.ShortName(),
-			Resource: msg.resource, Name: msg.name, Action: msg.action,
-			Status: core.JobSuccess,
-		})
 		if msg.msg != "" {
 			return model, tea.Batch(rcmd, func() tea.Msg {
 				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
@@ -715,10 +695,16 @@ func (s *Service) submitBuildCmd() tea.Cmd {
 	}
 	s.viewState = ViewList
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateBuild(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "build", Name: opts.ImageName, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateBuild(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "build", name: opts.ImageName, action: "create"}
 		}
 		return actionResultMsg{msg: "Submitting build...", resource: "build", name: opts.ImageName, action: "create"}
@@ -971,7 +957,12 @@ func (s *Service) getFilteredItems(items []BuildItem, query string) []BuildItem 
 
 func (s *Service) retryBuildCmd(item BuildItem) tea.Cmd {
 	return func() tea.Msg {
-		err := s.client.RetryBuild(s.projectID, item.ID)
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "build", Name: shortID(item.ID), Action: "retry",
+		}, func() error {
+			return s.client.RetryBuild(s.projectID, item.ID)
+		})
 		if err != nil {
 			return actionResultMsg{err: err, resource: "build", name: shortID(item.ID), action: "retry"}
 		}
@@ -981,7 +972,12 @@ func (s *Service) retryBuildCmd(item BuildItem) tea.Cmd {
 
 func (s *Service) cancelBuildCmd(item BuildItem) tea.Cmd {
 	return func() tea.Msg {
-		err := s.client.CancelBuild(s.projectID, item.ID)
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "build", Name: shortID(item.ID), Action: "cancel",
+		}, func() error {
+			return s.client.CancelBuild(s.projectID, item.ID)
+		})
 		if err != nil {
 			return actionResultMsg{err: err, resource: "build", name: shortID(item.ID), action: "cancel"}
 		}

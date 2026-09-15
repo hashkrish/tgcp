@@ -527,21 +527,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		if msg.resource != "" {
-			if msg.err != nil {
-				core.RecordJob(core.Job{
-					ProjectID: s.projectID, Service: s.ShortName(),
-					Resource: msg.resource, Name: msg.name, Action: msg.action,
-					Status: core.JobFailed, Error: msg.err.Error(),
-				})
-			} else {
-				core.RecordJob(core.Job{
-					ProjectID: s.projectID, Service: s.ShortName(),
-					Resource: msg.resource, Name: msg.name, Action: msg.action,
-					Status: core.JobSuccess,
-				})
-			}
-		}
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -846,10 +831,15 @@ func (s *Service) createHealthCheckCmd() tea.Cmd {
 	}
 	s.viewState = s.createReturnTo
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateHealthCheck(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "health check", Name: opts.Name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateHealthCheck(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "health check", name: opts.Name, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating health check %s...", opts.Name), resource: "health check", name: opts.Name, action: "create"}
@@ -862,10 +852,15 @@ func (s *Service) invalidateCacheCmd(um UrlMap) tea.Cmd {
 	path := s.createForm.Value("Path")
 	s.viewState = s.createReturnTo
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.InvalidateUrlMapCache(s.projectID, um.Name, path); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "URL map", Name: um.Name, Action: "invalidate-cache",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.InvalidateUrlMapCache(s.projectID, um.Name, path)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "URL map", name: um.Name, action: "invalidate-cache"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Invalidating cache for %s at path %s...", um.Name, path), resource: "URL map", name: um.Name, action: "invalidate-cache"}
@@ -879,10 +874,15 @@ func (s *Service) grantBackendIAMCmd(bs BackendService) tea.Cmd {
 	role := s.createForm.Value("Role")
 	s.viewState = s.createReturnTo
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddBackendServiceIAMBinding(s.projectID, bs.Region, bs.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "backend service", Name: bs.Name, Action: "grant-iam",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddBackendServiceIAMBinding(s.projectID, bs.Region, bs.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "backend service", name: bs.Name, action: "grant-iam"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on backend service %s", role, member, bs.Name), resource: "backend service", name: bs.Name, action: "grant-iam"}
@@ -895,10 +895,15 @@ func (s *Service) updateBackendTimeoutCmd(bs BackendService) tea.Cmd {
 	timeout, _ := strconv.ParseInt(s.createForm.Value("Timeout Sec"), 10, 64)
 	s.viewState = s.createReturnTo
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateBackendServiceTimeout(s.projectID, bs.Region, bs.Name, timeout); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "backend service", Name: bs.Name, Action: "update-timeout",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateBackendServiceTimeout(s.projectID, bs.Region, bs.Name, timeout)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "backend service", name: bs.Name, action: "update-timeout"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating timeout for %s...", bs.Name), resource: "backend service", name: bs.Name, action: "update-timeout"}
@@ -1189,10 +1194,15 @@ func (s *Service) renderSslCertDetailView() string {
 // deleteBackendCmd triggers deletion of the given backend service
 func (s *Service) deleteBackendCmd(bs BackendService) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteBackendService(s.projectID, bs.Region, bs.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "backend service", Name: bs.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteBackendService(s.projectID, bs.Region, bs.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "backend service", name: bs.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting backend service %s...", bs.Name), resource: "backend service", name: bs.Name, action: "delete"}
@@ -1202,10 +1212,15 @@ func (s *Service) deleteBackendCmd(bs BackendService) tea.Cmd {
 // deleteHealthCheckCmd triggers deletion of the given health check
 func (s *Service) deleteHealthCheckCmd(hc HealthCheck) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteHealthCheck(s.projectID, hc.Region, hc.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "health check", Name: hc.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteHealthCheck(s.projectID, hc.Region, hc.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "health check", name: hc.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting health check %s...", hc.Name), resource: "health check", name: hc.Name, action: "delete"}
@@ -1215,10 +1230,15 @@ func (s *Service) deleteHealthCheckCmd(hc HealthCheck) tea.Cmd {
 // deleteUrlMapCmd triggers deletion of the given URL map.
 func (s *Service) deleteUrlMapCmd(um UrlMap) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteUrlMap(s.projectID, um.Region, um.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "URL map", Name: um.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteUrlMap(s.projectID, um.Region, um.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "URL map", name: um.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting URL map %s...", um.Name), resource: "URL map", name: um.Name, action: "delete"}
@@ -1228,10 +1248,15 @@ func (s *Service) deleteUrlMapCmd(um UrlMap) tea.Cmd {
 // deleteForwardingRuleCmd triggers deletion of the given forwarding rule.
 func (s *Service) deleteForwardingRuleCmd(fr ForwardingRule) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteForwardingRule(s.projectID, fr.Region, fr.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "forwarding rule", Name: fr.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteForwardingRule(s.projectID, fr.Region, fr.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "forwarding rule", name: fr.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting forwarding rule %s...", fr.Name), resource: "forwarding rule", name: fr.Name, action: "delete"}
@@ -1241,10 +1266,15 @@ func (s *Service) deleteForwardingRuleCmd(fr ForwardingRule) tea.Cmd {
 // deleteSslCertificateCmd triggers deletion of the given SSL certificate.
 func (s *Service) deleteSslCertificateCmd(cert SslCertificate) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteSslCertificate(s.projectID, cert.Region, cert.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "SSL certificate", Name: cert.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteSslCertificate(s.projectID, cert.Region, cert.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "SSL certificate", name: cert.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting SSL certificate %s...", cert.Name), resource: "SSL certificate", name: cert.Name, action: "delete"}

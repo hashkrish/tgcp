@@ -404,22 +404,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			resource, name := "", ""
-			switch {
-			case s.activeTab == TabUptimeChecks && s.selectedCheck != nil:
-				resource, name = "uptime check", s.selectedCheck.DisplayName
-			case s.activeTab == TabAlertPolicies && s.selectedAlert != nil:
-				resource, name = "alert policy", s.selectedAlert.DisplayName
-			case s.activeTab == TabDashboards && s.selectedDashboard != nil:
-				resource, name = "dashboard", s.selectedDashboard.DisplayName
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "delete", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "delete", Status: core.JobSuccess})
 			s.selectedCheck = nil
 			s.selectedAlert = nil
 			s.viewState = ViewList
@@ -430,41 +419,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
-		action := "create"
-		if s.viewState == ViewUpdate {
-			action = "update"
-		}
-		resource, name := "uptime check", ""
-		switch s.activeTab {
-		case TabAlertPolicies:
-			resource = "alert policy"
-			if s.viewState == ViewUpdate {
-				name = ""
-			} else {
-				name = s.createForm.Value("Display Name")
-			}
-		case TabSnoozes:
-			resource = "snooze"
-			name = s.createForm.Value("Display Name")
-		default:
-			if s.viewState == ViewUpdate && s.selectedCheck != nil {
-				name = s.selectedCheck.DisplayName
-			} else {
-				name = s.createForm.Value("Display Name")
-			}
-		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, nil
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
-		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobSuccess})
 		if s.viewState == ViewUpdate {
 			s.viewState = ViewDetail
 		}
@@ -697,10 +660,16 @@ func (s *Service) createAlertPolicyCmd() tea.Cmd {
 	}
 	s.viewState = ViewList
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateAlertPolicy(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "alert policy",
+			Name: opts.DisplayName, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateAlertPolicy(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating alert policy %s...", opts.DisplayName)}
@@ -710,10 +679,16 @@ func (s *Service) createAlertPolicyCmd() tea.Cmd {
 // deleteDashboardCmd triggers deletion of the given dashboard.
 func (s *Service) deleteDashboardCmd(d Dashboard) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteDashboard(d.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "dashboard",
+			Name: d.DisplayName, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteDashboard(d.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting dashboard %s...", d.DisplayName)}
@@ -739,11 +714,17 @@ func (s *Service) createSnoozeCmd() tea.Cmd {
 
 	s.viewState = ViewList
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		opts := SnoozeCreateOpts{DisplayName: displayName, AlertPolicyFullName: fullName, DurationMinutes: duration}
-		if err := s.client.CreateSnooze(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "snooze",
+			Name: displayName, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			opts := SnoozeCreateOpts{DisplayName: displayName, AlertPolicyFullName: fullName, DurationMinutes: duration}
+			return s.client.CreateSnooze(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating snooze %s...", displayName)}
@@ -763,10 +744,16 @@ func (s *Service) createUptimeCheckCmd() tea.Cmd {
 	}
 	s.viewState = ViewList
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateUptimeCheck(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "uptime check",
+			Name: opts.DisplayName, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateUptimeCheck(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating uptime check %s...", opts.DisplayName)}
@@ -781,10 +768,16 @@ func (s *Service) updateUptimeCheckCmd(check UptimeCheck) tea.Cmd {
 		periodSec = 60
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateUptimeCheckPeriod(check.FullName, periodSec); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "uptime check",
+			Name: check.DisplayName, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateUptimeCheckPeriod(check.FullName, periodSec)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating uptime check %s...", check.DisplayName)}
@@ -794,10 +787,16 @@ func (s *Service) updateUptimeCheckCmd(check UptimeCheck) tea.Cmd {
 // deleteUptimeCheckCmd triggers deletion of the given uptime check
 func (s *Service) deleteUptimeCheckCmd(check UptimeCheck) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteUptimeCheck(check.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "uptime check",
+			Name: check.DisplayName, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteUptimeCheck(check.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting uptime check %s...", check.DisplayName)}
@@ -807,10 +806,16 @@ func (s *Service) deleteUptimeCheckCmd(check UptimeCheck) tea.Cmd {
 // deleteAlertPolicyCmd triggers deletion of the given alert policy
 func (s *Service) deleteAlertPolicyCmd(policy AlertPolicy) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteAlertPolicy(policy.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "alert policy",
+			Name: policy.DisplayName, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteAlertPolicy(policy.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting alert policy %s...", policy.DisplayName)}

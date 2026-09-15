@@ -84,10 +84,16 @@ func (s *Service) fetchVulnCmd(img DockerImage) tea.Cmd {
 
 func (s *Service) deleteTagCmd(repoFullName string, img DockerImage, tag string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteTag(repoFullName, img, tag); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "tag", Name: tag, Action: "untag",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteTag(repoFullName, img, tag)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "tag", name: tag, action: "untag"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Removed tag %q", tag), resource: "tag", name: tag, action: "untag"}
@@ -96,10 +102,16 @@ func (s *Service) deleteTagCmd(repoFullName string, img DockerImage, tag string)
 
 func (s *Service) deletePackageCmd(pkg PackageItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeletePackage(pkg.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "package", Name: pkg.DisplayName, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeletePackage(pkg.Name)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "package", name: pkg.DisplayName, action: "delete"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted package %s", pkg.DisplayName), resource: "package", name: pkg.DisplayName, action: "delete"}
@@ -108,10 +120,16 @@ func (s *Service) deletePackageCmd(pkg PackageItem) tea.Cmd {
 
 func (s *Service) deleteVersionCmd(v VersionItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return resourceActionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteVersion(v.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "version", Name: v.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteVersion(v.Name)
+		})
+		if err != nil {
 			return resourceActionResultMsg{err: err, resource: "version", name: v.Name, action: "delete"}
 		}
 		return resourceActionResultMsg{msg: fmt.Sprintf("Deleted version %s", v.Name), resource: "version", name: v.Name, action: "delete"}
@@ -177,20 +195,10 @@ func (s *Service) handleResourceMsg(msg tea.Msg) (tea.Model, tea.Cmd, bool) {
 		return s, nil, true
 	case resourceActionResultMsg:
 		if m.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: m.resource, Name: m.name, Action: m.action,
-				Status: core.JobFailed, Error: m.err.Error(),
-			})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: m.err.Error(), Type: core.ToastError}
 			}, true
 		}
-		core.RecordJob(core.Job{
-			ProjectID: s.projectID, Service: s.ShortName(),
-			Resource: m.resource, Name: m.name, Action: m.action,
-			Status: core.JobSuccess,
-		})
 		var refresh tea.Cmd
 		switch s.viewState {
 		case ViewPackages:

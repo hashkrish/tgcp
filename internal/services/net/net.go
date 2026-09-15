@@ -367,20 +367,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					ProjectID: s.projectID, Service: s.ShortName(),
-					Resource: msg.resource, Name: msg.name, Action: msg.action,
-					Status: core.JobFailed, Error: msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobSuccess,
-			})
 			s.selectedFirewall = nil
 			return s, tea.Batch(
 				func() tea.Msg {
@@ -390,11 +380,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if msg.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobFailed, Error: msg.err.Error(),
-			})
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 				return s, nil
@@ -403,11 +388,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
-		core.RecordJob(core.Job{
-			ProjectID: s.projectID, Service: s.ShortName(),
-			Resource: msg.resource, Name: msg.name, Action: msg.action,
-			Status: core.JobSuccess,
-		})
 		if s.viewState == ViewUpdate {
 			s.viewState = ViewDetail
 		}
@@ -712,10 +692,16 @@ func (s *Service) createNetworkCmd() tea.Cmd {
 	name := v["Name"]
 	auto := v["Subnet Mode"] == "auto"
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateNetwork(s.projectID, name, auto); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "network",
+			Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateNetwork(s.projectID, name, auto)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "network", name: name, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating network %s...", name), resource: "network", name: name, action: "create"}
@@ -725,10 +711,16 @@ func (s *Service) createNetworkCmd() tea.Cmd {
 // deleteNetworkCmd triggers deletion of the given VPC network.
 func (s *Service) deleteNetworkCmd(n Network) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteNetwork(s.projectID, n.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "network",
+			Name: n.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteNetwork(s.projectID, n.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "network", name: n.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting network %s...", n.Name), resource: "network", name: n.Name, action: "delete"}
@@ -745,10 +737,16 @@ func (s *Service) createSubnetCmd() tea.Cmd {
 		networkLink = s.selectedNetwork.SelfLink
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateSubnet(s.projectID, region, name, networkLink, cidr); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "subnet",
+			Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateSubnet(s.projectID, region, name, networkLink, cidr)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "subnet", name: name, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating subnet %s...", name), resource: "subnet", name: name, action: "create"}
@@ -758,10 +756,16 @@ func (s *Service) createSubnetCmd() tea.Cmd {
 // deleteSubnetCmd triggers deletion of the given subnet.
 func (s *Service) deleteSubnetCmd(sub Subnet) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteSubnet(s.projectID, sub.Region, sub.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "subnet",
+			Name: sub.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteSubnet(s.projectID, sub.Region, sub.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "subnet", name: sub.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting subnet %s...", sub.Name), resource: "subnet", name: sub.Name, action: "delete"}
@@ -774,10 +778,16 @@ func (s *Service) grantSubnetIAMCmd(sub Subnet) tea.Cmd {
 	v := s.subnetIAMForm.Values()
 	member, role := v["Member"], v["Role"]
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddSubnetIAMBinding(s.projectID, sub.Region, sub.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "subnet",
+			Name: sub.Name, Action: "grant-iam",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddSubnetIAMBinding(s.projectID, sub.Region, sub.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "subnet", name: sub.Name, action: "grant-iam"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on subnet %s", role, member, sub.Name), resource: "subnet", name: sub.Name, action: "grant-iam"}
@@ -800,10 +810,16 @@ func (s *Service) createFirewallCmd() tea.Cmd {
 	returnTo := s.createReturnTo
 	s.viewState = returnTo
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateFirewallRule(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "firewall rule",
+			Name: opts.Name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateFirewallRule(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "firewall rule", name: opts.Name, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating firewall rule %s...", opts.Name), resource: "firewall rule", name: opts.Name, action: "create"}
@@ -820,10 +836,16 @@ func (s *Service) updateFirewallCmd(fw Firewall) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateFirewallPriority(s.projectID, fw.Name, priority); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "firewall rule",
+			Name: fw.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateFirewallPriority(s.projectID, fw.Name, priority)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "firewall rule", name: fw.Name, action: "update"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating firewall rule %s...", fw.Name), resource: "firewall rule", name: fw.Name, action: "update"}
@@ -878,10 +900,16 @@ func (s *Service) renderDetailView() string {
 // deleteFirewallCmd triggers deletion of the given firewall rule
 func (s *Service) deleteFirewallCmd(fw Firewall) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteFirewallRule(s.projectID, fw.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "firewall rule",
+			Name: fw.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteFirewallRule(s.projectID, fw.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "firewall rule", name: fw.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting firewall rule %s...", fw.Name), resource: "firewall rule", name: fw.Name, action: "delete"}

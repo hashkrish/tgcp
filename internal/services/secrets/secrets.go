@@ -341,32 +341,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			name := ""
-			if s.selectedSecret != nil {
-				name = s.selectedSecret.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "secret",
-					Name:      name,
-					Action:    "grant",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "secret",
-				Name:      name,
-				Action:    "grant",
-				Status:    core.JobSuccess,
-			})
 			if s.selectedSecret != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -378,46 +357,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "version-enable" || s.pendingAction == "version-disable" || s.pendingAction == "version-destroy" || s.pendingAction == "add-version" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			resource, name := "secret", ""
-			jobAction := action
-			switch action {
-			case "delete":
-				if s.selectedSecret != nil {
-					name = s.selectedSecret.Name
-				}
-			case "add-version":
-				if s.selectedSecret != nil {
-					name = s.selectedSecret.Name
-				}
-			default: // version-enable, version-disable, version-destroy
-				resource = "secret version"
-				jobAction = strings.TrimPrefix(action, "version-")
-				if s.selectedVersion != nil {
-					name = s.selectedVersion.Name
-				}
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  resource,
-					Name:      name,
-					Action:    jobAction,
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  resource,
-				Name:      name,
-				Action:    jobAction,
-				Status:    core.JobSuccess,
-			})
 			if action == "delete" {
 				s.selectedSecret = nil
 				s.viewState = ViewList
@@ -446,56 +390,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			if wasUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
-				name := ""
-				if s.selectedSecret != nil {
-					name = s.selectedSecret.Name
-				}
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "secret",
-					Name:      name,
-					Action:    "update",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{
-					Service:   s.ShortName(),
-					ProjectID: s.projectID,
-					Resource:  "secret",
-					Name:      s.createForm.Value("Secret ID"),
-					Action:    "create",
-					Status:    core.JobFailed,
-					Error:     msg.err.Error(),
-				})
 			}
 			return s, nil
 		}
 		if wasUpdate {
-			name := ""
-			if s.selectedSecret != nil {
-				name = s.selectedSecret.Name
-			}
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "secret",
-				Name:      name,
-				Action:    "update",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewDetail
 		} else {
-			core.RecordJob(core.Job{
-				Service:   s.ShortName(),
-				ProjectID: s.projectID,
-				Resource:  "secret",
-				Name:      s.createForm.Value("Secret ID"),
-				Action:    "create",
-				Status:    core.JobSuccess,
-			})
 			s.viewState = ViewList
 		}
 		if msg.msg != "" {
@@ -867,10 +769,16 @@ func (s *Service) fetchIAMCmd(sec Secret) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given secret.
 func (s *Service) addIAMBindingCmd(sec Secret, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddSecretIAMBinding(sec.FullName, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret",
+			Name: sec.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddSecretIAMBinding(sec.FullName, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on secret %s", role, member, sec.Name)}
@@ -1097,10 +1005,16 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 	secretID := s.createForm.Value("Secret ID")
 	replication := s.createForm.Value("Replication")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateSecret(s.projectID, secretID, replication); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret",
+			Name: secretID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateSecret(s.projectID, secretID, replication)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Secret %s created", secretID)}
@@ -1123,10 +1037,16 @@ func (s *Service) submitUpdateCmd(sec Secret) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateSecretLabels(sec.FullName, labels); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret",
+			Name: sec.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateSecretLabels(sec.FullName, labels)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating secret %s...", sec.Name)}
@@ -1136,10 +1056,16 @@ func (s *Service) submitUpdateCmd(sec Secret) tea.Cmd {
 // deleteSecretCmd triggers deletion of the given secret
 func (s *Service) deleteSecretCmd(sec Secret) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteSecret(sec.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret",
+			Name: sec.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteSecret(sec.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting secret %s...", sec.Name)}
@@ -1152,10 +1078,18 @@ func (s *Service) deleteSecretCmd(sec Secret) tea.Cmd {
 // gated behind the standard confirmation dialog since it writes real data.
 func (s *Service) addVersionCmd(sec Secret, value string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		versionName, err := s.client.AddVersion(sec.FullName, value)
+		var versionName string
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret",
+			Name: sec.Name, Action: "add-version",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			var apiErr error
+			versionName, apiErr = s.client.AddVersion(sec.FullName, value)
+			return apiErr
+		})
 		if err != nil {
 			return actionResultMsg{err: err}
 		}
@@ -1166,10 +1100,16 @@ func (s *Service) addVersionCmd(sec Secret, value string) tea.Cmd {
 // enableVersionCmd triggers re-enabling the given secret version
 func (s *Service) enableVersionCmd(ver SecretVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.EnableVersion(ver.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret version",
+			Name: ver.Name, Action: "enable",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.EnableVersion(ver.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Enabling version %s...", ver.Name)}
@@ -1179,10 +1119,16 @@ func (s *Service) enableVersionCmd(ver SecretVersion) tea.Cmd {
 // disableVersionCmd triggers disabling the given secret version
 func (s *Service) disableVersionCmd(ver SecretVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DisableVersion(ver.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret version",
+			Name: ver.Name, Action: "disable",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DisableVersion(ver.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Disabling version %s...", ver.Name)}
@@ -1192,10 +1138,16 @@ func (s *Service) disableVersionCmd(ver SecretVersion) tea.Cmd {
 // destroyVersionCmd triggers irrecoverably destroying the given secret version
 func (s *Service) destroyVersionCmd(ver SecretVersion) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DestroyVersion(ver.FullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "secret version",
+			Name: ver.Name, Action: "destroy",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DestroyVersion(ver.FullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Destroying version %s...", ver.Name)}

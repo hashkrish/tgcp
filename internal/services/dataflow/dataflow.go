@@ -219,17 +219,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "archive" || s.pendingAction == "cancel" || s.pendingAction == "drain" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			jobName := ""
-			if s.selectedJob != nil {
-				jobName = s.selectedJob.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: action, Status: core.JobSuccess})
 			if action == "archive" {
 				s.selectedJob = nil
 				s.viewState = ViewList
@@ -242,26 +236,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.viewState == ViewUpdateOptions {
-			jobName := ""
-			if s.selectedJob != nil {
-				jobName = s.selectedJob.Name
-			}
 			if msg.err != nil {
 				s.updateOptionsForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "update-options", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, nil
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "update-options", Status: core.JobSuccess})
 			s.viewState = ViewDetail
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
-		jobName := s.createForm.Value("Job Name")
 		if msg.err != nil {
 			s.createForm.SubmitErr = msg.err.Error()
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 			return s, nil
 		}
-		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobName, Action: "create", Status: core.JobSuccess})
 		s.viewState = ViewList
 		return s, tea.Batch(
 			func() tea.Msg {
@@ -423,10 +408,16 @@ func (s *Service) launchTemplateJobCmd() tea.Cmd {
 	gcsPath := s.createForm.Value("Template GCS Path")
 	parameters := parseParameters(s.createForm.Value("Parameters"))
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.LaunchTemplateJob(s.projectID, region, jobName, gcsPath, parameters); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: jobName, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.LaunchTemplateJob(s.projectID, region, jobName, gcsPath, parameters)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Job %s launched", jobName)}
@@ -437,10 +428,16 @@ func (s *Service) launchTemplateJobCmd() tea.Cmd {
 // category — Dataflow has no true delete, only archive; see ArchiveJob).
 func (s *Service) archiveJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ArchiveJob(s.projectID, job.Location, job.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: job.Name, Action: "archive",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ArchiveJob(s.projectID, job.Location, job.ID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Archiving job %s...", job.Name)}
@@ -450,10 +447,16 @@ func (s *Service) archiveJobCmd(job Job) tea.Cmd {
 // cancelJobCmd triggers immediate cancellation of the given job
 func (s *Service) cancelJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CancelJob(s.projectID, job.Location, job.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: job.Name, Action: "cancel",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CancelJob(s.projectID, job.Location, job.ID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Cancelling job %s...", job.Name)}
@@ -463,10 +466,16 @@ func (s *Service) cancelJobCmd(job Job) tea.Cmd {
 // drainJobCmd triggers a graceful drain of the given streaming job
 func (s *Service) drainJobCmd(job Job) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DrainJob(s.projectID, job.Location, job.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: job.Name, Action: "drain",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DrainJob(s.projectID, job.Location, job.ID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Draining job %s...", job.Name)}
@@ -476,10 +485,16 @@ func (s *Service) drainJobCmd(job Job) tea.Cmd {
 // updateJobOptionsCmd updates job's autoscaling bounds.
 func (s *Service) updateJobOptionsCmd(job Job, minWorkers, maxWorkers int64) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateJobOptions(s.projectID, job.Location, job.ID, minWorkers, maxWorkers); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: job.Name, Action: "update-options",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateJobOptions(s.projectID, job.Location, job.ID, minWorkers, maxWorkers)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updated autoscaling options for %s", job.Name)}

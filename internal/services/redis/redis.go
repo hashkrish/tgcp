@@ -249,18 +249,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "failover" || s.pendingAction == "reschedule-maintenance" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			instName := ""
-			if s.selectedInstance != nil {
-				instName = s.selectedInstance.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: action, Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -278,22 +266,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			)
 		}
 		if s.viewState == ViewExport || s.viewState == ViewImport {
-			action := "export"
-			if s.viewState == ViewImport {
-				action = "import"
-			}
-			instName := ""
-			if s.selectedInstance != nil {
-				instName = s.selectedInstance.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: action, Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				if s.viewState == ViewExport {
 					s.exportForm.SubmitErr = msg.err.Error()
@@ -304,24 +276,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			s.viewState = ViewDetail
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		{
-			action := "create"
-			instName := s.createForm.Value("Instance ID")
-			if s.viewState == ViewUpdate {
-				action = "update"
-				if s.selectedInstance != nil {
-					instName = s.selectedInstance.Name
-				}
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
-				Name: instName, Action: action, Status: status, Error: errStr,
-			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
@@ -554,10 +508,16 @@ func (s *Service) createInstanceCmd() tea.Cmd {
 		memoryGb = 1
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateInstance(s.projectID, id, region, tier, memoryGb); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: id, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateInstance(s.projectID, id, region, tier, memoryGb)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating Redis instance %s...", id)}
@@ -573,10 +533,16 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 		memoryGb = int64(inst.MemorySizeGb)
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateInstanceMemorySize(s.projectID, inst.Name, inst.Location, memoryGb); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateInstanceMemorySize(s.projectID, inst.Name, inst.Location, memoryGb)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating Redis instance %s...", inst.Name)}
@@ -586,10 +552,16 @@ func (s *Service) updateInstanceCmd(inst Instance) tea.Cmd {
 // rescheduleMaintenanceCmd reschedules inst's pending maintenance to now.
 func (s *Service) rescheduleMaintenanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RescheduleMaintenance(s.projectID, inst.Name, inst.Location); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "reschedule-maintenance",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RescheduleMaintenance(s.projectID, inst.Name, inst.Location)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Rescheduling maintenance for %s...", inst.Name)}
@@ -599,10 +571,16 @@ func (s *Service) rescheduleMaintenanceCmd(inst Instance) tea.Cmd {
 // exportInstanceCmd exports inst's data to gcsURI.
 func (s *Service) exportInstanceCmd(inst Instance, gcsURI string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ExportInstance(s.projectID, inst.Name, inst.Location, gcsURI); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "export",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ExportInstance(s.projectID, inst.Name, inst.Location, gcsURI)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Export of %s to %s started", inst.Name, gcsURI)}
@@ -612,10 +590,16 @@ func (s *Service) exportInstanceCmd(inst Instance, gcsURI string) tea.Cmd {
 // importInstanceCmd imports gcsURI into inst.
 func (s *Service) importInstanceCmd(inst Instance, gcsURI string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ImportInstance(s.projectID, inst.Name, inst.Location, gcsURI); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "import",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ImportInstance(s.projectID, inst.Name, inst.Location, gcsURI)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Import into %s from %s started", inst.Name, gcsURI)}
@@ -639,10 +623,16 @@ func (s *Service) getAuthStringCmd(inst Instance) tea.Cmd {
 // deleteInstanceCmd triggers deletion of the given Redis instance
 func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteInstance(s.projectID, inst.Name, inst.Location); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteInstance(s.projectID, inst.Name, inst.Location)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting Redis instance %s...", inst.Name)}
@@ -653,10 +643,16 @@ func (s *Service) deleteInstanceCmd(inst Instance) tea.Cmd {
 // current read replica.
 func (s *Service) failoverInstanceCmd(inst Instance) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.FailoverInstance(s.projectID, inst.Name, inst.Location); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "instance",
+			Name: inst.Name, Action: "failover",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.FailoverInstance(s.projectID, inst.Name, inst.Location)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Failing over Redis instance %s...", inst.Name)}

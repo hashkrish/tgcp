@@ -456,20 +456,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.pendingAction = ""
 		s.viewState = s.actionSource
 		if msg.err != nil {
-			name := ""
-			if s.selectedTopic != nil {
-				name = s.selectedTopic.Name
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "topic", Name: name, Action: "publish", Status: core.JobFailed, Error: msg.err.Error()})
 			return s, func() tea.Msg {
 				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 			}
 		}
-		name := ""
-		if s.selectedTopic != nil {
-			name = s.selectedTopic.Name
-		}
-		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "topic", Name: name, Action: "publish", Status: core.JobSuccess})
 		return s, func() tea.Msg {
 			return core.ToastMsg{Message: fmt.Sprintf("Published message %s", msg.messageID), Type: core.ToastSuccess}
 		}
@@ -493,12 +483,10 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: s.iamResourceType, Name: s.iamResourceName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: s.iamResourceType, Name: s.iamResourceName, Action: "grant", Status: core.JobSuccess})
 			if s.iamResourceName != "" {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -510,73 +498,42 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "ack" {
 			s.pendingAction = ""
 			s.viewState = ViewDetailSub
-			name := ""
-			if s.selectedSub != nil {
-				name = s.selectedSub.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "ack", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "ack", Status: core.JobSuccess})
 			s.pulledMessages = nil
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "modify-ack-deadline" {
 			s.pendingAction = ""
 			s.viewState = ViewPulledMessages
-			name := ""
-			if s.selectedSub != nil {
-				name = s.selectedSub.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "modify-ack-deadline", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "modify-ack-deadline", Status: core.JobSuccess})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "seek" {
 			s.pendingAction = ""
 			s.viewState = ViewDetailSub
-			name := ""
-			if s.selectedSub != nil {
-				name = s.selectedSub.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "seek", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "seek", Status: core.JobSuccess})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.pendingAction == "delete" || s.pendingAction == "detach" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			resource := "subscription"
-			name := ""
-			if s.selectedSub != nil {
-				name = s.selectedSub.Name
-			}
-			if s.viewState == ViewDetailTopic {
-				resource = "topic"
-				if s.selectedTopic != nil {
-					name = s.selectedTopic.Name
-				}
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				if s.viewState == ViewDetailTopic {
 					s.viewState = ViewListTopics
@@ -595,39 +552,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
-				name := ""
-				if s.selectedSub != nil {
-					name = s.selectedSub.Name
-				}
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "update", Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
-				resource := "subscription"
-				name := s.createForm.Value("Subscription ID")
-				if s.createReturnView == ViewListTopics {
-					resource = "topic"
-					name = s.createForm.Value("Topic ID")
-				}
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
 		}
 		if s.viewState == ViewUpdate {
-			name := ""
-			if s.selectedSub != nil {
-				name = s.selectedSub.Name
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "subscription", Name: name, Action: "update", Status: core.JobSuccess})
 			s.viewState = ViewDetailSub
 		} else {
-			resource := "subscription"
-			name := s.createForm.Value("Subscription ID")
-			if s.createReturnView == ViewListTopics {
-				resource = "topic"
-				name = s.createForm.Value("Topic ID")
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: resource, Name: name, Action: "create", Status: core.JobSuccess})
 			s.viewState = s.createReturnView
 		}
 		if msg.msg != "" {
@@ -962,12 +895,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // view the create form was opened from.
 func (s *Service) submitCreateCmd() tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
 		if s.createReturnView == ViewListTopics {
 			topicID := s.createForm.Value("Topic ID")
-			if err := s.client.CreateTopic(s.projectID, topicID); err != nil {
+			err := core.TrackJob(core.Job{
+				ProjectID: s.projectID, Service: s.ShortName(),
+				Resource: "topic", Name: topicID, Action: "create",
+			}, func() error {
+				if s.client == nil {
+					return fmt.Errorf("client not initialized")
+				}
+				return s.client.CreateTopic(s.projectID, topicID)
+			})
+			if err != nil {
 				return actionResultMsg{err: err}
 			}
 			return actionResultMsg{msg: fmt.Sprintf("Topic %s created", topicID)}
@@ -981,7 +920,16 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 				ackDeadline = n
 			}
 		}
-		if err := s.client.CreateSubscription(s.projectID, subID, topicID, ackDeadline); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: subID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateSubscription(s.projectID, subID, topicID, ackDeadline)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Subscription %s created", subID)}
@@ -998,10 +946,16 @@ func (s *Service) updateSubCmd(sub Subscription) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateSubscriptionAckDeadline(s.projectID, sub.Name, ackDeadline); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: sub.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateSubscriptionAckDeadline(s.projectID, sub.Name, ackDeadline)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating subscription %s...", sub.Name)}
@@ -1011,10 +965,16 @@ func (s *Service) updateSubCmd(sub Subscription) tea.Cmd {
 // deleteTopicCmd triggers deletion of the given topic
 func (s *Service) deleteTopicCmd(topic Topic) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteTopic(s.projectID, topic.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "topic", Name: topic.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteTopic(s.projectID, topic.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting topic %s...", topic.Name)}
@@ -1024,10 +984,16 @@ func (s *Service) deleteTopicCmd(topic Topic) tea.Cmd {
 // deleteSubCmd triggers deletion of the given subscription
 func (s *Service) deleteSubCmd(sub Subscription) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteSubscription(s.projectID, sub.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: sub.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteSubscription(s.projectID, sub.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting subscription %s...", sub.Name)}
@@ -1037,10 +1003,16 @@ func (s *Service) deleteSubCmd(sub Subscription) tea.Cmd {
 // detachSubCmd triggers detaching the given subscription from its topic
 func (s *Service) detachSubCmd(sub Subscription) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DetachSubscription(s.projectID, sub.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: sub.Name, Action: "detach",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DetachSubscription(s.projectID, sub.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Detaching subscription %s...", sub.Name)}
@@ -1073,15 +1045,18 @@ func (s *Service) fetchIAMCmd(resourceType, name string) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given topic or subscription.
 func (s *Service) addIAMBindingCmd(resourceType, name, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		var err error
-		if resourceType == "subscription" {
-			err = s.client.AddSubscriptionIAMBinding(s.projectID, name, role, member)
-		} else {
-			err = s.client.AddTopicIAMBinding(s.projectID, name, role, member)
-		}
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: resourceType, Name: name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			if resourceType == "subscription" {
+				return s.client.AddSubscriptionIAMBinding(s.projectID, name, role, member)
+			}
+			return s.client.AddTopicIAMBinding(s.projectID, name, role, member)
+		})
 		if err != nil {
 			return actionResultMsg{err: err}
 		}
@@ -1103,10 +1078,16 @@ func (s *Service) pulledAckIDs() []string {
 // ackCmd acknowledges every currently-pulled message on sub.
 func (s *Service) ackCmd(sub Subscription, ackIDs []string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.Ack(s.projectID, sub.Name, ackIDs); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: sub.Name, Action: "ack",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.Ack(s.projectID, sub.Name, ackIDs)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Acknowledged %d message(s) on %s", len(ackIDs), sub.Name)}
@@ -1117,10 +1098,16 @@ func (s *Service) ackCmd(sub Subscription, ackIDs []string) tea.Cmd {
 // currently-pulled message on sub.
 func (s *Service) modifyAckDeadlineCmd(sub Subscription, ackIDs []string, deadline int64) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ModifyAckDeadline(s.projectID, sub.Name, ackIDs, deadline); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: sub.Name, Action: "modify-ack-deadline",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ModifyAckDeadline(s.projectID, sub.Name, ackIDs, deadline)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Set ack deadline to %ds for %d message(s)", deadline, len(ackIDs))}
@@ -1130,18 +1117,25 @@ func (s *Service) modifyAckDeadlineCmd(sub Subscription, ackIDs []string, deadli
 // seekCmd resets sub's delivery cursor to the given time ("now" or RFC3339).
 func (s *Service) seekCmd(sub Subscription, targetTime string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		t := time.Now()
-		if targetTime != "now" {
-			parsed, err := time.Parse(time.RFC3339, targetTime)
-			if err != nil {
-				return actionResultMsg{err: fmt.Errorf("invalid time: %w", err)}
+		var t time.Time
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "subscription", Name: sub.Name, Action: "seek",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
 			}
-			t = parsed
-		}
-		if err := s.client.SeekToTime(s.projectID, sub.Name, t); err != nil {
+			t = time.Now()
+			if targetTime != "now" {
+				parsed, err := time.Parse(time.RFC3339, targetTime)
+				if err != nil {
+					return fmt.Errorf("invalid time: %w", err)
+				}
+				t = parsed
+			}
+			return s.client.SeekToTime(s.projectID, sub.Name, t)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Seeked %s to %s", sub.Name, t.Format(time.RFC3339))}
@@ -1151,10 +1145,18 @@ func (s *Service) seekCmd(sub Subscription, targetTime string) tea.Cmd {
 // publishCmd publishes message to the given topic.
 func (s *Service) publishCmd(topic Topic, message string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return publishResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		id, err := s.client.Publish(s.projectID, topic.Name, message)
+		var id string
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "topic", Name: topic.Name, Action: "publish",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			var perr error
+			id, perr = s.client.Publish(s.projectID, topic.Name, message)
+			return perr
+		})
 		if err != nil {
 			return publishResultMsg{err: err}
 		}

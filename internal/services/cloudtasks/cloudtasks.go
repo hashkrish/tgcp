@@ -289,17 +289,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			queueName := ""
-			if s.selectedQueue != nil {
-				queueName = s.selectedQueue.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: queueName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: queueName, Action: "grant", Status: core.JobSuccess})
 			if s.selectedQueue != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -311,21 +305,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "run-task" || s.pendingAction == "delete-task" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			jobAction := "run"
-			taskName := ""
-			if s.selectedTask != nil {
-				taskName = s.selectedTask.Name
-			}
-			if action == "delete-task" {
-				jobAction = "delete"
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: taskName, Action: jobAction, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: taskName, Action: jobAction, Status: core.JobSuccess})
 			if action == "delete-task" {
 				s.selectedTask = nil
 				s.viewState = ViewTasks
@@ -340,14 +324,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "create-task" {
 			s.pendingAction = ""
-			taskName := s.createTaskForm.Value("URL")
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: taskName, Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createTaskForm.SubmitErr = msg.err.Error()
 				s.viewState = ViewCreateTask
 				return s, nil
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: taskName, Action: "create", Status: core.JobSuccess})
 			if s.selectedQueue != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -359,17 +340,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "pause" || s.pendingAction == "resume" || s.pendingAction == "purge" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			queueName := ""
-			if s.selectedQueue != nil {
-				queueName = s.selectedQueue.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: queueName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: queueName, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				s.selectedQueue = nil
 				s.viewState = ViewList
@@ -383,27 +358,15 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
-				name := ""
-				if s.selectedQueue != nil {
-					name = s.selectedQueue.Name
-				}
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: name, Action: "update", Status: core.JobFailed, Error: msg.err.Error()})
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: s.createForm.Value("Queue ID"), Action: "create", Status: core.JobFailed, Error: msg.err.Error()})
 				s.createForm.SubmitErr = msg.err.Error()
 			}
 			return s, nil
 		}
 		if s.viewState == ViewUpdate {
-			name := ""
-			if s.selectedQueue != nil {
-				name = s.selectedQueue.Name
-			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: name, Action: "update", Status: core.JobSuccess})
 			s.viewState = ViewDetail
 		} else {
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: s.createForm.Value("Queue ID"), Action: "create", Status: core.JobSuccess})
 			s.viewState = ViewList
 		}
 		if msg.msg != "" {
@@ -867,10 +830,15 @@ func (s *Service) submitCreateCmd() tea.Cmd {
 	queueID := s.createForm.Value("Queue ID")
 	region := s.createForm.Value("Region")
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateQueue(s.projectID, region, queueID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: queueID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateQueue(s.projectID, region, queueID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Queue %s created in %s", queueID, region)}
@@ -887,10 +855,15 @@ func (s *Service) submitUpdateCmd(q Queue) tea.Cmd {
 		}
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateQueueMaxDispatchRate(s.projectID, q.Location, q.Name, rate); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: q.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateQueueMaxDispatchRate(s.projectID, q.Location, q.Name, rate)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating queue %s...", q.Name)}
@@ -900,10 +873,15 @@ func (s *Service) submitUpdateCmd(q Queue) tea.Cmd {
 // deleteQueueCmd triggers deletion of the given queue
 func (s *Service) deleteQueueCmd(q Queue) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteQueue(s.projectID, q.Location, q.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: q.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteQueue(s.projectID, q.Location, q.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting queue %s...", q.Name)}
@@ -913,10 +891,15 @@ func (s *Service) deleteQueueCmd(q Queue) tea.Cmd {
 // pauseQueueCmd triggers pausing the given queue
 func (s *Service) pauseQueueCmd(q Queue) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.PauseQueue(s.projectID, q.Location, q.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: q.Name, Action: "pause",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.PauseQueue(s.projectID, q.Location, q.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Pausing queue %s...", q.Name)}
@@ -926,10 +909,15 @@ func (s *Service) pauseQueueCmd(q Queue) tea.Cmd {
 // resumeQueueCmd triggers resuming the given queue
 func (s *Service) resumeQueueCmd(q Queue) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ResumeQueue(s.projectID, q.Location, q.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: q.Name, Action: "resume",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ResumeQueue(s.projectID, q.Location, q.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Resuming queue %s...", q.Name)}
@@ -939,10 +927,15 @@ func (s *Service) resumeQueueCmd(q Queue) tea.Cmd {
 // purgeQueueCmd triggers purging every task in the given queue
 func (s *Service) purgeQueueCmd(q Queue) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.PurgeQueue(s.projectID, q.Location, q.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: q.Name, Action: "purge",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.PurgeQueue(s.projectID, q.Location, q.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Purging queue %s...", q.Name)}
@@ -966,10 +959,15 @@ func (s *Service) fetchIAMCmd(q Queue) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given queue.
 func (s *Service) addIAMBindingCmd(q Queue, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddQueueIAMBinding(s.projectID, q.Location, q.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "queue", Name: q.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddQueueIAMBinding(s.projectID, q.Location, q.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on queue %s", role, member, q.Name)}
@@ -999,10 +997,15 @@ func (s *Service) submitCreateTaskCmd(q Queue) tea.Cmd {
 		method = "POST"
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateHTTPTask(s.projectID, q.Location, q.Name, url, method); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: url, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateHTTPTask(s.projectID, q.Location, q.Name, url, method)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Task created on queue %s", q.Name)}
@@ -1012,10 +1015,15 @@ func (s *Service) submitCreateTaskCmd(q Queue) tea.Cmd {
 // runTaskCmd forces t to run now.
 func (s *Service) runTaskCmd(q Queue, t Task) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RunTask(s.projectID, q.Location, q.Name, t.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: t.Name, Action: "run",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RunTask(s.projectID, q.Location, q.Name, t.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Running task %s now", t.Name)}
@@ -1025,10 +1033,15 @@ func (s *Service) runTaskCmd(q Queue, t Task) tea.Cmd {
 // deleteTaskCmd deletes t.
 func (s *Service) deleteTaskCmd(q Queue, t Task) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteTask(s.projectID, q.Location, q.Name, t.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "task", Name: t.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteTask(s.projectID, q.Location, q.Name, t.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting task %s...", t.Name)}

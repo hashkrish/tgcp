@@ -302,17 +302,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
-			clusterName := ""
-			if s.selectedCluster != nil {
-				clusterName = s.selectedCluster.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "grant", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "grant", Status: core.JobSuccess})
 			if s.selectedCluster != nil {
 				return s, tea.Batch(
 					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
@@ -323,18 +317,12 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "kill-job" {
 			s.pendingAction = ""
-			jobID := ""
-			if s.selectedJob != nil {
-				jobID = s.selectedJob.ID
-			}
 			s.selectedJob = nil
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobID, Action: "kill", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: jobID, Action: "kill", Status: core.JobSuccess})
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.fetchJobsCmd(),
@@ -342,30 +330,18 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "diagnose" {
 			s.pendingAction = ""
-			clusterName := ""
-			if s.selectedCluster != nil {
-				clusterName = s.selectedCluster.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "diagnose", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: "diagnose", Status: core.JobSuccess})
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.viewState == ViewJobSubmit {
-			clusterName := ""
-			if s.selectedCluster != nil {
-				clusterName = s.selectedCluster.Name
-			}
 			if msg.err != nil {
 				s.jobSubmitForm.SubmitErr = msg.err.Error()
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: clusterName, Action: "submit", Status: core.JobFailed, Error: msg.err.Error()})
 				return s, nil
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "job", Name: clusterName, Action: "submit", Status: core.JobSuccess})
 			return s, tea.Batch(
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.fetchJobsCmd(),
@@ -374,17 +350,11 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if s.pendingAction == "delete" || s.pendingAction == "start" || s.pendingAction == "stop" {
 			action := s.pendingAction
 			s.pendingAction = ""
-			clusterName := ""
-			if s.selectedCluster != nil {
-				clusterName = s.selectedCluster.Name
-			}
 			if msg.err != nil {
-				core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
 				}
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobSuccess})
 			if action == "delete" {
 				s.selectedCluster = nil
 				s.viewState = ViewList
@@ -396,26 +366,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.Refresh(),
 			)
 		}
-		clusterName := ""
-		if s.viewState == ViewUpdate && s.selectedCluster != nil {
-			clusterName = s.selectedCluster.Name
-		} else {
-			clusterName = s.createForm.Value("Cluster Name")
-		}
-		action := "create"
-		if s.viewState == ViewUpdate {
-			action = "update"
-		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
 				s.updateForm.SubmitErr = msg.err.Error()
 			} else {
 				s.createForm.SubmitErr = msg.err.Error()
 			}
-			core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobFailed, Error: msg.err.Error()})
 			return s, nil
 		}
-		core.RecordJob(core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster", Name: clusterName, Action: action, Status: core.JobSuccess})
 		s.viewState = ViewList
 		return s, tea.Batch(
 			func() tea.Msg {
@@ -693,10 +651,16 @@ func (s *Service) createClusterCmd() tea.Cmd {
 		numWorkers = 2
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateCluster(s.projectID, region, name, zone, masterMachineType, workerMachineType, numWorkers); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: name, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateCluster(s.projectID, region, name, zone, masterMachineType, workerMachineType, numWorkers)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Cluster %s creating...", name)}
@@ -711,10 +675,16 @@ func (s *Service) updateClusterCmd(cluster Cluster) tea.Cmd {
 		numWorkers = cluster.WorkerCount
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateClusterWorkerCount(s.projectID, DefaultRegion, cluster.Name, numWorkers); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: cluster.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateClusterWorkerCount(s.projectID, DefaultRegion, cluster.Name, numWorkers)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Resizing cluster %s to %d workers...", cluster.Name, numWorkers)}
@@ -724,10 +694,16 @@ func (s *Service) updateClusterCmd(cluster Cluster) tea.Cmd {
 // deleteClusterCmd triggers deletion of the given Dataproc cluster
 func (s *Service) deleteClusterCmd(cluster Cluster) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteCluster(s.projectID, DefaultRegion, cluster.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: cluster.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteCluster(s.projectID, DefaultRegion, cluster.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting cluster %s...", cluster.Name)}
@@ -737,10 +713,16 @@ func (s *Service) deleteClusterCmd(cluster Cluster) tea.Cmd {
 // startClusterCmd triggers starting the given (stopped) cluster
 func (s *Service) startClusterCmd(cluster Cluster) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.StartCluster(s.projectID, DefaultRegion, cluster.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: cluster.Name, Action: "start",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.StartCluster(s.projectID, DefaultRegion, cluster.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Starting cluster %s...", cluster.Name)}
@@ -750,10 +732,16 @@ func (s *Service) startClusterCmd(cluster Cluster) tea.Cmd {
 // stopClusterCmd triggers stopping the given (running) cluster
 func (s *Service) stopClusterCmd(cluster Cluster) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.StopCluster(s.projectID, DefaultRegion, cluster.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: cluster.Name, Action: "stop",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.StopCluster(s.projectID, DefaultRegion, cluster.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Stopping cluster %s...", cluster.Name)}
@@ -763,10 +751,16 @@ func (s *Service) stopClusterCmd(cluster Cluster) tea.Cmd {
 // diagnoseClusterCmd kicks off diagnostic collection on cluster.
 func (s *Service) diagnoseClusterCmd(cluster Cluster) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DiagnoseCluster(s.projectID, DefaultRegion, cluster.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: cluster.Name, Action: "diagnose",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DiagnoseCluster(s.projectID, DefaultRegion, cluster.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Diagnosing cluster %s...", cluster.Name)}
@@ -790,10 +784,16 @@ func (s *Service) fetchIAMCmd(cluster Cluster) tea.Cmd {
 // addIAMBindingCmd grants role to member on the given cluster.
 func (s *Service) addIAMBindingCmd(cluster Cluster, role, member string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddClusterIAMBinding(s.projectID, DefaultRegion, cluster.Name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "cluster",
+			Name: cluster.Name, Action: "grant",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddClusterIAMBinding(s.projectID, DefaultRegion, cluster.Name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on cluster %s", role, member, cluster.Name)}
@@ -817,10 +817,16 @@ func (s *Service) fetchJobsCmd() tea.Cmd {
 // submitSparkJobCmd submits a minimal Spark job to cluster.
 func (s *Service) submitSparkJobCmd(cluster Cluster, mainClass, jarURI string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.SubmitSparkJob(s.projectID, DefaultRegion, cluster.Name, mainClass, jarURI); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: cluster.Name, Action: "submit",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.SubmitSparkJob(s.projectID, DefaultRegion, cluster.Name, mainClass, jarURI)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Submitted Spark job to %s", cluster.Name)}
@@ -830,10 +836,16 @@ func (s *Service) submitSparkJobCmd(cluster Cluster, mainClass, jarURI string) t
 // killJobCmd cancels a running job.
 func (s *Service) killJobCmd(job JobInfo) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.KillJob(s.projectID, DefaultRegion, job.ID); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "job",
+			Name: job.ID, Action: "kill",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.KillJob(s.projectID, DefaultRegion, job.ID)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Killing job %s...", job.ID)}

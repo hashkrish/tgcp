@@ -330,18 +330,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case actionResultMsg:
 		if s.pendingAction == "delete" {
 			s.pendingAction = ""
-			dbName := ""
-			if s.selectedDB != nil {
-				dbName = s.selectedDB.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
-				Name: dbName, Action: "delete", Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				return s, func() tea.Msg {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -358,18 +346,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if s.pendingAction == "bulk-delete" {
 			s.pendingAction = ""
-			dbName := ""
-			if s.selectedDB != nil {
-				dbName = s.selectedDB.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
-				Name: dbName, Action: "bulk-delete", Status: status, Error: errStr,
-			})
 			return s, func() tea.Msg {
 				if msg.err != nil {
 					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
@@ -378,22 +354,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if s.viewState == ViewExport || s.viewState == ViewImport {
-			action := "export"
-			if s.viewState == ViewImport {
-				action = "import"
-			}
-			dbName := ""
-			if s.selectedDB != nil {
-				dbName = s.selectedDB.Name
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
-				Name: dbName, Action: action, Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				if s.viewState == ViewExport {
 					s.exportForm.SubmitErr = msg.err.Error()
@@ -406,24 +366,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
 		}
 		if s.viewState == ViewClone || s.viewState == ViewRestore {
-			action := "clone"
-			dbName := ""
-			if s.viewState == ViewClone {
-				if s.selectedDB != nil {
-					dbName = s.selectedDB.Name
-				}
-			} else {
-				action = "restore"
-				dbName = s.restoreForm.Value("New Database ID")
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
-				Name: dbName, Action: action, Status: status, Error: errStr,
-			})
 			if msg.err != nil {
 				if s.viewState == ViewClone {
 					s.cloneForm.SubmitErr = msg.err.Error()
@@ -437,24 +379,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
 				s.Refresh(),
 			)
-		}
-		{
-			action := "create"
-			dbName := s.createForm.Value("Database ID")
-			if s.viewState == ViewUpdate {
-				action = "update"
-				if s.selectedDB != nil {
-					dbName = s.selectedDB.Name
-				}
-			}
-			status, errStr := core.JobSuccess, ""
-			if msg.err != nil {
-				status, errStr = core.JobFailed, msg.err.Error()
-			}
-			core.RecordJob(core.Job{
-				Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
-				Name: dbName, Action: action, Status: status, Error: errStr,
-			})
 		}
 		if msg.err != nil {
 			if s.viewState == ViewUpdate {
@@ -736,10 +660,16 @@ func (s *Service) updateDatabaseCmd(db Database) tea.Cmd {
 	enabled := s.updateForm.Value("Delete Protection (true/false)") == "true"
 	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateDatabaseDeleteProtection(fullName, enabled); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: db.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateDatabaseDeleteProtection(fullName, enabled)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating database %s...", db.Name)}
@@ -750,10 +680,16 @@ func (s *Service) updateDatabaseCmd(db Database) tea.Cmd {
 func (s *Service) deleteDatabaseCmd(db Database) tea.Cmd {
 	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteDatabase(fullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: db.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteDatabase(fullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting database %s...", db.Name)}
@@ -764,10 +700,16 @@ func (s *Service) deleteDatabaseCmd(db Database) tea.Cmd {
 func (s *Service) exportDatabaseCmd(db Database, outputURI string) tea.Cmd {
 	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ExportDocuments(fullName, outputURI); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: db.Name, Action: "export",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ExportDocuments(fullName, outputURI)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Export of %s to %s started", db.Name, outputURI)}
@@ -778,10 +720,16 @@ func (s *Service) exportDatabaseCmd(db Database, outputURI string) tea.Cmd {
 func (s *Service) importDatabaseCmd(db Database, inputURI string) tea.Cmd {
 	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.ImportDocuments(fullName, inputURI); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: db.Name, Action: "import",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.ImportDocuments(fullName, inputURI)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Import into %s from %s started", db.Name, inputURI)}
@@ -791,10 +739,16 @@ func (s *Service) importDatabaseCmd(db Database, inputURI string) tea.Cmd {
 // cloneDatabaseCmd clones db into a new database from a PITR snapshot.
 func (s *Service) cloneDatabaseCmd(db Database, newDatabaseID, snapshotTime string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CloneDatabase(db.ProjectID, db.Name, newDatabaseID, snapshotTime); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: db.Name, Action: "clone",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CloneDatabase(db.ProjectID, db.Name, newDatabaseID, snapshotTime)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Cloning %s to %s...", db.Name, newDatabaseID)}
@@ -804,10 +758,16 @@ func (s *Service) cloneDatabaseCmd(db Database, newDatabaseID, snapshotTime stri
 // restoreDatabaseCmd restores backupName into a new database.
 func (s *Service) restoreDatabaseCmd(newDatabaseID, backupName string) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.RestoreDatabase(s.projectID, newDatabaseID, backupName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: newDatabaseID, Action: "restore",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.RestoreDatabase(s.projectID, newDatabaseID, backupName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Restoring %s from backup...", newDatabaseID)}
@@ -818,10 +778,16 @@ func (s *Service) restoreDatabaseCmd(newDatabaseID, backupName string) tea.Cmd {
 func (s *Service) bulkDeleteDocumentsCmd(db Database) tea.Cmd {
 	fullName := fmt.Sprintf("projects/%s/databases/%s", db.ProjectID, db.Name)
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.BulkDeleteDocuments(fullName); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: db.Name, Action: "bulk-delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.BulkDeleteDocuments(fullName)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Bulk delete of all documents in %s started", db.Name)}
@@ -836,10 +802,16 @@ func (s *Service) createDatabaseCmd() tea.Cmd {
 		dbType = "FIRESTORE_NATIVE"
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateDatabase(s.projectID, id, location, dbType); err != nil {
+		err := core.TrackJob(core.Job{
+			Service: s.ShortName(), ProjectID: s.projectID, Resource: "database",
+			Name: id, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateDatabase(s.projectID, id, location, dbType)
+		})
+		if err != nil {
 			return actionResultMsg{err: err}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Database %s created", id)}

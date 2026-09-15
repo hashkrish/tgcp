@@ -358,14 +358,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		if msg.resource != "" {
-			job := core.Job{ProjectID: s.projectID, Service: s.ShortName(), Resource: msg.resource, Name: msg.name, Action: msg.action, Status: core.JobSuccess}
-			if msg.err != nil {
-				job.Status = core.JobFailed
-				job.Error = msg.err.Error()
-			}
-			core.RecordJob(job)
-		}
 		if msg.err != nil {
 			return s, func() tea.Msg { return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError} }
 		}
@@ -750,10 +742,15 @@ func (s *Service) fetchInstancesCmd(svc AppEngineService, ver Version) tea.Cmd {
 
 func (s *Service) deleteServiceCmd(svc AppEngineService) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: svc.Id, action: "delete"}
-		}
-		if err := s.client.DeleteService(context.Background(), svc.Id); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "service", Name: svc.Id, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteService(context.Background(), svc.Id)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "service", name: svc.Id, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting service %s...", svc.Id), resource: "service", name: svc.Id, action: "delete"}
@@ -766,10 +763,15 @@ func (s *Service) setServingStatusCmd(svc AppEngineService, ver Version, status 
 		verb, action = "Stopping", "stop-version"
 	}
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "version", name: ver.Id, action: action}
-		}
-		if err := s.client.SetVersionServingStatus(context.Background(), svc.Id, ver.Id, status); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "version", Name: ver.Id, Action: action,
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.SetVersionServingStatus(context.Background(), svc.Id, ver.Id, status)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "version", name: ver.Id, action: action}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("%s version %s...", verb, ver.Id), resource: "version", name: ver.Id, action: action}
@@ -778,10 +780,15 @@ func (s *Service) setServingStatusCmd(svc AppEngineService, ver Version, status 
 
 func (s *Service) deleteVersionCmd(svc AppEngineService, ver Version) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "version", name: ver.Id, action: "delete"}
-		}
-		if err := s.client.DeleteVersion(context.Background(), svc.Id, ver.Id); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "version", Name: ver.Id, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteVersion(context.Background(), svc.Id, ver.Id)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "version", name: ver.Id, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting version %s...", ver.Id), resource: "version", name: ver.Id, action: "delete"}
@@ -790,10 +797,15 @@ func (s *Service) deleteVersionCmd(svc AppEngineService, ver Version) tea.Cmd {
 
 func (s *Service) setTrafficSplitCmd(svc AppEngineService, allocations map[string]float64) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized"), resource: "service", name: svc.Id, action: "split-traffic"}
-		}
-		if err := s.client.SetTrafficSplit(context.Background(), svc.Id, allocations); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(), Resource: "service", Name: svc.Id, Action: "split-traffic",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.SetTrafficSplit(context.Background(), svc.Id, allocations)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "service", name: svc.Id, action: "split-traffic"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updated traffic split for %s", svc.Id), resource: "service", name: svc.Id, action: "split-traffic"}

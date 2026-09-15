@@ -415,19 +415,6 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		if msg.err != nil {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobFailed, Error: msg.err.Error(),
-			})
-		} else {
-			core.RecordJob(core.Job{
-				ProjectID: s.projectID, Service: s.ShortName(),
-				Resource: msg.resource, Name: msg.name, Action: msg.action,
-				Status: core.JobSuccess,
-			})
-		}
 		if s.pendingAction == "grant" {
 			s.pendingAction = ""
 			if msg.err != nil {
@@ -820,10 +807,16 @@ func (s *Service) createRepositoryCmd() tea.Cmd {
 	}
 	s.viewState = ViewList
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.CreateRepository(s.projectID, opts); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "repository", Name: opts.RepositoryID, Action: "create",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.CreateRepository(s.projectID, opts)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "repository", name: opts.RepositoryID, action: "create"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Creating repository %s...", opts.RepositoryID), resource: "repository", name: opts.RepositoryID, action: "create"}
@@ -836,10 +829,16 @@ func (s *Service) updateRepositoryCmd(item RepositoryItem) tea.Cmd {
 	description := s.updateForm.Value("Description")
 	s.viewState = ViewDetail
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.UpdateRepositoryDescription(s.projectID, item.Region, item.Name, description); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "repository", Name: item.Name, Action: "update",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.UpdateRepositoryDescription(s.projectID, item.Region, item.Name, description)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "repository", name: item.Name, action: "update"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Updating repository %s...", item.Name), resource: "repository", name: item.Name, action: "update"}
@@ -849,10 +848,16 @@ func (s *Service) updateRepositoryCmd(item RepositoryItem) tea.Cmd {
 // deleteRepositoryCmd triggers deletion of the given repository
 func (s *Service) deleteRepositoryCmd(item RepositoryItem) tea.Cmd {
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.DeleteRepository(s.projectID, item.Region, item.Name); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "repository", Name: item.Name, Action: "delete",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.DeleteRepository(s.projectID, item.Region, item.Name)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "repository", name: item.Name, action: "delete"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Deleting repository %s...", item.Name), resource: "repository", name: item.Name, action: "delete"}
@@ -904,10 +909,16 @@ func (s *Service) fetchIAMCmd(item RepositoryItem) tea.Cmd {
 func (s *Service) addIAMBindingCmd(item RepositoryItem, role, member string) tea.Cmd {
 	name := s.repoFullName(item)
 	return func() tea.Msg {
-		if s.client == nil {
-			return actionResultMsg{err: fmt.Errorf("client not initialized")}
-		}
-		if err := s.client.AddRepositoryIAMBinding(name, role, member); err != nil {
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "repository", Name: item.Name, Action: "grant-iam",
+		}, func() error {
+			if s.client == nil {
+				return fmt.Errorf("client not initialized")
+			}
+			return s.client.AddRepositoryIAMBinding(name, role, member)
+		})
+		if err != nil {
 			return actionResultMsg{err: err, resource: "repository", name: item.Name, action: "grant-iam"}
 		}
 		return actionResultMsg{msg: fmt.Sprintf("Granted %s to %s on repository %s", role, member, item.Name), resource: "repository", name: item.Name, action: "grant-iam"}
@@ -1084,11 +1095,16 @@ func (s *Service) fetchImagesCmd(repo RepositoryItem, force bool) tea.Cmd {
 
 func (s *Service) deleteImageCmd(img DockerImage) tea.Cmd {
 	return func() tea.Msg {
-		err := s.client.DeleteImage(img.Name)
 		name := img.URI
 		if len(img.Tags) > 0 {
 			name = strings.Join(img.Tags, ", ")
 		}
+		err := core.TrackJob(core.Job{
+			ProjectID: s.projectID, Service: s.ShortName(),
+			Resource: "image", Name: name, Action: "delete",
+		}, func() error {
+			return s.client.DeleteImage(img.Name)
+		})
 		if err != nil {
 			return actionResultMsg{err: err, resource: "image", name: name, action: "delete"}
 		}
