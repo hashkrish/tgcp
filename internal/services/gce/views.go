@@ -29,6 +29,60 @@ func (s *Service) renderTabBar() string {
 	)
 }
 
+// instanceDetailRows builds the Instance Details rows shown in the detail
+// view. Shared between rendering and the copy-on-select keybinding so both
+// agree on exactly which value a given row copies.
+func instanceDetailRows(i *Instance) []components.KeyValue {
+	var totalDisk int64
+	for _, d := range i.Disks {
+		totalDisk += d.SizeGB
+	}
+
+	// Simple duration format: Xd Yh
+	age := time.Since(i.CreationTime)
+	days := int(age.Hours() / 24)
+	ageStr := fmt.Sprintf("%d days ago", days)
+	if days == 0 {
+		hours := int(age.Hours())
+		ageStr = fmt.Sprintf("%d hours ago", hours)
+	}
+
+	externalIP := i.ExternalIP
+	if externalIP == "" {
+		externalIP = "None"
+	}
+
+	tags := "None"
+	if len(i.Tags) > 0 {
+		tags = strings.Join(i.Tags, ", ")
+	}
+
+	rows := []components.KeyValue{
+		{Key: "Name", Value: i.Name},
+		{Key: "ID", Value: i.ID},
+		{Key: "Status", Value: string(i.State)},
+		{Key: "Zone", Value: i.Zone},
+		{Key: "Machine Type", Value: i.MachineType},
+		{Key: "OS Image", Value: i.OSImage},
+		{Key: "Disk Size", Value: fmt.Sprintf("%d GB total (%d disks)", totalDisk, len(i.Disks))},
+	}
+	for _, d := range i.Disks {
+		rows = append(rows, components.KeyValue{
+			Key:   "  Disk: " + d.Name,
+			Value: fmt.Sprintf("%d GB, %s", d.SizeGB, d.Type),
+		})
+	}
+	rows = append(rows,
+		components.KeyValue{Key: "Created", Value: ageStr},
+		components.KeyValue{Key: "Estimated Cost", Value: EstimateCost(i.MachineType, i.Zone, i.Disks)},
+		components.KeyValue{Key: "Internal IP", Value: i.InternalIP},
+		components.KeyValue{Key: "External IP", Value: externalIP},
+		components.KeyValue{Key: "Network Tags", Value: tags},
+	)
+
+	return rows
+}
+
 // renderDetailView renders the details of a single instance
 func (s *Service) renderDetailView() string {
 	if s.selectedInstance == nil {
@@ -47,48 +101,13 @@ func (s *Service) renderDetailView() string {
 	))
 	doc.WriteString("\n\n")
 
-	// Instance Details Section
-	// Calculate Total Disk Size
-	var totalDisk int64
-	for _, d := range i.Disks {
-		totalDisk += d.SizeGB
-	}
+	s.detailList.Title = "Instance Details"
+	s.detailList.SetRows(instanceDetailRows(i))
+	s.detailList.FooterHint = "↑↓ Select | y Copy | s Start | x Stop | R Reset | z Suspend | Z Resume | M Maintenance | h SSH | i IAM | u Update | d Delete | q Back"
 
-	// Calculate Age
-	// Simple duration format: Xd Yh
-	age := time.Since(i.CreationTime)
-	days := int(age.Hours() / 24)
-	ageStr := fmt.Sprintf("%d days ago", days)
-	if days == 0 {
-		hours := int(age.Hours())
-		ageStr = fmt.Sprintf("%d hours ago", hours)
-	}
-
-	card := components.DetailCard(components.DetailCardOpts{
-		Title: "Instance Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: i.Name},
-			{Key: "ID", Value: i.ID},
-			{Key: "Status", Value: renderStatus(i.State)},
-			{Key: "Zone", Value: i.Zone},
-			{Key: "Machine Type", Value: i.MachineType},
-			{Key: "OS Image", Value: i.OSImage},
-			{Key: "Disk Size", Value: fmt.Sprintf("%d GB", totalDisk)},
-			{Key: "Created", Value: ageStr},
-			{Key: "Estimated Cost", Value: EstimateCost(i.MachineType, i.Zone, i.Disks)},
-			{Key: "Internal IP", Value: i.InternalIP},
-			{Key: "External IP", Value: i.ExternalIP},
-		},
-		FooterHint: "s Start | x Stop | R Reset | z Suspend | Z Resume | M Maintenance | h SSH | i IAM | u Update | d Delete | q Back",
-	})
-
-	doc.WriteString(card)
+	doc.WriteString(s.detailList.View())
 
 	return doc.String()
-}
-
-func renderStatus(state InstanceState) string {
-	return components.RenderStatus(string(state))
 }
 
 // renderConfirmation renders a confirmation dialog

@@ -124,6 +124,7 @@ type Service struct {
 	// View State
 	viewState        ViewState
 	selectedInstance *Instance
+	detailList       components.DetailList
 
 	// Confirmation State
 	pendingAction string    // "start" or "stop"
@@ -200,7 +201,7 @@ func (s *Service) HelpText() string {
 		return "[]:Tabs  r:Refresh  /:Filter  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  M:Maintenance  h:SSH  l:Logs  i:IAM  Ent:Detail  n:Create  u:Update  d:Delete"
 	}
 	if s.viewState == ViewDetail {
-		return "Esc/q:Back  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  M:Maintenance  h:SSH  i:IAM  u:Update  d:Delete"
+		return "↑↓:Select  y:Copy  Esc/q:Back  s:Start  x:Stop  R:Reset  z:Suspend  Z:Resume  M:Maintenance  h:SSH  i:IAM  u:Update  d:Delete"
 	}
 	if s.viewState == ViewConfirmation {
 		return "y:Confirm  n:Cancel"
@@ -476,6 +477,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				instances := s.getFilteredInstances(s.instances, s.filter.Value())
 				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
 					s.selectedInstance = &instances[idx]
+					s.detailList = components.NewDetailList("Instance Details", nil)
 					s.viewState = ViewDetail
 				}
 			case "s": // Start (Confirm)
@@ -575,6 +577,17 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Return to List View
 				s.viewState = ViewList
 				s.selectedInstance = nil
+				return s, nil
+			case "up", "k":
+				s.detailList.CursorUp()
+				return s, nil
+			case "down", "j":
+				s.detailList.CursorDown()
+				return s, nil
+			case "y": // Copy selected field's value
+				if row, ok := s.detailList.Selected(); ok {
+					return s, components.CopyToClipboardCmd(row.Key, row.Value)
+				}
 				return s, nil
 			case "s": // Start (Confirm)
 				if s.selectedInstance != nil {
