@@ -50,14 +50,13 @@ func (s *Service) View() string {
 // (gerr.Message), which for a 403 reliably distinguishes "SERVICE_DISABLED"
 // (the App Engine Admin API -- a distinct API from App Engine itself --
 // isn't enabled on this project in Service Usage) from an actual IAM
-// permission gap: confirmed by direct reproduction that `gcloud`/plain
-// bearer-token REST calls can silently succeed against a *different*
-// (already-enabled) default quota-project context while this tool's client
-// library correctly attaches an X-Goog-User-Project header for the real
-// target project and gets the true, honest answer -- so "it works in
-// gcloud/Console" does not rule this out, and is in fact the expected
-// symptom of exactly this cause. ok is false for any other error, which
-// callers should fall back to RenderError for.
+// permission gap. SERVICE_DISABLED has been observed here even for a
+// project where the API had been enabled for a long time, with no code-side
+// explanation found (projectID is passed through consistently -- see
+// InitService/Reinit); a retry after some time cleared it, but the root
+// cause (Service Usage cache glitch, billing lapse, etc.) is unconfirmed.
+// ok is false for any other error, which callers should fall back to
+// RenderError for.
 func friendlyServicesError(err error, projectID string) (title, body string, ok bool) {
 	var gerr *googleapi.Error
 	if !errors.As(err, &gerr) {
