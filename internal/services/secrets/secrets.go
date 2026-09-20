@@ -89,11 +89,13 @@ type Service struct {
 	height int
 
 	// UI Components
-	table         *components.StandardTable
-	versionTable  *components.StandardTable
-	filter        components.FilterModel
-	filterSession components.FilterSession[Secret]
-	spinner       components.SpinnerModel
+	table             *components.StandardTable
+	versionTable      *components.StandardTable
+	detailList        components.DetailList
+	versionDetailList components.DetailList
+	filter            components.FilterModel
+	filterSession     components.FilterSession[Secret]
+	spinner           components.SpinnerModel
 
 	// Data State
 	secrets  []Secret
@@ -184,7 +186,7 @@ func (s *Service) HelpText() string {
 	case ViewConfirmation:
 		return "y:Confirm  n:Cancel"
 	case ViewDetail:
-		return "v:Versions  u:Update  n:New Version  d:Delete  i:IAM  Esc/q:Back"
+		return "↑↓:Select  y:Copy  v:Versions  u:Update  n:New Version  d:Delete  i:IAM  Esc/q:Back"
 	case ViewIAM:
 		return "a:Add Binding  q/Esc:Back"
 	case ViewIAMForm:
@@ -193,10 +195,12 @@ func (s *Service) HelpText() string {
 		return "Enter:View Version  Esc/q:Back to Detail"
 	case ViewVersionDetail:
 		reveal := "v:Reveal Value"
+		copyValue := ""
 		if s.revealed {
 			reveal = "v:Hide Value"
+			copyValue = "  Y:Copy Value"
 		}
-		return reveal + "  E:Enable  D:Disable  X:Destroy  Esc/q:Back"
+		return "↑↓:Select  y:Copy Field  " + reveal + copyValue + "  E:Enable  D:Disable  X:Destroy  Esc/q:Back"
 	case ViewCreate, ViewUpdate, ViewAddVersion:
 		return "Tab/↑↓ Move  Enter/Ctrl+S Submit  Esc Cancel"
 	default:
@@ -468,6 +472,7 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			secrets := s.getCurrentSecrets()
 			if idx := s.table.Cursor(); idx >= 0 && idx < len(secrets) {
 				s.selectedSecret = &secrets[idx]
+				s.detailList = components.NewDetailList("Secret Details", nil)
 				s.viewState = ViewDetail
 			}
 			return s, nil
@@ -550,6 +555,17 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			s.viewState = ViewList
 			s.selectedSecret = nil
 			s.versions = nil
+			return s, nil
+		case "up", "k":
+			s.detailList.CursorUp()
+			return s, nil
+		case "down", "j":
+			s.detailList.CursorDown()
+			return s, nil
+		case "y":
+			if row, ok := s.detailList.Selected(); ok {
+				return s, components.CopyToClipboardCmd(row.Key, row.Value)
+			}
 			return s, nil
 		case "u":
 			if s.selectedSecret != nil {
@@ -635,6 +651,7 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if idx := s.versionTable.Cursor(); idx >= 0 && idx < len(s.versions) {
 				s.clearReveal()
 				s.selectedVersion = &s.versions[idx]
+				s.versionDetailList = components.NewDetailList("Secret Version Details", nil)
 				s.viewState = ViewVersionDetail
 			}
 			return s, nil
@@ -650,6 +667,22 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc", "q":
 			s.viewState = ViewVersions
 			s.clearReveal()
+			return s, nil
+		case "up", "k":
+			s.versionDetailList.CursorUp()
+			return s, nil
+		case "down", "j":
+			s.versionDetailList.CursorDown()
+			return s, nil
+		case "y":
+			if row, ok := s.versionDetailList.Selected(); ok {
+				return s, components.CopyToClipboardCmd(row.Key, row.Value)
+			}
+			return s, nil
+		case "Y": // Copy the revealed secret value itself (handles multi-line values that can't be a DetailList row)
+			if s.revealed {
+				return s, components.CopyToClipboardCmd("Value", s.revealedValue)
+			}
 			return s, nil
 		case "v":
 			// Explicit, deliberate reveal/hide toggle. The value is never
@@ -892,17 +925,15 @@ func (s *Service) renderDetailView() string {
 		labelStr = fmt.Sprintf("%v", labels)
 	}
 
-	card := components.DetailCard(components.DetailCardOpts{
-		Title: "Secret Details",
-		Rows: []components.KeyValue{
-			{Key: "Name", Value: sec.Name},
-			{Key: "Replication", Value: sec.Replication},
-			{Key: "Labels", Value: labelStr},
-			{Key: "Created", Value: sec.CreateTime.Local().Format("2006-01-02 15:04:05")},
-			{Key: "Resource Name", Value: sec.FullName},
-		},
-		FooterHint: "v Versions | q Back",
+	s.detailList.Title = "Secret Details"
+	s.detailList.SetRows([]components.KeyValue{
+		{Key: "Name", Value: sec.Name},
+		{Key: "Replication", Value: sec.Replication},
+		{Key: "Labels", Value: labelStr},
+		{Key: "Created", Value: sec.CreateTime.Local().Format("2006-01-02 15:04:05")},
+		{Key: "Resource Name", Value: sec.FullName},
 	})
+	s.detailList.FooterHint = "↑↓ Select | y Copy | v Versions | q Back"
 
 	// Security note
 	note := lipgloss.NewStyle().
@@ -913,7 +944,7 @@ func (s *Service) renderDetailView() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
 		"",
-		card,
+		s.detailList.View(),
 		"",
 		note,
 	)
@@ -967,10 +998,15 @@ func (s *Service) renderVersionDetailView() string {
 			Foreground(styles.ColorError).
 			Render(fmt.Sprintf("Failed to reveal value: %v", s.revealErr))
 	case s.revealed:
+		// Rendered as its own JoinVertical block, not a DetailList row —
+		// a row is a single formatted line, which mangles/blanks any
+		// secret value containing newlines (JSON keys, PEM certs, .env
+		// files). Copying it is handled by the dedicated "Y" key instead
+		// of the row-cursor "y" path.
 		warning := lipgloss.NewStyle().
 			Foreground(styles.ColorWarning).
 			Bold(true).
-			Render("[!] VISIBLE - press v to hide")
+			Render("[!] VISIBLE - press v to hide, Y to copy")
 		value := lipgloss.NewStyle().
 			Foreground(styles.ColorTextPrimary).
 			Render(s.revealedValue)
@@ -982,16 +1018,14 @@ func (s *Service) renderVersionDetailView() string {
 			Render("Value hidden. Press v to reveal (fetches from Secret Manager).")
 	}
 
-	card := components.DetailCard(components.DetailCardOpts{
-		Title:      "Secret Version Details",
-		Rows:       rows,
-		FooterHint: "v Reveal/Hide | q Back",
-	})
+	s.versionDetailList.Title = "Secret Version Details"
+	s.versionDetailList.SetRows(rows)
+	s.versionDetailList.FooterHint = "↑↓ Select | y Copy Field | v Reveal/Hide | q Back"
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		breadcrumb,
 		"",
-		card,
+		s.versionDetailList.View(),
 		"",
 		valueBlock,
 	)
@@ -1259,11 +1293,29 @@ func (s *Service) updateVersionTable(versions []SecretVersion) {
 	for i, v := range versions {
 		rows[i] = table.Row{
 			v.Name,
-			components.RenderStatus(v.State),
+			versionStateText(v.State),
 			v.CreateTime.Local().Format("2006-01-02 15:04:05"),
 		}
 	}
 	s.versionTable.SetRows(rows)
+}
+
+// versionStateText renders a version's state as a plain icon+text string for
+// the versions StandardTable. Unlike components.RenderStatus (a
+// padding+background-colored badge whose ANSI escapes bubbles/table's
+// fixed-width column truncation doesn't account for), this stays plain so
+// column alignment holds regardless of state text length.
+func versionStateText(state string) string {
+	icon := components.IconUnknown
+	switch components.CategorizeStatus(state) {
+	case components.StatusRunning:
+		icon = components.IconRunning
+	case components.StatusStopped:
+		icon = components.IconStopped
+	case components.StatusPending:
+		icon = components.IconPending
+	}
+	return icon + " " + strings.ToUpper(strings.TrimSpace(state))
 }
 
 func (s *Service) getCurrentSecrets() []Secret {

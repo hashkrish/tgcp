@@ -82,7 +82,7 @@ func (d DetailList) View() string {
 
 	lines := make([]string, 0, len(d.Rows))
 	for idx, row := range d.Rows {
-		key := row.Key + ":"
+		key := row.Key
 		value := row.Value
 
 		selected := idx == d.cursor
