@@ -45,6 +45,10 @@ Every service should short-circuit its `api.go` client/`List*`/`Get*` calls when
 - Action feedback (success/error toasts) goes through `core.ToastMsg` returned from a `tea.Cmd`; `MainModel.Update()` is the single place that turns this into a status-bar message (there's no floating toast overlay) — individual services just emit the message and don't need to know how it's displayed.
 - Never block the Bubble Tea update loop: all GCP API calls are wrapped in a `tea.Cmd` goroutine that returns a result message.
 
+## Commits
+
+Do not add a `Co-Authored-By` line or any other AI-attribution footer to commit messages or PR descriptions in this repo.
+
 ## Feature-specific state
 
 - **Job history**: every mutating action (create/update/delete/...) is recorded synchronously by `internal/core/jobtrack.go`/`jobs.go` at the point of mutation (not on message delivery), persisted to `~/.tgcp/jobs.json`, with retention governed by `~/.tgcprc`'s `jobs.max_count`/`jobs.max_age_days`.
