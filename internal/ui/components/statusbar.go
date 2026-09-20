@@ -14,7 +14,6 @@ type StatusBarModel struct {
 	Message     string
 	Mode        string // "NORMAL", "COMMAND", "FILTER"
 	FocusPane   string // "HOME", "SIDEBAR", "MAIN"
-	HelpText    string
 	Width       int
 	LastUpdated time.Time
 	IsError     bool
@@ -25,14 +24,8 @@ func NewStatusBar() StatusBarModel {
 		Message:   "Ready",
 		Mode:      "NORMAL",
 		FocusPane: "",
-		HelpText:  "", // Dynamically set by view
 		Width:     80,
 	}
-}
-
-// SetHelpText updates the help text
-func (m *StatusBarModel) SetHelpText(text string) {
-	m.HelpText = text
 }
 
 // SetFocusPane updates the active pane indicator
@@ -53,11 +46,6 @@ func (m StatusBarModel) Update(msg tea.Msg) (StatusBarModel, tea.Cmd) {
 }
 
 func (m StatusBarModel) View() string {
-	// Separator character
-	sep := lipgloss.NewStyle().
-		Foreground(styles.ColorBorderSubtle).
-		Render(" │ ")
-
 	// Mode badge style
 	modeStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("232")).
@@ -84,38 +72,11 @@ func (m StatusBarModel) View() string {
 		modeLabel = "NORMAL"
 	}
 
-	// Help hints style - format as [key] Action
-	helpStyle := lipgloss.NewStyle().
-		Foreground(styles.ColorTextMuted)
-
-	// Layout: ┃ MODE ┃ Message ............... │ Help Hints
+	// Layout: ┃ MODE ┃ Message
 	mode := modeStyle.Render(modeLabel)
 
-	// Right side: Help hints only (removed timestamp). Reserve a minimum
-	// width for the message so a long HelpText can't push it to zero and
-	// wrap the whole status bar off-screen on a narrow terminal.
-	const minInfoWidth = 12
-	sepWidth := lipgloss.Width(sep)
-	helpText := m.HelpText
-	if helpText != "" {
-		maxHelpWidth := m.Width - lipgloss.Width(mode) - 1 - sepWidth - minInfoWidth
-		if maxHelpWidth < 0 {
-			maxHelpWidth = 0
-		}
-		if lipgloss.Width(helpText) > maxHelpWidth {
-			helpText = truncateToWidth(helpText, maxHelpWidth)
-		}
-	}
-	rightSide := ""
-	if helpText != "" {
-		rightSide = sep + helpStyle.Render(helpText)
-	}
-
 	// Calculate available width for message
-	infoWidth := m.Width - lipgloss.Width(mode) - lipgloss.Width(rightSide) - 1
-	if infoWidth < 0 {
-		infoWidth = 0
-	}
+	infoWidth := max(m.Width-lipgloss.Width(mode)-1, 0)
 
 	message := m.Message
 	if lipgloss.Width(message) > infoWidth {
@@ -123,7 +84,7 @@ func (m StatusBarModel) View() string {
 	}
 	info := styles.StatusBarStyle.Width(infoWidth).Render(message)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, mode, " ", info, rightSide)
+	return lipgloss.JoinHorizontal(lipgloss.Top, mode, " ", info)
 }
 
 // truncateToWidth shortens s to fit within width columns, appending an

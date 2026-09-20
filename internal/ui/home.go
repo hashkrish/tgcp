@@ -35,24 +35,13 @@ func (m MainModel) View() string {
 	// Layout Content + Status Bar
 	screen := lipgloss.JoinVertical(lipgloss.Top, content, statusBar)
 
-	// 3. Toast Overlay (if active)
-	if m.Toast != nil && !m.Toast.IsExpired() {
-		toastView := m.Toast.View()
-		// Position toast at bottom-right, above status bar
-		screen = lipgloss.JoinVertical(lipgloss.Top,
-			content,
-			lipgloss.PlaceHorizontal(m.Width, lipgloss.Right, toastView),
-			statusBar,
-		)
-	}
-
-	// 4. Loading Spinner (if active) - show inline at top of content
+	// 3. Loading Spinner (if active) - show inline at top of content
 	if m.Spinner.IsActive() {
 		spinnerView := m.Spinner.View()
 		screen = lipgloss.JoinVertical(lipgloss.Top, spinnerView, content, statusBar)
 	}
 
-	// 5. Overlays (Command Palette)
+	// 4. Overlays (Command Palette)
 	if m.Navigation.PaletteActive {
 		// Overlay Palette on top of the entire screen
 		// Note: Palette.Render uses lipgloss.Place to center itself in the given dimensions.

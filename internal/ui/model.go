@@ -81,8 +81,13 @@ type MainModel struct {
 	HomeMenu  components.HomeMenuModel // Added
 	StatusBar components.StatusBarModel
 	Palette   components.PaletteModel // Added
-	Toast     *components.ToastModel  // Toast notification (nil when hidden)
 	Spinner   components.SpinnerModel // Global loading spinner
+
+	// statusMsgSetAt is when the current transient StatusBar.Message (from a
+	// core.ToastMsg) was set. statusMsgExpiredMsg carries the timestamp it
+	// should clear, so a message replaced before its own timer fires isn't
+	// wiped out by the older timer.
+	statusMsgSetAt time.Time
 
 	// State
 	ViewMode      ViewMode // Added
@@ -167,6 +172,10 @@ func (m MainModel) Init() tea.Cmd {
 // landingStatsMsg carries the one-shot resource-count snapshot for the
 // landing page's stats strip.
 type landingStatsMsg overview.ResourceInventory
+
+// statusMsgExpiredMsg reverts the status bar's message once a core.ToastMsg's
+// display duration has elapsed. See statusMsgSetAt on MainModel.
+type statusMsgExpiredMsg struct{ at time.Time }
 
 // fetchLandingStatsCmd fetches a lightweight resource-count snapshot for the
 // landing page's stats strip. Reuses the exact same cache key format the
@@ -276,14 +285,24 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	defer m.syncStatusBarFocus()
 
 	switch msg := msg.(type) {
-	// Toast Notifications
+	// Toast Notifications -- shown in the status bar rather than an overlay.
 	case core.ToastMsg:
-		m.Toast = components.NewToastFromMsg(msg)
-		return m, m.Toast.DismissCmd()
+		now := time.Now()
+		m.statusMsgSetAt = now
+		m.StatusBar.Message = msg.Message
+		m.StatusBar.IsError = msg.Type == core.ToastError
+		duration := msg.Duration
+		if duration == 0 {
+			duration = 3 * time.Second
+		}
+		return m, tea.Tick(duration, func(time.Time) tea.Msg {
+			return statusMsgExpiredMsg{at: now}
+		})
 
-	case components.ToastDismissMsg:
-		if m.Toast != nil && m.Toast.CreatedAt.Equal(msg.CreatedAt) {
-			m.Toast = nil
+	case statusMsgExpiredMsg:
+		if m.statusMsgSetAt.Equal(msg.at) {
+			m.StatusBar.Message = "Ready"
+			m.StatusBar.IsError = false
 		}
 		return m, nil
 
@@ -1022,37 +1041,6 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Update StatusBar
 	m.StatusBar, cmd = m.StatusBar.Update(msg)
 	cmds = append(cmds, cmd)
-
-	// Dynamic Help Text
-	if m.Focus == FocusPalette {
-		m.StatusBar.SetHelpText("Esc:Cancel  Enter:Run  ↑/↓:Select")
-	} else if m.ViewMode == ViewHome {
-		// Add help hint if help is not currently shown
-		helpText := "q:Quit  Enter:Select"
-		if !m.ShowHelp {
-			helpText += "  ?:Help"
-		}
-		m.StatusBar.SetHelpText(helpText)
-	} else if m.CurrentSvc != nil {
-		// Get service help text and append help hint if help is not currently shown
-		helpText := m.CurrentSvc.HelpText()
-		if !m.ShowHelp {
-			// Append help hint to service help text
-			if helpText != "" {
-				helpText += "  ?:Help"
-			} else {
-				helpText = "?:Help"
-			}
-		}
-		m.StatusBar.SetHelpText(helpText)
-	} else {
-		// Fallback: show help hint if available
-		if !m.ShowHelp {
-			m.StatusBar.SetHelpText("?:Help")
-		} else {
-			m.StatusBar.SetHelpText("")
-		}
-	}
 
 	return m, tea.Batch(cmds...)
 }
