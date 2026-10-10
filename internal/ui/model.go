@@ -10,6 +10,7 @@ import (
 	"github.com/yogirk/tgcp/internal/config"
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/services"
+	"github.com/yogirk/tgcp/internal/services/apis"
 	"github.com/yogirk/tgcp/internal/services/appengine"
 	"github.com/yogirk/tgcp/internal/services/artifactregistry"
 	"github.com/yogirk/tgcp/internal/services/bigquery"
@@ -1146,6 +1147,9 @@ func registerAllServices(registry *core.ServiceRegistry) {
 	})
 	registry.Register("artifactregistry", func(cache *core.Cache) services.Service {
 		return artifactregistry.NewService(cache)
+	})
+	registry.Register("apis", func(cache *core.Cache) services.Service {
+		return apis.NewService(cache)
 	})
 	registry.Register("jobs", func(cache *core.Cache) services.Service {
 		return jobs.NewService(cache)

@@ -60,6 +60,7 @@ var serviceIcons = map[string]string{
 	"monitoring":       "O",
 	"cloudbuild":       "^",
 	"artifactregistry": "A",
+	"apis":             "U",
 }
 
 // gridColumn is one category's worth of services, rendered as a column in
@@ -195,6 +196,7 @@ func NewHomeMenu() HomeMenuModel {
 				Services: []ServiceItem{
 					{Name: "Cloud Build", ShortName: "cloudbuild"},
 					{Name: "Artifact Registry", ShortName: "artifactregistry"},
+					{Name: "APIs & Services", ShortName: "apis"},
 				},
 			},
 		},

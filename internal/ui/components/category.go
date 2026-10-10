@@ -68,6 +68,7 @@ var serviceCategory = map[string]string{
 	"monitoring":       catObserv,
 	"cloudbuild":       catDevOps,
 	"artifactregistry": catDevOps,
+	"apis":             catDevOps,
 }
 
 // CategoryColor returns the accent colour for a category name. Falls back to

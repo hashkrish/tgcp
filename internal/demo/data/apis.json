@@ -1,0 +1,20 @@
+[
+  {"Name": "compute.googleapis.com", "Title": "Compute Engine API", "State": "ENABLED", "Summary": "Creates and runs virtual machines on Google Cloud Platform."},
+  {"Name": "container.googleapis.com", "Title": "Kubernetes Engine API", "State": "ENABLED", "Summary": "Builds and manages container-based applications, powered by the open source Kubernetes technology."},
+  {"Name": "run.googleapis.com", "Title": "Cloud Run Admin API", "State": "ENABLED", "Summary": "Deploy and manage user provided container images that scale automatically based on incoming requests."},
+  {"Name": "storage.googleapis.com", "Title": "Cloud Storage API", "State": "ENABLED", "Summary": "Lets you store and retrieve potentially-large, immutable data objects."},
+  {"Name": "sqladmin.googleapis.com", "Title": "Cloud SQL Admin API", "State": "ENABLED", "Summary": "API for Cloud SQL database instance management."},
+  {"Name": "bigquery.googleapis.com", "Title": "BigQuery API", "State": "ENABLED", "Summary": "A data platform for customers to create, manage, share and query data."},
+  {"Name": "pubsub.googleapis.com", "Title": "Cloud Pub/Sub API", "State": "ENABLED", "Summary": "Provides reliable, many-to-many, asynchronous messaging between applications."},
+  {"Name": "secretmanager.googleapis.com", "Title": "Secret Manager API", "State": "ENABLED", "Summary": "Stores sensitive data such as API keys, passwords, and certificates."},
+  {"Name": "logging.googleapis.com", "Title": "Cloud Logging API", "State": "ENABLED", "Summary": "Writes log entries and manages your Cloud Logging configuration."},
+  {"Name": "monitoring.googleapis.com", "Title": "Cloud Monitoring API", "State": "ENABLED", "Summary": "Manages your Cloud Monitoring data and configurations."},
+  {"Name": "iam.googleapis.com", "Title": "Identity and Access Management (IAM) API", "State": "ENABLED", "Summary": "Manages identity and access control for Google Cloud resources."},
+  {"Name": "serviceusage.googleapis.com", "Title": "Service Usage API", "State": "ENABLED", "Summary": "Enables services that service consumers want to use on Google Cloud Platform."},
+  {"Name": "spanner.googleapis.com", "Title": "Cloud Spanner API", "State": "DISABLED", "Summary": "Cloud Spanner is a managed, mission-critical, globally consistent and scalable relational database service."},
+  {"Name": "bigtableadmin.googleapis.com", "Title": "Cloud Bigtable Admin API", "State": "DISABLED", "Summary": "Administer your Cloud Bigtable tables and instances."},
+  {"Name": "dataflow.googleapis.com", "Title": "Dataflow API", "State": "DISABLED", "Summary": "Manages Google Cloud Dataflow projects on Google Cloud Platform."},
+  {"Name": "cloudkms.googleapis.com", "Title": "Cloud Key Management Service (KMS) API", "State": "DISABLED", "Summary": "Manages keys and performs cryptographic operations in a central cloud service."},
+  {"Name": "redis.googleapis.com", "Title": "Google Cloud Memorystore for Redis API", "State": "DISABLED", "Summary": "Creates and manages Redis instances on the Google Cloud Platform."},
+  {"Name": "appengine.googleapis.com", "Title": "App Engine Admin API", "State": "DISABLED", "Summary": "Provisions and manages developers' App Engine applications."}
+]

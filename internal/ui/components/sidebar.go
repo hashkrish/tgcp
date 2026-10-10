@@ -35,7 +35,7 @@ var groupBreaks = map[int]bool{
 	19: true, // After Data & Analytics (BigQuery, Dataflow, Dataproc, Pub/Sub, Scheduler, Cloud Tasks)
 	27: true, // After Security & Networking (IAM, Secrets, Parameter Manager, Networking, Load Balancing, DNS, KMS, IP Addresses)
 	29: true, // After Observability (Cloud Logging, Cloud Monitoring)
-	31: true, // After DevOps (Cloud Build, Artifact Registry)
+	32: true, // After DevOps (Cloud Build, Artifact Registry, APIs & Services)
 }
 
 // Icons here are deliberately plain ASCII rather than Unicode
@@ -86,6 +86,7 @@ func NewSidebar() SidebarModel {
 			// DevOps
 			{Name: "Cloud Build", ShortName: "cloudbuild", Icon: "^"},
 			{Name: "Artifact Registry", ShortName: "artifactregistry", Icon: "A"},
+			{Name: "APIs & Services", ShortName: "apis", Icon: "U"},
 			// Local (not a GCP service -- app-local, cross-project state)
 			{Name: "Job History", ShortName: "jobs", Icon: "J"},
 		},

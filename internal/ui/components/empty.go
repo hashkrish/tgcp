@@ -53,6 +53,9 @@ var emptyMessages = map[string][]string{
 	"subscriptions": {
 		"No subscriptions. Nobody's listening.",
 	},
+	"apis": {
+		"No APIs enabled. A blank slate.",
+	},
 	"secrets": {
 		"No secrets stored. Or they're really well hidden.",
 	},
