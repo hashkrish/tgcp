@@ -387,55 +387,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return s, nil
 
 	case actionResultMsg:
-		// Databases/Users sub-view actions re-fetch just that sub-list on
-		// success instead of the generic instance-list Refresh() below.
-		if s.pendingAction == "db-create" || s.pendingAction == "db-delete" {
-			s.pendingAction = ""
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			if s.selectedInstance != nil {
-				return s, tea.Batch(
-					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
-					s.fetchDatabasesCmd(*s.selectedInstance),
-				)
-			}
-			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		if s.pendingAction == "user-create" || s.pendingAction == "user-delete" {
-			s.pendingAction = ""
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			if s.selectedInstance != nil {
-				return s, tea.Batch(
-					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
-					s.fetchUsersCmd(*s.selectedInstance),
-				)
-			}
-			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		s.pendingJobAction = ""
-		s.pendingJobName = ""
-		if msg.err != nil {
-			s.err = msg.err
-			return s, func() tea.Msg {
-				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-			}
-		} else if msg.msg != "" {
-			return s, tea.Batch(
-				func() tea.Msg {
-					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
-				},
-				s.Refresh(),
-			)
-		}
-		return s, s.Refresh()
-
+		return s.handleActionResult(msg)
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
 
@@ -449,440 +401,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		// Handle filter mode (only in list view)
-		if s.viewState == ViewList {
-			result := s.filterSession.HandleKey(msg)
+		return s.handleKeyMsg(msg)
 
-			if result.Handled {
-				if result.Cmd != nil {
-					return s, result.Cmd
-				}
-				if !result.ShouldContinue {
-					return s, nil
-				}
-				// Continue processing other keys
-			}
-		}
-
-		switch s.viewState {
-		case ViewList:
-			switch msg.String() {
-			case "r":
-				return s, s.fetchInstancesCmd(true)
-			case "enter":
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.viewState = ViewDetail
-				}
-			case "s": // Start
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.pendingAction = "start"
-					s.actionSource = ViewList
-					s.viewState = ViewConfirmation
-				}
-			case "x": // Stop
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.pendingAction = "stop"
-					s.actionSource = ViewList
-					s.viewState = ViewConfirmation
-				}
-			case "t": // Restart
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.pendingAction = "restart"
-					s.actionSource = ViewList
-					s.viewState = ViewConfirmation
-				}
-			case "l": // Logs
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(s.instances) {
-					inst := s.instances[idx]
-					// Cloud SQL filter uses database_id usually project:instance
-					filter := fmt.Sprintf(`resource.type="cloudsql_database" AND resource.labels.database_id="%s:%s"`, s.projectID, inst.Name)
-					heading := fmt.Sprintf("Database: %s", inst.Name)
-					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "sql", Heading: heading} }
-				}
-			case "n": // Create
-				s.createForm = newInstanceCreateForm()
-				s.viewState = ViewCreate
-				return s, nil
-			case "e": // Execute SQL (read-only, data-plane)
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.queryForm = newQueryForm(*s.selectedInstance)
-					s.viewState = ViewQuery
-					return s, nil
-				}
-			case "u": // Update
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
-					s.viewState = ViewUpdate
-					return s, nil
-				}
-			case "d": // Delete (Confirm, double)
-				instances := s.getFilteredInstances(s.instances, s.filter.Value())
-				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-					s.selectedInstance = &instances[idx]
-					s.pendingAction = "delete"
-					s.actionSource = ViewList
-					s.viewState = ViewConfirmation
-					return s, nil
-				}
-			}
-			s.table, cmd = s.table.Update(msg)
-			return s, cmd
-
-		case ViewDetail:
-			switch msg.String() {
-			case "esc", "q":
-				s.viewState = ViewList
-				s.selectedInstance = nil
-				return s, nil
-			case "s":
-				if s.selectedInstance != nil {
-					s.pendingAction = "start"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-			case "x":
-				if s.selectedInstance != nil {
-					s.pendingAction = "stop"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-			case "u":
-				if s.selectedInstance != nil {
-					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
-					s.viewState = ViewUpdate
-				}
-				return s, nil
-			case "d": // Delete (Confirm, double)
-				if s.selectedInstance != nil {
-					s.pendingAction = "delete"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			case "t":
-				if s.selectedInstance != nil {
-					s.pendingAction = "restart"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-			case "e": // Execute SQL (read-only, data-plane)
-				if s.selectedInstance != nil {
-					s.queryForm = newQueryForm(*s.selectedInstance)
-					s.viewState = ViewQuery
-				}
-				return s, nil
-			case "F": // Failover (Confirm)
-				if s.selectedInstance != nil {
-					s.pendingAction = "failover"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			case "P": // Promote Replica (Confirm)
-				if s.selectedInstance != nil {
-					s.pendingAction = "promote-replica"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			case "S": // Switchover (Confirm)
-				if s.selectedInstance != nil {
-					s.pendingAction = "switchover"
-					s.actionSource = ViewDetail
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			case "C": // Clone
-				if s.selectedInstance != nil {
-					s.cloneForm = newCloneForm(*s.selectedInstance)
-					s.viewState = ViewClone
-				}
-				return s, nil
-			case "D": // Databases sub-view
-				if s.selectedInstance != nil {
-					return s, tea.Batch(s.spinner.Start(""), s.fetchDatabasesCmd(*s.selectedInstance))
-				}
-				return s, nil
-			case "U": // Users sub-view
-				if s.selectedInstance != nil {
-					return s, tea.Batch(s.spinner.Start(""), s.fetchUsersCmd(*s.selectedInstance))
-				}
-				return s, nil
-			case "B": // Backups sub-view (read-only)
-				if s.selectedInstance != nil {
-					return s, tea.Batch(s.spinner.Start(""), s.fetchBackupsCmd(*s.selectedInstance))
-				}
-				return s, nil
-			}
-
-		case ViewDatabases:
-			switch msg.String() {
-			case "q", "esc":
-				s.viewState = ViewDetail
-				return s, nil
-			case "r":
-				if s.selectedInstance != nil {
-					return s, tea.Batch(s.spinner.Start(""), s.fetchDatabasesCmd(*s.selectedInstance))
-				}
-			case "n": // Create
-				if s.selectedInstance != nil {
-					s.dbCreateForm = newDatabaseCreateForm(*s.selectedInstance)
-					s.viewState = ViewDatabaseCreate
-				}
-				return s, nil
-			case "d": // Delete (Confirm)
-				if idx := s.dbTable.Cursor(); idx >= 0 && idx < len(s.databases) {
-					s.selectedDatabase = &s.databases[idx]
-					s.pendingAction = "db-delete"
-					s.actionSource = ViewDatabases
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			}
-			var updatedTable *components.StandardTable
-			updatedTable, cmd = s.dbTable.Update(msg)
-			s.dbTable = updatedTable
-			return s, cmd
-
-		case ViewDatabaseCreate:
-			result, fcmd := s.dbCreateForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewDatabases
-				return s, nil
-			}
-			if result.Submitted && s.selectedInstance != nil {
-				s.pendingAction = "db-create"
-				s.viewState = ViewDatabases
-				return s, s.createDatabaseCmd(*s.selectedInstance, s.dbCreateForm.Value("Name"))
-			}
-			return s, fcmd
-
-		case ViewUsers:
-			switch msg.String() {
-			case "q", "esc":
-				s.viewState = ViewDetail
-				return s, nil
-			case "r":
-				if s.selectedInstance != nil {
-					return s, tea.Batch(s.spinner.Start(""), s.fetchUsersCmd(*s.selectedInstance))
-				}
-			case "n": // Create
-				if s.selectedInstance != nil {
-					s.userCreateForm = newUserCreateForm(*s.selectedInstance)
-					s.viewState = ViewUserCreate
-				}
-				return s, nil
-			case "d": // Delete (Confirm)
-				if idx := s.userTable.Cursor(); idx >= 0 && idx < len(s.users) {
-					s.selectedDBUser = &s.users[idx]
-					s.pendingAction = "user-delete"
-					s.actionSource = ViewUsers
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			}
-			var updatedUserTable *components.StandardTable
-			updatedUserTable, cmd = s.userTable.Update(msg)
-			s.userTable = updatedUserTable
-			return s, cmd
-
-		case ViewUserCreate:
-			result, fcmd := s.userCreateForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewUsers
-				return s, nil
-			}
-			if result.Submitted && s.selectedInstance != nil {
-				s.pendingAction = "user-create"
-				s.viewState = ViewUsers
-				return s, s.createUserCmd(*s.selectedInstance, s.userCreateForm.Value("Name"), s.userCreateForm.Value("Password"))
-			}
-			return s, fcmd
-
-		case ViewBackups:
-			switch msg.String() {
-			case "q", "esc":
-				s.viewState = ViewDetail
-				return s, nil
-			case "r":
-				if s.selectedInstance != nil {
-					return s, tea.Batch(s.spinner.Start(""), s.fetchBackupsCmd(*s.selectedInstance))
-				}
-			}
-			var updatedBackupTable *components.StandardTable
-			updatedBackupTable, cmd = s.backupTable.Update(msg)
-			s.backupTable = updatedBackupTable
-			return s, cmd
-
-		case ViewClone:
-			result, fcmd := s.cloneForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewDetail
-				return s, nil
-			}
-			if result.Submitted && s.selectedInstance != nil {
-				s.pendingCloneDest = s.cloneForm.Value("Destination Name")
-				s.pendingClonePITR = s.cloneForm.Value("Point In Time (optional, RFC3339)")
-				s.pendingAction = "clone"
-				s.actionSource = ViewDetail
-				s.viewState = ViewConfirmation
-			}
-			return s, fcmd
-
-		case ViewConfirmation:
-			switch msg.String() {
-			case "y", "enter":
-				if s.pendingAction == "delete" {
-					// First confirmation only escalates to a second one —
-					// deleting a Cloud SQL instance destroys all its
-					// databases with no undo.
-					s.pendingAction = "delete-confirm2"
-					return s, nil
-				}
-				instanceNameBeforeDelete := ""
-				if s.selectedInstance != nil {
-					instanceNameBeforeDelete = s.selectedInstance.Name
-				}
-				var actionCmd tea.Cmd
-				switch s.pendingAction {
-				case "start":
-					actionCmd = s.startInstanceCmd(*s.selectedInstance)
-				case "stop":
-					actionCmd = s.stopInstanceCmd(*s.selectedInstance)
-				case "delete-confirm2":
-					if s.selectedInstance != nil {
-						actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
-						s.selectedInstance = nil
-					}
-					s.actionSource = ViewList
-				case "restart":
-					actionCmd = s.restartInstanceCmd(*s.selectedInstance)
-				case "failover":
-					actionCmd = s.failoverInstanceCmd(*s.selectedInstance)
-				case "promote-replica":
-					actionCmd = s.promoteReplicaCmd(*s.selectedInstance)
-				case "switchover":
-					actionCmd = s.switchoverInstanceCmd(*s.selectedInstance)
-				case "clone":
-					if s.selectedInstance != nil {
-						actionCmd = s.cloneInstanceCmd(*s.selectedInstance, s.pendingCloneDest, s.pendingClonePITR)
-					}
-					s.pendingCloneDest = ""
-					s.pendingClonePITR = ""
-				case "db-delete":
-					if s.selectedInstance != nil && s.selectedDatabase != nil {
-						actionCmd = s.deleteDatabaseCmd(*s.selectedInstance, *s.selectedDatabase)
-					}
-				case "user-delete":
-					if s.selectedInstance != nil && s.selectedDBUser != nil {
-						actionCmd = s.deleteUserCmd(*s.selectedInstance, *s.selectedDBUser)
-					}
-				}
-				// Snapshot the instance-level action/name for job recording
-				// before pendingAction/selectedInstance are reset below —
-				// db-delete/user-delete record against their own
-				// selectedDatabase/selectedDBUser instead, so skip those.
-				if s.pendingAction != "db-delete" && s.pendingAction != "user-delete" && actionCmd != nil {
-					jobAction := s.pendingAction
-					if jobAction == "delete-confirm2" {
-						jobAction = "delete"
-					}
-					s.pendingJobAction = jobAction
-					if s.selectedInstance != nil {
-						s.pendingJobName = s.selectedInstance.Name
-					} else {
-						s.pendingJobName = instanceNameBeforeDelete
-					}
-				}
-				s.viewState = s.actionSource
-				// "db-delete"/"user-delete" are reset by the actionResultMsg
-				// handler once the async call resolves, so it knows to
-				// re-fetch that sub-list on success.
-				if s.pendingAction != "db-delete" && s.pendingAction != "user-delete" {
-					s.pendingAction = ""
-				}
-				return s, actionCmd
-
-			case "n", "esc", "q":
-				s.viewState = s.actionSource
-				s.pendingAction = ""
-				return s, nil
-			}
-
-		case ViewCreate:
-			result, fcmd := s.createForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewList
-				return s, nil
-			}
-			if result.Submitted {
-				vals := s.createForm.Values()
-				s.viewState = ViewList
-				return s, s.CreateInstanceCmd(vals["Name"], vals["Region"], vals["Database Version"], vals["Tier"])
-			}
-			return s, fcmd
-
-		case ViewUpdate:
-			result, fcmd := s.updateForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewList
-				return s, nil
-			}
-			if result.Submitted && s.selectedInstance != nil {
-				inst := *s.selectedInstance
-				tier := s.updateForm.Value("Tier")
-				s.viewState = ViewList
-				return s, s.updateInstanceTierCmd(inst, tier)
-			}
-			return s, fcmd
-
-		case ViewQuery:
-			result, fcmd := s.queryForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewDetail
-				if s.selectedInstance == nil {
-					s.viewState = ViewList
-				}
-				return s, nil
-			}
-			if result.Submitted && s.selectedInstance != nil {
-				inst := *s.selectedInstance
-				database := s.queryForm.Value("Database")
-				stmt := s.queryForm.Value("SQL Statement")
-				return s, tea.Batch(s.spinner.Start("Running query..."), s.executeQueryCmd(inst, database, stmt))
-			}
-			return s, fcmd
-
-		case ViewQueryResult:
-			switch msg.String() {
-			case "esc", "q":
-				s.viewState = ViewDetail
-				if s.selectedInstance == nil {
-					s.viewState = ViewList
-				}
-				s.queryResult = nil
-				s.queryErr = nil
-				return s, nil
-			}
-			if s.queryTable != nil {
-				var updatedTable *components.StandardTable
-				updatedTable, cmd = s.queryTable.Update(msg)
-				s.queryTable = updatedTable
-				return s, cmd
-			}
-		}
 	}
 
 	return s, nil
@@ -1410,4 +930,543 @@ func (s *Service) fetchBackupsCmd(i Instance) tea.Cmd {
 		}
 		return backupsMsg{backups: backups}
 	}
+}
+
+func (s *Service) handleActionResult(msg actionResultMsg) (tea.Model, tea.Cmd) {
+	// Databases/Users sub-view actions re-fetch just that sub-list on
+	// success instead of the generic instance-list Refresh() below.
+	if s.pendingAction == "db-create" || s.pendingAction == "db-delete" {
+		s.pendingAction = ""
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if s.selectedInstance != nil {
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchDatabasesCmd(*s.selectedInstance),
+			)
+		}
+		return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+	}
+	if s.pendingAction == "user-create" || s.pendingAction == "user-delete" {
+		s.pendingAction = ""
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if s.selectedInstance != nil {
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchUsersCmd(*s.selectedInstance),
+			)
+		}
+		return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+	}
+	s.pendingJobAction = ""
+	s.pendingJobName = ""
+	if msg.err != nil {
+		s.err = msg.err
+		return s, func() tea.Msg {
+			return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+		}
+	} else if msg.msg != "" {
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+	}
+	return s, s.Refresh()
+
+}
+
+func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle filter mode (only in list view)
+	if s.viewState == ViewList {
+		result := s.filterSession.HandleKey(msg)
+
+		if result.Handled {
+			if result.Cmd != nil {
+				return s, result.Cmd
+			}
+			if !result.ShouldContinue {
+				return s, nil
+			}
+			// Continue processing other keys
+		}
+	}
+
+	switch s.viewState {
+	case ViewList:
+		return s.handleViewListKey(msg)
+	case ViewDetail:
+		return s.handleViewDetailKey(msg)
+	case ViewDatabases:
+		return s.handleViewDatabasesKey(msg)
+	case ViewDatabaseCreate:
+		return s.handleViewDatabaseCreateKey(msg)
+	case ViewUsers:
+		return s.handleViewUsersKey(msg)
+	case ViewUserCreate:
+		return s.handleViewUserCreateKey(msg)
+	case ViewBackups:
+		return s.handleViewBackupsKey(msg)
+	case ViewClone:
+		return s.handleViewCloneKey(msg)
+	case ViewConfirmation:
+		return s.handleViewConfirmationKey(msg)
+	case ViewCreate:
+		return s.handleViewCreateKey(msg)
+	case ViewUpdate:
+		return s.handleViewUpdateKey(msg)
+	case ViewQuery:
+		return s.handleViewQueryKey(msg)
+	case ViewQueryResult:
+		return s.handleViewQueryResultKey(msg)
+	}
+
+	return s, nil
+}
+
+func (s *Service) handleViewListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg.String() {
+	case "r":
+		return s, s.fetchInstancesCmd(true)
+	case "enter":
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.viewState = ViewDetail
+		}
+	case "s": // Start
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.pendingAction = "start"
+			s.actionSource = ViewList
+			s.viewState = ViewConfirmation
+		}
+	case "x": // Stop
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.pendingAction = "stop"
+			s.actionSource = ViewList
+			s.viewState = ViewConfirmation
+		}
+	case "t": // Restart
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.pendingAction = "restart"
+			s.actionSource = ViewList
+			s.viewState = ViewConfirmation
+		}
+	case "l": // Logs
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(s.instances) {
+			inst := s.instances[idx]
+			// Cloud SQL filter uses database_id usually project:instance
+			filter := fmt.Sprintf(`resource.type="cloudsql_database" AND resource.labels.database_id="%s:%s"`, s.projectID, inst.Name)
+			heading := fmt.Sprintf("Database: %s", inst.Name)
+			return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "sql", Heading: heading} }
+		}
+	case "n": // Create
+		s.createForm = newInstanceCreateForm()
+		s.viewState = ViewCreate
+		return s, nil
+	case "e": // Execute SQL (read-only, data-plane)
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.queryForm = newQueryForm(*s.selectedInstance)
+			s.viewState = ViewQuery
+			return s, nil
+		}
+	case "u": // Update
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+			s.viewState = ViewUpdate
+			return s, nil
+		}
+	case "d": // Delete (Confirm, double)
+		instances := s.getFilteredInstances(s.instances, s.filter.Value())
+		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+			s.selectedInstance = &instances[idx]
+			s.pendingAction = "delete"
+			s.actionSource = ViewList
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+	}
+	s.table, cmd = s.table.Update(msg)
+	return s, cmd
+}
+
+func (s *Service) handleViewDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		s.viewState = ViewList
+		s.selectedInstance = nil
+		return s, nil
+	case "s":
+		if s.selectedInstance != nil {
+			s.pendingAction = "start"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+	case "x":
+		if s.selectedInstance != nil {
+			s.pendingAction = "stop"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+	case "u":
+		if s.selectedInstance != nil {
+			s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+			s.viewState = ViewUpdate
+		}
+		return s, nil
+	case "d": // Delete (Confirm, double)
+		if s.selectedInstance != nil {
+			s.pendingAction = "delete"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+		return s, nil
+	case "t":
+		if s.selectedInstance != nil {
+			s.pendingAction = "restart"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+	case "e": // Execute SQL (read-only, data-plane)
+		if s.selectedInstance != nil {
+			s.queryForm = newQueryForm(*s.selectedInstance)
+			s.viewState = ViewQuery
+		}
+		return s, nil
+	case "F": // Failover (Confirm)
+		if s.selectedInstance != nil {
+			s.pendingAction = "failover"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+		return s, nil
+	case "P": // Promote Replica (Confirm)
+		if s.selectedInstance != nil {
+			s.pendingAction = "promote-replica"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+		return s, nil
+	case "S": // Switchover (Confirm)
+		if s.selectedInstance != nil {
+			s.pendingAction = "switchover"
+			s.actionSource = ViewDetail
+			s.viewState = ViewConfirmation
+		}
+		return s, nil
+	case "C": // Clone
+		if s.selectedInstance != nil {
+			s.cloneForm = newCloneForm(*s.selectedInstance)
+			s.viewState = ViewClone
+		}
+		return s, nil
+	case "D": // Databases sub-view
+		if s.selectedInstance != nil {
+			return s, tea.Batch(s.spinner.Start(""), s.fetchDatabasesCmd(*s.selectedInstance))
+		}
+		return s, nil
+	case "U": // Users sub-view
+		if s.selectedInstance != nil {
+			return s, tea.Batch(s.spinner.Start(""), s.fetchUsersCmd(*s.selectedInstance))
+		}
+		return s, nil
+	case "B": // Backups sub-view (read-only)
+		if s.selectedInstance != nil {
+			return s, tea.Batch(s.spinner.Start(""), s.fetchBackupsCmd(*s.selectedInstance))
+		}
+		return s, nil
+	}
+	return s, nil
+}
+
+func (s *Service) handleViewDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg.String() {
+	case "q", "esc":
+		s.viewState = ViewDetail
+		return s, nil
+	case "r":
+		if s.selectedInstance != nil {
+			return s, tea.Batch(s.spinner.Start(""), s.fetchDatabasesCmd(*s.selectedInstance))
+		}
+	case "n": // Create
+		if s.selectedInstance != nil {
+			s.dbCreateForm = newDatabaseCreateForm(*s.selectedInstance)
+			s.viewState = ViewDatabaseCreate
+		}
+		return s, nil
+	case "d": // Delete (Confirm)
+		if idx := s.dbTable.Cursor(); idx >= 0 && idx < len(s.databases) {
+			s.selectedDatabase = &s.databases[idx]
+			s.pendingAction = "db-delete"
+			s.actionSource = ViewDatabases
+			s.viewState = ViewConfirmation
+		}
+		return s, nil
+	}
+	var updatedTable *components.StandardTable
+	updatedTable, cmd = s.dbTable.Update(msg)
+	s.dbTable = updatedTable
+	return s, cmd
+}
+
+func (s *Service) handleViewDatabaseCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result, fcmd := s.dbCreateForm.Update(msg)
+	if result.Cancelled {
+		s.viewState = ViewDatabases
+		return s, nil
+	}
+	if result.Submitted && s.selectedInstance != nil {
+		s.pendingAction = "db-create"
+		s.viewState = ViewDatabases
+		return s, s.createDatabaseCmd(*s.selectedInstance, s.dbCreateForm.Value("Name"))
+	}
+	return s, fcmd
+}
+
+func (s *Service) handleViewUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg.String() {
+	case "q", "esc":
+		s.viewState = ViewDetail
+		return s, nil
+	case "r":
+		if s.selectedInstance != nil {
+			return s, tea.Batch(s.spinner.Start(""), s.fetchUsersCmd(*s.selectedInstance))
+		}
+	case "n": // Create
+		if s.selectedInstance != nil {
+			s.userCreateForm = newUserCreateForm(*s.selectedInstance)
+			s.viewState = ViewUserCreate
+		}
+		return s, nil
+	case "d": // Delete (Confirm)
+		if idx := s.userTable.Cursor(); idx >= 0 && idx < len(s.users) {
+			s.selectedDBUser = &s.users[idx]
+			s.pendingAction = "user-delete"
+			s.actionSource = ViewUsers
+			s.viewState = ViewConfirmation
+		}
+		return s, nil
+	}
+	var updatedUserTable *components.StandardTable
+	updatedUserTable, cmd = s.userTable.Update(msg)
+	s.userTable = updatedUserTable
+	return s, cmd
+}
+
+func (s *Service) handleViewUserCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result, fcmd := s.userCreateForm.Update(msg)
+	if result.Cancelled {
+		s.viewState = ViewUsers
+		return s, nil
+	}
+	if result.Submitted && s.selectedInstance != nil {
+		s.pendingAction = "user-create"
+		s.viewState = ViewUsers
+		return s, s.createUserCmd(*s.selectedInstance, s.userCreateForm.Value("Name"), s.userCreateForm.Value("Password"))
+	}
+	return s, fcmd
+}
+
+func (s *Service) handleViewBackupsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg.String() {
+	case "q", "esc":
+		s.viewState = ViewDetail
+		return s, nil
+	case "r":
+		if s.selectedInstance != nil {
+			return s, tea.Batch(s.spinner.Start(""), s.fetchBackupsCmd(*s.selectedInstance))
+		}
+	}
+	var updatedBackupTable *components.StandardTable
+	updatedBackupTable, cmd = s.backupTable.Update(msg)
+	s.backupTable = updatedBackupTable
+	return s, cmd
+}
+
+func (s *Service) handleViewCloneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result, fcmd := s.cloneForm.Update(msg)
+	if result.Cancelled {
+		s.viewState = ViewDetail
+		return s, nil
+	}
+	if result.Submitted && s.selectedInstance != nil {
+		s.pendingCloneDest = s.cloneForm.Value("Destination Name")
+		s.pendingClonePITR = s.cloneForm.Value("Point In Time (optional, RFC3339)")
+		s.pendingAction = "clone"
+		s.actionSource = ViewDetail
+		s.viewState = ViewConfirmation
+	}
+	return s, fcmd
+}
+
+func (s *Service) handleViewConfirmationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "y", "enter":
+		if s.pendingAction == "delete" {
+			// First confirmation only escalates to a second one —
+			// deleting a Cloud SQL instance destroys all its
+			// databases with no undo.
+			s.pendingAction = "delete-confirm2"
+			return s, nil
+		}
+		instanceNameBeforeDelete := ""
+		if s.selectedInstance != nil {
+			instanceNameBeforeDelete = s.selectedInstance.Name
+		}
+		var actionCmd tea.Cmd
+		switch s.pendingAction {
+		case "start":
+			actionCmd = s.startInstanceCmd(*s.selectedInstance)
+		case "stop":
+			actionCmd = s.stopInstanceCmd(*s.selectedInstance)
+		case "delete-confirm2":
+			if s.selectedInstance != nil {
+				actionCmd = s.deleteInstanceCmd(*s.selectedInstance)
+				s.selectedInstance = nil
+			}
+			s.actionSource = ViewList
+		case "restart":
+			actionCmd = s.restartInstanceCmd(*s.selectedInstance)
+		case "failover":
+			actionCmd = s.failoverInstanceCmd(*s.selectedInstance)
+		case "promote-replica":
+			actionCmd = s.promoteReplicaCmd(*s.selectedInstance)
+		case "switchover":
+			actionCmd = s.switchoverInstanceCmd(*s.selectedInstance)
+		case "clone":
+			if s.selectedInstance != nil {
+				actionCmd = s.cloneInstanceCmd(*s.selectedInstance, s.pendingCloneDest, s.pendingClonePITR)
+			}
+			s.pendingCloneDest = ""
+			s.pendingClonePITR = ""
+		case "db-delete":
+			if s.selectedInstance != nil && s.selectedDatabase != nil {
+				actionCmd = s.deleteDatabaseCmd(*s.selectedInstance, *s.selectedDatabase)
+			}
+		case "user-delete":
+			if s.selectedInstance != nil && s.selectedDBUser != nil {
+				actionCmd = s.deleteUserCmd(*s.selectedInstance, *s.selectedDBUser)
+			}
+		}
+		// Snapshot the instance-level action/name for job recording
+		// before pendingAction/selectedInstance are reset below —
+		// db-delete/user-delete record against their own
+		// selectedDatabase/selectedDBUser instead, so skip those.
+		if s.pendingAction != "db-delete" && s.pendingAction != "user-delete" && actionCmd != nil {
+			jobAction := s.pendingAction
+			if jobAction == "delete-confirm2" {
+				jobAction = "delete"
+			}
+			s.pendingJobAction = jobAction
+			if s.selectedInstance != nil {
+				s.pendingJobName = s.selectedInstance.Name
+			} else {
+				s.pendingJobName = instanceNameBeforeDelete
+			}
+		}
+		s.viewState = s.actionSource
+		// "db-delete"/"user-delete" are reset by the actionResultMsg
+		// handler once the async call resolves, so it knows to
+		// re-fetch that sub-list on success.
+		if s.pendingAction != "db-delete" && s.pendingAction != "user-delete" {
+			s.pendingAction = ""
+		}
+		return s, actionCmd
+
+	case "n", "esc", "q":
+		s.viewState = s.actionSource
+		s.pendingAction = ""
+		return s, nil
+	}
+	return s, nil
+}
+
+func (s *Service) handleViewCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result, fcmd := s.createForm.Update(msg)
+	if result.Cancelled {
+		s.viewState = ViewList
+		return s, nil
+	}
+	if result.Submitted {
+		vals := s.createForm.Values()
+		s.viewState = ViewList
+		return s, s.CreateInstanceCmd(vals["Name"], vals["Region"], vals["Database Version"], vals["Tier"])
+	}
+	return s, fcmd
+}
+
+func (s *Service) handleViewUpdateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result, fcmd := s.updateForm.Update(msg)
+	if result.Cancelled {
+		s.viewState = ViewList
+		return s, nil
+	}
+	if result.Submitted && s.selectedInstance != nil {
+		inst := *s.selectedInstance
+		tier := s.updateForm.Value("Tier")
+		s.viewState = ViewList
+		return s, s.updateInstanceTierCmd(inst, tier)
+	}
+	return s, fcmd
+}
+
+func (s *Service) handleViewQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	result, fcmd := s.queryForm.Update(msg)
+	if result.Cancelled {
+		s.viewState = ViewDetail
+		if s.selectedInstance == nil {
+			s.viewState = ViewList
+		}
+		return s, nil
+	}
+	if result.Submitted && s.selectedInstance != nil {
+		inst := *s.selectedInstance
+		database := s.queryForm.Value("Database")
+		stmt := s.queryForm.Value("SQL Statement")
+		return s, tea.Batch(s.spinner.Start("Running query..."), s.executeQueryCmd(inst, database, stmt))
+	}
+	return s, fcmd
+}
+
+func (s *Service) handleViewQueryResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+	switch msg.String() {
+	case "esc", "q":
+		s.viewState = ViewDetail
+		if s.selectedInstance == nil {
+			s.viewState = ViewList
+		}
+		s.queryResult = nil
+		s.queryErr = nil
+		return s, nil
+	}
+	if s.queryTable != nil {
+		var updatedTable *components.StandardTable
+		updatedTable, cmd = s.queryTable.Update(msg)
+		s.queryTable = updatedTable
+		return s, cmd
+	}
+	return s, nil
 }
