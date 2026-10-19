@@ -87,6 +87,18 @@ func newNodePoolUpgradeForm(cluster Cluster, pool NodePool) components.FormModel
 	})
 }
 
+// sanitizeContextName removes potentially dangerous characters from a context name
+// leaving only alphanumeric characters, underscores, hyphens, periods, and colons.
+func sanitizeContextName(ctx string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '.' || r == ':' {
+			return r
+		}
+		return -1
+	}, ctx)
+}
+
 // Msg types
 type clustersMsg []Cluster
 type errMsg error
@@ -300,7 +312,7 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return actionResultMsg{err: fmt.Errorf("failed to get cluster credentials: %w", msg.err)}
 			}
 		}
-		return s, tea.ExecProcess(exec.Command("k9s", "--context", msg.context), func(err error) tea.Msg {
+		return s, tea.ExecProcess(exec.Command("k9s", "--context", sanitizeContextName(msg.context)), func(err error) tea.Msg {
 			if err != nil {
 				return actionResultMsg{err: err}
 			}
@@ -731,7 +743,7 @@ func (s *Service) getFilteredClusters(clusters []Cluster, query string) []Cluste
 
 func (s *Service) launchK9s(c Cluster) tea.Cmd {
 	contextName := fmt.Sprintf("gke_%s_%s_%s", s.projectID, c.Location, c.Name)
-	return tea.ExecProcess(exec.Command("k9s", "--context", contextName), func(err error) tea.Msg {
+	return tea.ExecProcess(exec.Command("k9s", "--context", sanitizeContextName(contextName)), func(err error) tea.Msg {
 		if err != nil {
 			// Fallback: Try to get credentials first, then launch k9s.
 			// The user might not have context set up.
