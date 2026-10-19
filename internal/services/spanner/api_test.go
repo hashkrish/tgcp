@@ -71,7 +71,7 @@ func TestValidateReadOnlySQL(t *testing.T) {
 			wantErr: true, // caught by semicolon check, but tests the intent
 		},
 		{
-			name:    "SELECT containing write keyword but not as distinct token",
+			name: "SELECT containing write keyword but not as distinct token",
 			// this should fail because `drop` is not a distinct word? No, writeKeywordRe matches \bdrop\b
 			// let's test a word that *contains* drop, like `dropbox`
 			stmt:    "SELECT dropbox_id FROM Users",
