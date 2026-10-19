@@ -506,12 +506,9 @@ func toDockerImage(img *artifactregistrypb.DockerImage) DockerImage {
 	// "dockerImages" segment for "packages/{pkg}/versions/{digest}" — but
 	// Artifact Registry treats the dockerImages name as an acceptable alias
 	// for the version name in DeleteVersion, so it's kept as-is.
-	var uploadTime, buildTime time.Time
+	var uploadTime time.Time
 	if t := img.GetUploadTime(); t != nil {
 		uploadTime = t.AsTime()
-	}
-	if t := img.GetBuildTime(); t != nil {
-		buildTime = t.AsTime()
 	}
 
 	return DockerImage{
@@ -520,7 +517,6 @@ func toDockerImage(img *artifactregistrypb.DockerImage) DockerImage {
 		Tags:           img.GetTags(),
 		ImageSizeBytes: img.GetImageSizeBytes(),
 		UploadTime:     uploadTime,
-		BuildTime:      buildTime,
 		MediaType:      img.GetMediaType(),
 	}
 }
