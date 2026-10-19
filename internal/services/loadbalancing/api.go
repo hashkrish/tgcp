@@ -165,6 +165,19 @@ func (c *Client) ListUrlMaps(projectID string) ([]UrlMap, error) {
 	var result []UrlMap
 	req := c.service.UrlMaps.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.UrlMapsAggregatedList) error {
+		count := 0
+		for _, scoped := range page.Items {
+			count += len(scoped.UrlMaps)
+		}
+		if count > 0 {
+			// Grow the slice's capacity by the number of elements in this page
+			// instead of completely overwriting it.
+			if cap(result) < len(result)+count {
+				newResult := make([]UrlMap, len(result), len(result)+count)
+				copy(newResult, result)
+				result = newResult
+			}
+		}
 		for scope, scoped := range page.Items {
 			for _, um := range scoped.UrlMaps {
 				result = append(result, UrlMap{
