@@ -63,8 +63,8 @@ func TestValidateReadOnlySQL(t *testing.T) {
 		{"write after string", "SELECT 'test'; DELETE FROM users", true},
 		{"write after comment", "SELECT * FROM users; /* end */ DROP TABLE users", true},
 
-        // Token concatenation bypass
-        {"block comment concat", "DELETE/**/FROM users", true},
+		// Token concatenation bypass
+		{"block comment concat", "DELETE/**/FROM users", true},
 	}
 
 	for _, tt := range tests {

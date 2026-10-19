@@ -488,7 +488,7 @@ func ValidateReadOnlySQL(stmt string) error {
 		return fmt.Errorf("SQL statement is required")
 	}
 
-    stripped, err := stripCommentsAndStrings(trimmed)
+	stripped, err := stripCommentsAndStrings(trimmed)
 	if err != nil {
 		return err
 	}
@@ -510,10 +510,9 @@ func ValidateReadOnlySQL(stmt string) error {
 		return fmt.Errorf("only SELECT/WITH/SHOW/EXPLAIN/DESCRIBE statements are allowed")
 	}
 
-    words := strings.FieldsFunc(lower, func(r rune) bool {
+	words := strings.FieldsFunc(lower, func(r rune) bool {
 		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '(' || r == ')' || r == ','
 	})
-
 
 	// A special exemption: "show create" is a valid read-only command that contains "create".
 	// We handle this by replacing "show create" with "show" before keyword scanning.
