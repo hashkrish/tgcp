@@ -14,6 +14,7 @@ import (
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/styles"
 	"github.com/yogirk/tgcp/internal/ui/components"
+	"github.com/yogirk/tgcp/internal/utils"
 )
 
 const CacheTTL = 30 * time.Second
@@ -90,8 +91,8 @@ func newServiceUpdateForm(svc RunService) components.FormModel {
 		{Label: "Container Image", Default: svc.Image, Placeholder: "gcr.io/my-project/my-image:latest", Required: true},
 		{Label: "CPU Limit", Default: cpu, Placeholder: "1"},
 		{Label: "Memory Limit", Default: mem, Placeholder: "512Mi"},
-		{Label: "Concurrency", Default: concurrency, Validate: validateOptionalInt},
-		{Label: "Timeout Seconds", Default: timeout, Validate: validateOptionalInt},
+		{Label: "Concurrency", Default: concurrency, Validate: utils.ValidateOptionalInt},
+		{Label: "Timeout Seconds", Default: timeout, Validate: utils.ValidateOptionalInt},
 		{Label: "Min Scale", Default: minScale},
 		{Label: "Max Scale", Default: maxScale},
 		{Label: "VPC Connector", Default: vpc},
@@ -113,18 +114,6 @@ func latestReadyRevisionDetail(svc RunService) *Revision {
 		}
 	}
 	return nil
-}
-
-// validateOptionalInt allows an empty value (meaning "leave unchanged") or
-// a valid base-10 integer.
-func validateOptionalInt(v string) string {
-	if v == "" {
-		return ""
-	}
-	if _, err := strconv.ParseInt(v, 10, 64); err != nil {
-		return "must be a whole number"
-	}
-	return ""
 }
 
 // revisionTagPattern matches a valid Knative/Cloud Run traffic tag: lowercase
