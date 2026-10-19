@@ -1013,14 +1013,15 @@ func (s *Service) renderBackendDetailView() string {
 		healthCheck = "-"
 	}
 
-	rows := []components.KeyValue{
-		{Key: "Name", Value: bs.Name},
-		{Key: "Region", Value: bs.Region},
-		{Key: "Protocol", Value: bs.Protocol},
-		{Key: "Load Balancing Scheme", Value: bs.LoadBalancingScheme},
-		{Key: "Health Check", Value: healthCheck},
-		{Key: "Backend Count", Value: fmt.Sprintf("%d", bs.BackendCount)},
-	}
+	rows := make([]components.KeyValue, 0, 13) // max 13 rows based on below conditions
+	rows = append(rows,
+		components.KeyValue{Key: "Name", Value: bs.Name},
+		components.KeyValue{Key: "Region", Value: bs.Region},
+		components.KeyValue{Key: "Protocol", Value: bs.Protocol},
+		components.KeyValue{Key: "Load Balancing Scheme", Value: bs.LoadBalancingScheme},
+		components.KeyValue{Key: "Health Check", Value: healthCheck},
+		components.KeyValue{Key: "Backend Count", Value: fmt.Sprintf("%d", bs.BackendCount)},
+	)
 	if bs.Description != "" {
 		rows = append(rows, components.KeyValue{Key: "Description", Value: bs.Description})
 	}
