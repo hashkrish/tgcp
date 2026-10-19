@@ -4,3 +4,5 @@ linters:
   enable:
     - unconvert
     - misspell
+run:
+  go: '1.24'
