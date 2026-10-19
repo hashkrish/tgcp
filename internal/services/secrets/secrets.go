@@ -1328,10 +1328,13 @@ func (s *Service) getFilteredSecrets(secrets []Secret, query string) []Secret {
 	}
 	return components.FilterSlice(secrets, query, func(sec Secret, q string) bool {
 		// Build label string for search
-		var labelStr string
+		var sb strings.Builder
 		for k, v := range sec.Labels {
-			labelStr += k + "=" + v + " "
+			sb.WriteString(k)
+			sb.WriteString("=")
+			sb.WriteString(v)
+			sb.WriteString(" ")
 		}
-		return components.ContainsMatch(sec.Name, sec.Replication, labelStr)(q)
+		return components.ContainsMatch(sec.Name, sec.Replication, sb.String())(q)
 	})
 }
