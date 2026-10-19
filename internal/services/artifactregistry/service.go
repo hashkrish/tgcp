@@ -3,6 +3,7 @@ package artifactregistry
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1000,11 +1001,14 @@ func (s *Service) renderDetailView() string {
 		rows = append(rows, components.KeyValue{Key: "Labels", Value: formatLabels(s.selectedItem.Labels)})
 	}
 	if s.selectedItem.CleanupPolicyCount > 0 {
-		cleanup := fmt.Sprintf("%d policies", s.selectedItem.CleanupPolicyCount)
+		var builder strings.Builder
+		builder.Grow(32)
+		builder.WriteString(strconv.Itoa(int(s.selectedItem.CleanupPolicyCount)))
+		builder.WriteString(" policies")
 		if s.selectedItem.CleanupPolicyDryRun {
-			cleanup += " (dry run)"
+			builder.WriteString(" (dry run)")
 		}
-		rows = append(rows, components.KeyValue{Key: "Cleanup Policies", Value: cleanup})
+		rows = append(rows, components.KeyValue{Key: "Cleanup Policies", Value: builder.String()})
 	}
 	if !s.selectedItem.CreateTime.IsZero() {
 		rows = append(rows, components.KeyValue{Key: "Created", Value: s.selectedItem.CreateTime.Format("2006-01-02 15:04:05")})
