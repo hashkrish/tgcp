@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,6 +32,8 @@ func newClusterCreateForm() components.FormModel {
 }
 
 const CacheTTL = 60 * time.Second
+
+var validGCPParamRegex = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 
 // -----------------------------------------------------------------------------
 // Models & Msgs
@@ -730,6 +733,13 @@ func (s *Service) getFilteredClusters(clusters []Cluster, query string) []Cluste
 }
 
 func (s *Service) launchK9s(c Cluster) tea.Cmd {
+	// Validate inputs to prevent command injection
+	if !validGCPParamRegex.MatchString(c.Name) || !validGCPParamRegex.MatchString(c.Location) || !validGCPParamRegex.MatchString(s.projectID) {
+		return func() tea.Msg {
+			return actionResultMsg{err: fmt.Errorf("invalid cluster parameters for k9s launch")}
+		}
+	}
+
 	contextName := fmt.Sprintf("gke_%s_%s_%s", s.projectID, c.Location, c.Name)
 	return tea.ExecProcess(exec.Command("k9s", "--context", contextName), func(err error) tea.Msg {
 		if err != nil {
