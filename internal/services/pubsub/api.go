@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yogirk/tgcp/internal/demo"
+	"google.golang.org/api/option"
 	"google.golang.org/api/pubsub/v1"
 )
 
@@ -15,11 +16,11 @@ type Client struct {
 	service *pubsub.Service
 }
 
-func NewClient(ctx context.Context) (*Client, error) {
+func NewClient(ctx context.Context, opts ...option.ClientOption) (*Client, error) {
 	if demo.Enabled {
 		return &Client{}, nil
 	}
-	svc, err := pubsub.NewService(ctx)
+	svc, err := pubsub.NewService(ctx, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("pubsub client: %w", err)
 	}
