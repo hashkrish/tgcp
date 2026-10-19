@@ -1203,7 +1203,7 @@ func (s *Service) Reset() {
 	s.selectedGroup = nil
 	s.pendingAction = ""
 	s.iamBindings = nil
-	s.err = nil          // Fix: Clear previous errors on reset
+	s.err = nil
 	s.table.SetCursor(0) // Optional: reset cursor to top
 	s.groupTable.SetCursor(0)
 	s.filter.ExitFilterMode()
