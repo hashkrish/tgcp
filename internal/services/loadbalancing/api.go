@@ -14,6 +14,8 @@
 package loadbalancing
 
 import (
+	"slices"
+
 	"context"
 	"fmt"
 	"strconv"
@@ -51,6 +53,11 @@ func (c *Client) ListBackendServices(projectID string) ([]BackendService, error)
 	var result []BackendService
 	req := c.service.BackendServices.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.BackendServiceAggregatedList) error {
+		var count int
+		for _, scoped := range page.Items {
+			count += len(scoped.BackendServices)
+		}
+		result = slices.Grow(result, count)
 		for scope, scoped := range page.Items {
 			for _, bs := range scoped.BackendServices {
 				result = append(result, BackendService{
@@ -92,6 +99,11 @@ func (c *Client) ListHealthChecks(projectID string) ([]HealthCheck, error) {
 	var result []HealthCheck
 	req := c.service.HealthChecks.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.HealthChecksAggregatedList) error {
+		var count int
+		for _, scoped := range page.Items {
+			count += len(scoped.HealthChecks)
+		}
+		result = slices.Grow(result, count)
 		for scope, scoped := range page.Items {
 			for _, hc := range scoped.HealthChecks {
 				port, checkType := healthCheckPortAndType(hc)
@@ -165,6 +177,11 @@ func (c *Client) ListUrlMaps(projectID string) ([]UrlMap, error) {
 	var result []UrlMap
 	req := c.service.UrlMaps.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.UrlMapsAggregatedList) error {
+		var count int
+		for _, scoped := range page.Items {
+			count += len(scoped.UrlMaps)
+		}
+		result = slices.Grow(result, count)
 		for scope, scoped := range page.Items {
 			for _, um := range scoped.UrlMaps {
 				result = append(result, UrlMap{
@@ -230,6 +247,11 @@ func (c *Client) ListSslCertificates(projectID string) ([]SslCertificate, error)
 	var result []SslCertificate
 	req := c.service.SslCertificates.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.SslCertificateAggregatedList) error {
+		var count int
+		for _, scoped := range page.Items {
+			count += len(scoped.SslCertificates)
+		}
+		result = slices.Grow(result, count)
 		for scope, scoped := range page.Items {
 			for _, cert := range scoped.SslCertificates {
 				var domains []string
