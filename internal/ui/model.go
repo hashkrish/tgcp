@@ -663,7 +663,7 @@ func (m MainModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						svc.Reset() // Reset state (fix Bug 2)
 						m.CurrentSvc = svc
 
-						// Sync Window Size immediately implementation (Fix Bug: Truncated list on entry)
+						// Sync Window Size immediately so list renders correctly
 						if m.Width > 0 && m.Height > 0 {
 							newModel, _ := svc.Update(tea.WindowSizeMsg{
 								Width:  m.Width,
