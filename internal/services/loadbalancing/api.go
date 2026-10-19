@@ -16,6 +16,7 @@ package loadbalancing
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -93,6 +94,7 @@ func (c *Client) ListHealthChecks(projectID string) ([]HealthCheck, error) {
 	req := c.service.HealthChecks.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.HealthChecksAggregatedList) error {
 		for scope, scoped := range page.Items {
+			result = slices.Grow(result, len(scoped.HealthChecks))
 			for _, hc := range scoped.HealthChecks {
 				port, checkType := healthCheckPortAndType(hc)
 				result = append(result, HealthCheck{
@@ -196,6 +198,15 @@ func (c *Client) ListForwardingRules(projectID string) ([]ForwardingRule, error)
 	var result []ForwardingRule
 	req := c.service.ForwardingRules.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.ForwardingRuleAggregatedList) error {
+		count := 0
+		for _, scoped := range page.Items {
+			count += len(scoped.ForwardingRules)
+		}
+
+		if result == nil {
+			result = make([]ForwardingRule, 0, count)
+		}
+
 		for scope, scoped := range page.Items {
 			for _, fr := range scoped.ForwardingRules {
 				result = append(result, ForwardingRule{
