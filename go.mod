@@ -1,6 +1,6 @@
 module github.com/yogirk/tgcp
 
-go 1.24
+go 1.25.5
 
 require (
 	cloud.google.com/go/artifactregistry v1.26.0
