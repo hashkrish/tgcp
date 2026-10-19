@@ -767,7 +767,7 @@ func (s *Service) Reset() {
 	s.selectedKey = nil
 	s.iamBindings = nil
 	s.keys = nil
-	s.err = nil
+	s.err = nil // Fix: Clear previous errors on reset
 	s.table.SetCursor(0)
 }
 
