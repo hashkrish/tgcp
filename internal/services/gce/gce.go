@@ -379,7 +379,452 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
-		return s.handleKeyMsg(msg)
+		// Tab switching (list view only, either tab) -- real Tab/Shift+Tab
+		// go through NextTab/PrevTab (services.TabCycler) instead; this
+		// case remains for the direct "[", "]" keys.
+		if s.viewState == ViewList && !s.filter.IsActive() {
+			switch msg.String() {
+			case "[", "]":
+				cmd, _ := s.cycleTab()
+				return s, cmd
+			}
+		}
+
+		// Handle filter mode (only in list view, instances tab — groups has no filter)
+		if s.viewState == ViewList && s.activeTab == TabInstances {
+			result := s.filterSession.HandleKey(msg)
+
+			if result.Handled {
+				if result.Cmd != nil {
+					return s, result.Cmd
+				}
+				if !result.ShouldContinue {
+					return s, nil
+				}
+				// Continue processing other keys
+			}
+		}
+
+		// LIST VIEW KEYBINDINGS — Instance Groups tab
+		if s.viewState == ViewList && s.activeTab == TabInstanceGroups {
+			switch msg.String() {
+			case "r":
+				return s, s.fetchGroupsCmd(true)
+			case "n": // Create
+				s.createGroupForm = newGroupCreateForm()
+				s.viewState = ViewCreateGroup
+				return s, nil
+			case "u": // Update (resize)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.updateGroupForm = newGroupUpdateForm(*s.selectedGroup)
+					s.viewState = ViewUpdateGroup
+					return s, nil
+				}
+			case "s": // Start all instances (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-start"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "x": // Stop all instances (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-stop"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "p": // Rolling-action replace (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-replace"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "R": // Rolling-action restart (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "mig-restart"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			case "d": // Delete (Confirm)
+				if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
+					s.selectedGroup = &s.groups[idx]
+					s.pendingAction = "delete-mig"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+					return s, nil
+				}
+			}
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.groupTable.Update(msg)
+			s.groupTable = updatedTable
+			return s, cmd
+		}
+
+		// LIST VIEW KEYBINDINGS — Instances tab (existing behavior, unchanged)
+		if s.viewState == ViewList {
+			switch msg.String() {
+			case "r":
+				return s, s.fetchInstancesCmd(true)
+			case "enter": // View Details
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.detailList = components.NewDetailList("Instance Details", nil)
+					s.viewState = ViewDetail
+				}
+			case "s": // Start (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "start"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "x": // Stop (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "stop"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "R": // Reset (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "reset"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "z": // Suspend (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "suspend"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "Z": // Resume (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "resume"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "M": // Perform Maintenance (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "maintenance"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			case "h": // SSH (Changed from Enter)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					return s, s.SSHCmd(instances[idx])
+				}
+			case "l": // Logs
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					inst := instances[idx]
+					// Filter for GCE instance logs with Strict Quoting
+					filter := fmt.Sprintf(`resource.type="gce_instance" AND resource.labels.instance_id="%s"`, inst.ID)
+					heading := fmt.Sprintf("VM Instance: %s (ID: %s)", inst.Name, inst.ID)
+					return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "gce", Heading: heading} }
+				}
+			case "n": // Create
+				s.createForm = newInstanceCreateForm()
+				s.viewState = ViewCreate
+				return s, nil
+			case "u": // Update
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+					s.viewState = ViewUpdate
+					return s, nil
+				}
+			case "d": // Delete (Confirm)
+				instances := s.getFilteredInstances(s.instances, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
+					s.selectedInstance = &instances[idx]
+					s.pendingAction = "delete"
+					s.actionSource = ViewList
+					s.viewState = ViewConfirmation
+				}
+			}
+			// Forward to table
+			var updatedTable *components.StandardTable
+			updatedTable, cmd = s.table.Update(msg)
+			s.table = updatedTable
+			return s, cmd
+		}
+
+		// DETAIL VIEW KEYBINDINGS
+		if s.viewState == ViewDetail {
+			switch msg.String() {
+			case "esc", "q":
+				// Return to List View
+				s.viewState = ViewList
+				s.selectedInstance = nil
+				return s, nil
+			case "up", "k":
+				s.detailList.CursorUp()
+				return s, nil
+			case "down", "j":
+				s.detailList.CursorDown()
+				return s, nil
+			case "y": // Copy selected field's value
+				if row, ok := s.detailList.Selected(); ok {
+					return s, components.CopyToClipboardCmd(row.Key, row.Value)
+				}
+				return s, nil
+			case "s": // Start (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "start"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "x": // Stop (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "stop"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "R": // Reset (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "reset"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "z": // Suspend (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "suspend"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "Z": // Resume (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "resume"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "M": // Perform Maintenance (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "maintenance"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+			case "i": // View IAM bindings
+				if s.selectedInstance != nil {
+					return s, tea.Batch(s.fetchIAMCmd(*s.selectedInstance), s.spinner.Start(""))
+				}
+			case "h": // SSH
+				if s.selectedInstance != nil {
+					return s, s.SSHCmd(*s.selectedInstance)
+				}
+			case "u": // Update
+				if s.selectedInstance != nil {
+					s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
+					s.viewState = ViewUpdate
+				}
+				return s, nil
+			case "d": // Delete (Confirm)
+				if s.selectedInstance != nil {
+					s.pendingAction = "delete"
+					s.actionSource = ViewDetail
+					s.viewState = ViewConfirmation
+				}
+				return s, nil
+			}
+			// No other updates needed for static detail view
+		}
+
+		// CONFIRMATION VIEW KEYBINDINGS
+		if s.viewState == ViewConfirmation {
+			switch msg.String() {
+			case "y", "enter": // Confirm
+				var actionCmd tea.Cmd
+				switch s.pendingAction {
+				case "start":
+					actionCmd = s.StartInstanceCmd(*s.selectedInstance)
+				case "stop":
+					actionCmd = s.StopInstanceCmd(*s.selectedInstance)
+				case "reset":
+					actionCmd = s.ResetInstanceCmd(*s.selectedInstance)
+				case "suspend":
+					actionCmd = s.SuspendInstanceCmd(*s.selectedInstance)
+				case "resume":
+					actionCmd = s.ResumeInstanceCmd(*s.selectedInstance)
+				case "maintenance":
+					actionCmd = s.PerformMaintenanceCmd(*s.selectedInstance)
+				case "grant":
+					if s.selectedInstance != nil {
+						actionCmd = s.addIAMBindingCmd(*s.selectedInstance, s.pendingIAMRole, s.pendingIAMMember)
+					}
+				case "mig-start":
+					if s.selectedGroup != nil {
+						actionCmd = s.StartInstancesInGroupCmd(*s.selectedGroup)
+					}
+				case "mig-stop":
+					if s.selectedGroup != nil {
+						actionCmd = s.StopInstancesInGroupCmd(*s.selectedGroup)
+					}
+				case "mig-replace":
+					if s.selectedGroup != nil {
+						actionCmd = s.RollingActionReplaceCmd(*s.selectedGroup)
+					}
+				case "mig-restart":
+					if s.selectedGroup != nil {
+						actionCmd = s.RollingActionRestartCmd(*s.selectedGroup)
+					}
+				case "delete":
+					if s.selectedInstance != nil {
+						actionCmd = s.DeleteInstanceCmd(*s.selectedInstance)
+					}
+				case "delete-mig":
+					if s.selectedGroup != nil {
+						actionCmd = s.DeleteGroupCmd(*s.selectedGroup)
+					}
+				}
+
+				// Return to source view. A deleted instance/group no longer
+				// exists, so drop back to the list rather than a stale detail view.
+				if s.pendingAction == "delete" || s.pendingAction == "delete-mig" {
+					s.viewState = ViewList
+					s.selectedInstance = nil
+					s.selectedGroup = nil
+				} else {
+					s.viewState = s.actionSource
+				}
+
+				// Reset pending state -- except "grant", which the
+				// actionResultMsg handler needs intact to know whether to
+				// re-fetch the IAM policy on success (see that case above).
+				if s.pendingAction != "grant" {
+					s.pendingAction = ""
+				}
+				return s, actionCmd
+
+			case "n", "esc", "q": // Cancel
+				s.viewState = s.actionSource
+				s.pendingAction = ""
+				return s, nil
+			}
+		}
+
+		// IAM VIEW KEYBINDINGS (VM instances only)
+		if s.viewState == ViewIAM {
+			switch msg.String() {
+			case "q", "esc":
+				s.viewState = ViewDetail
+				return s, nil
+			case "a":
+				if s.selectedInstance != nil {
+					s.iamForm = components.NewIAMAddBindingForm(s.selectedInstance.Name)
+					s.viewState = ViewIAMForm
+				}
+				return s, nil
+			}
+		}
+
+		// IAM ADD-BINDING FORM KEYBINDINGS
+		if s.viewState == ViewIAMForm {
+			result, fcmd := s.iamForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewIAM
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				s.pendingIAMRole = s.iamForm.Value("Role")
+				s.pendingIAMMember = s.iamForm.Value("Member")
+				s.pendingAction = "grant"
+				s.actionSource = ViewIAM
+				s.viewState = ViewConfirmation
+				return s, nil
+			}
+			return s, fcmd
+		}
+
+		// CREATE GROUP (MIG) VIEW KEYBINDINGS
+		if s.viewState == ViewCreateGroup {
+			result, fcmd := s.createGroupForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.createGroupForm.Values()
+				size, _ := strconv.ParseInt(vals["Target Size"], 10, 64)
+				s.viewState = ViewList
+				return s, s.CreateGroupCmd(vals["Name"], vals["Zone"], vals["Base Instance Name"], vals["Instance Template"], size)
+			}
+			return s, fcmd
+		}
+
+		// CREATE VIEW KEYBINDINGS
+		if s.viewState == ViewCreate {
+			result, fcmd := s.createForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted {
+				vals := s.createForm.Values()
+				s.viewState = ViewList
+				return s, s.CreateInstanceCmd(vals["Name"], vals["Zone"], vals["Machine Type"], vals["Source Image"], vals["Network"])
+			}
+			return s, fcmd
+		}
+
+		// UPDATE VIEW KEYBINDINGS
+		if s.viewState == ViewUpdate {
+			result, fcmd := s.updateForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted && s.selectedInstance != nil {
+				vals := s.updateForm.Values()
+				inst := *s.selectedInstance
+				s.viewState = ViewList
+				var tags []string
+				for _, t := range strings.Split(vals["Tags (comma-separated)"], ",") {
+					t = strings.TrimSpace(t)
+					if t != "" {
+						tags = append(tags, t)
+					}
+				}
+				return s, s.UpdateInstanceTagsCmd(inst, tags)
+			}
+			return s, fcmd
+		}
+
+		// UPDATE GROUP (MIG resize) VIEW KEYBINDINGS
+		if s.viewState == ViewUpdateGroup {
+			result, fcmd := s.updateGroupForm.Update(msg)
+			if result.Cancelled {
+				s.viewState = ViewList
+				return s, nil
+			}
+			if result.Submitted && s.selectedGroup != nil {
+				size, _ := strconv.ParseInt(s.updateGroupForm.Value("Target Size"), 10, 64)
+				group := *s.selectedGroup
+				s.viewState = ViewList
+				return s, s.ResizeGroupCmd(group, size)
+			}
+			return s, fcmd
+		}
 
 	// Handle Table Events (only in List View)
 	default:
@@ -821,465 +1266,4 @@ func (s *Service) NextTab() (tea.Cmd, bool) {
 
 func (s *Service) PrevTab() (tea.Cmd, bool) {
 	return s.NextTab()
-}
-
-func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch s.viewState {
-	case ViewList:
-		return s.handleListKey(msg)
-	case ViewDetail:
-		return s.handleDetailKey(msg)
-	case ViewConfirmation:
-		return s.handleConfirmationKey(msg)
-	case ViewIAM:
-		return s.handleIAMKey(msg)
-	case ViewIAMForm:
-		return s.handleIAMFormKey(msg)
-	case ViewCreateGroup:
-		return s.handleCreateGroupKey(msg)
-	case ViewCreate:
-		return s.handleCreateKey(msg)
-	case ViewUpdate:
-		return s.handleUpdateKey(msg)
-	case ViewUpdateGroup:
-		return s.handleUpdateGroupKey(msg)
-	}
-	return s, nil
-}
-
-func (s *Service) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
-	// Tab switching (list view only, either tab) -- real Tab/Shift+Tab
-	// go through NextTab/PrevTab (services.TabCycler) instead; this
-	// case remains for the direct "[", "]" keys.
-	if !s.filter.IsActive() {
-		switch msg.String() {
-		case "[", "]":
-			cmd, _ := s.cycleTab()
-			return s, cmd
-		}
-	}
-
-	if s.activeTab == TabInstanceGroups {
-		switch msg.String() {
-		case "r":
-			return s, s.fetchGroupsCmd(true)
-		case "n": // Create
-			s.createGroupForm = newGroupCreateForm()
-			s.viewState = ViewCreateGroup
-			return s, nil
-		case "u": // Update (resize)
-			if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
-				s.selectedGroup = &s.groups[idx]
-				s.updateGroupForm = newGroupUpdateForm(*s.selectedGroup)
-				s.viewState = ViewUpdateGroup
-				return s, nil
-			}
-		case "s": // Start all instances (Confirm)
-			if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
-				s.selectedGroup = &s.groups[idx]
-				s.pendingAction = "mig-start"
-				s.actionSource = ViewList
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-		case "x": // Stop all instances (Confirm)
-			if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
-				s.selectedGroup = &s.groups[idx]
-				s.pendingAction = "mig-stop"
-				s.actionSource = ViewList
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-		case "p": // Rolling-action replace (Confirm)
-			if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
-				s.selectedGroup = &s.groups[idx]
-				s.pendingAction = "mig-replace"
-				s.actionSource = ViewList
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-		case "R": // Rolling-action restart (Confirm)
-			if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
-				s.selectedGroup = &s.groups[idx]
-				s.pendingAction = "mig-restart"
-				s.actionSource = ViewList
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-		case "d": // Delete (Confirm)
-			if idx := s.groupTable.Cursor(); idx >= 0 && idx < len(s.groups) {
-				s.selectedGroup = &s.groups[idx]
-				s.pendingAction = "delete-mig"
-				s.actionSource = ViewList
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-		}
-		var updatedTable *components.StandardTable
-		updatedTable, cmd = s.groupTable.Update(msg)
-		s.groupTable = updatedTable
-		return s, cmd
-	}
-
-	// Instances tab
-	result := s.filterSession.HandleKey(msg)
-	if result.Handled {
-		if result.Cmd != nil {
-			return s, result.Cmd
-		}
-		if !result.ShouldContinue {
-			return s, nil
-		}
-	}
-
-	switch msg.String() {
-	case "r":
-		return s, s.fetchInstancesCmd(true)
-	case "enter": // View Details
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.detailList = components.NewDetailList("Instance Details", nil)
-			s.viewState = ViewDetail
-		}
-	case "s": // Start (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "start"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	case "x": // Stop (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "stop"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	case "R": // Reset (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "reset"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	case "z": // Suspend (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "suspend"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	case "Z": // Resume (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "resume"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	case "M": // Perform Maintenance (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "maintenance"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	case "h": // SSH (Changed from Enter)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			return s, s.SSHCmd(instances[idx])
-		}
-	case "l": // Logs
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			inst := instances[idx]
-			// Filter for GCE instance logs with Strict Quoting
-			filter := fmt.Sprintf(`resource.type="gce_instance" AND resource.labels.instance_id="%s"`, inst.ID)
-			heading := fmt.Sprintf("VM Instance: %s (ID: %s)", inst.Name, inst.ID)
-			return s, func() tea.Msg { return core.SwitchToLogsMsg{Filter: filter, Source: "gce", Heading: heading} }
-		}
-	case "n": // Create
-		s.createForm = newInstanceCreateForm()
-		s.viewState = ViewCreate
-		return s, nil
-	case "u": // Update
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
-			s.viewState = ViewUpdate
-			return s, nil
-		}
-	case "d": // Delete (Confirm)
-		instances := s.getFilteredInstances(s.instances, s.filter.Value())
-		if idx := s.table.Cursor(); idx >= 0 && idx < len(instances) {
-			s.selectedInstance = &instances[idx]
-			s.pendingAction = "delete"
-			s.actionSource = ViewList
-			s.viewState = ViewConfirmation
-		}
-	}
-	// Forward to table
-	var updatedTable *components.StandardTable
-	updatedTable, cmd = s.table.Update(msg)
-	s.table = updatedTable
-	return s, cmd
-}
-
-func (s *Service) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "q":
-		// Return to List View
-		s.viewState = ViewList
-		s.selectedInstance = nil
-		return s, nil
-	case "up", "k":
-		s.detailList.CursorUp()
-		return s, nil
-	case "down", "j":
-		s.detailList.CursorDown()
-		return s, nil
-	case "y": // Copy selected field's value
-		if row, ok := s.detailList.Selected(); ok {
-			return s, components.CopyToClipboardCmd(row.Key, row.Value)
-		}
-		return s, nil
-	case "s": // Start (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "start"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-	case "x": // Stop (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "stop"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-	case "R": // Reset (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "reset"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-	case "z": // Suspend (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "suspend"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-	case "Z": // Resume (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "resume"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-	case "M": // Perform Maintenance (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "maintenance"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-	case "i": // View IAM bindings
-		if s.selectedInstance != nil {
-			return s, tea.Batch(s.fetchIAMCmd(*s.selectedInstance), s.spinner.Start(""))
-		}
-	case "h": // SSH
-		if s.selectedInstance != nil {
-			return s, s.SSHCmd(*s.selectedInstance)
-		}
-	case "u": // Update
-		if s.selectedInstance != nil {
-			s.updateForm = newInstanceUpdateForm(*s.selectedInstance)
-			s.viewState = ViewUpdate
-		}
-		return s, nil
-	case "d": // Delete (Confirm)
-		if s.selectedInstance != nil {
-			s.pendingAction = "delete"
-			s.actionSource = ViewDetail
-			s.viewState = ViewConfirmation
-		}
-		return s, nil
-	}
-	return s, nil
-}
-
-func (s *Service) handleConfirmationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "y", "enter": // Confirm
-		var actionCmd tea.Cmd
-		switch s.pendingAction {
-		case "start":
-			actionCmd = s.StartInstanceCmd(*s.selectedInstance)
-		case "stop":
-			actionCmd = s.StopInstanceCmd(*s.selectedInstance)
-		case "reset":
-			actionCmd = s.ResetInstanceCmd(*s.selectedInstance)
-		case "suspend":
-			actionCmd = s.SuspendInstanceCmd(*s.selectedInstance)
-		case "resume":
-			actionCmd = s.ResumeInstanceCmd(*s.selectedInstance)
-		case "maintenance":
-			actionCmd = s.PerformMaintenanceCmd(*s.selectedInstance)
-		case "grant":
-			if s.selectedInstance != nil {
-				actionCmd = s.addIAMBindingCmd(*s.selectedInstance, s.pendingIAMRole, s.pendingIAMMember)
-			}
-		case "mig-start":
-			if s.selectedGroup != nil {
-				actionCmd = s.StartInstancesInGroupCmd(*s.selectedGroup)
-			}
-		case "mig-stop":
-			if s.selectedGroup != nil {
-				actionCmd = s.StopInstancesInGroupCmd(*s.selectedGroup)
-			}
-		case "mig-replace":
-			if s.selectedGroup != nil {
-				actionCmd = s.RollingActionReplaceCmd(*s.selectedGroup)
-			}
-		case "mig-restart":
-			if s.selectedGroup != nil {
-				actionCmd = s.RollingActionRestartCmd(*s.selectedGroup)
-			}
-		case "delete":
-			if s.selectedInstance != nil {
-				actionCmd = s.DeleteInstanceCmd(*s.selectedInstance)
-			}
-		case "delete-mig":
-			if s.selectedGroup != nil {
-				actionCmd = s.DeleteGroupCmd(*s.selectedGroup)
-			}
-		}
-
-		// Return to source view. A deleted instance/group no longer
-		// exists, so drop back to the list rather than a stale detail view.
-		if s.pendingAction == "delete" || s.pendingAction == "delete-mig" {
-			s.viewState = ViewList
-			s.selectedInstance = nil
-			s.selectedGroup = nil
-		} else {
-			s.viewState = s.actionSource
-		}
-
-		// Reset pending state -- except "grant", which the
-		// actionResultMsg handler needs intact to know whether to
-		// re-fetch the IAM policy on success (see that case above).
-		if s.pendingAction != "grant" {
-			s.pendingAction = ""
-		}
-		return s, actionCmd
-
-	case "n", "esc", "q": // Cancel
-		s.viewState = s.actionSource
-		s.pendingAction = ""
-		return s, nil
-	}
-	return s, nil
-}
-
-func (s *Service) handleIAMKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "q", "esc":
-		s.viewState = ViewDetail
-		return s, nil
-	case "a":
-		if s.selectedInstance != nil {
-			s.iamForm = components.NewIAMAddBindingForm(s.selectedInstance.Name)
-			s.viewState = ViewIAMForm
-		}
-		return s, nil
-	}
-	return s, nil
-}
-
-func (s *Service) handleIAMFormKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	result, fcmd := s.iamForm.Update(msg)
-	if result.Cancelled {
-		s.viewState = ViewIAM
-		return s, nil
-	}
-	if result.Submitted && s.selectedInstance != nil {
-		s.pendingIAMRole = s.iamForm.Value("Role")
-		s.pendingIAMMember = s.iamForm.Value("Member")
-		s.pendingAction = "grant"
-		s.actionSource = ViewIAM
-		s.viewState = ViewConfirmation
-		return s, nil
-	}
-	return s, fcmd
-}
-
-func (s *Service) handleCreateGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	result, fcmd := s.createGroupForm.Update(msg)
-	if result.Cancelled {
-		s.viewState = ViewList
-		return s, nil
-	}
-	if result.Submitted {
-		vals := s.createGroupForm.Values()
-		size, _ := strconv.ParseInt(vals["Target Size"], 10, 64)
-		s.viewState = ViewList
-		return s, s.CreateGroupCmd(vals["Name"], vals["Zone"], vals["Base Instance Name"], vals["Instance Template"], size)
-	}
-	return s, fcmd
-}
-
-func (s *Service) handleCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	result, fcmd := s.createForm.Update(msg)
-	if result.Cancelled {
-		s.viewState = ViewList
-		return s, nil
-	}
-	if result.Submitted {
-		vals := s.createForm.Values()
-		s.viewState = ViewList
-		return s, s.CreateInstanceCmd(vals["Name"], vals["Zone"], vals["Machine Type"], vals["Source Image"], vals["Network"])
-	}
-	return s, fcmd
-}
-
-func (s *Service) handleUpdateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	result, fcmd := s.updateForm.Update(msg)
-	if result.Cancelled {
-		s.viewState = ViewList
-		return s, nil
-	}
-	if result.Submitted && s.selectedInstance != nil {
-		vals := s.updateForm.Values()
-		inst := *s.selectedInstance
-		s.viewState = ViewList
-		var tags []string
-		for _, t := range strings.Split(vals["Tags (comma-separated)"], ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				tags = append(tags, t)
-			}
-		}
-		return s, s.UpdateInstanceTagsCmd(inst, tags)
-	}
-	return s, fcmd
-}
-
-func (s *Service) handleUpdateGroupKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	result, fcmd := s.updateGroupForm.Update(msg)
-	if result.Cancelled {
-		s.viewState = ViewList
-		return s, nil
-	}
-	if result.Submitted && s.selectedGroup != nil {
-		size, _ := strconv.ParseInt(s.updateGroupForm.Value("Target Size"), 10, 64)
-		group := *s.selectedGroup
-		s.viewState = ViewList
-		return s, s.ResizeGroupCmd(group, size)
-	}
-	return s, fcmd
 }

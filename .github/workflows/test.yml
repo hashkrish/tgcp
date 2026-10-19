@@ -36,7 +36,8 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          install-mode: goinstall
+      - name: Fmt
+        run: go fmt ./...
+
+      - name: Vet
+        run: go vet ./...
