@@ -961,10 +961,13 @@ func (s *Service) getFilteredParameters(params []Parameter, query string) []Para
 	}
 	return components.FilterSlice(params, query, func(p Parameter, q string) bool {
 		// Build label string for search
-		var labelStr string
+		var labelBuilder strings.Builder
 		for k, v := range p.Labels {
-			labelStr += k + "=" + v + " "
+			labelBuilder.WriteString(k)
+			labelBuilder.WriteString("=")
+			labelBuilder.WriteString(v)
+			labelBuilder.WriteString(" ")
 		}
-		return components.ContainsMatch(p.Name, p.Format, labelStr)(q)
+		return components.ContainsMatch(p.Name, p.Format, labelBuilder.String())(q)
 	})
 }
