@@ -1003,7 +1003,7 @@ func (s *Service) renderDetailView() string {
 	if s.selectedItem.CleanupPolicyCount > 0 {
 		var builder strings.Builder
 		builder.Grow(32)
-		builder.WriteString(strconv.Itoa(int(s.selectedItem.CleanupPolicyCount)))
+		builder.WriteString(strconv.Itoa(s.selectedItem.CleanupPolicyCount))
 		builder.WriteString(" policies")
 		if s.selectedItem.CleanupPolicyDryRun {
 			builder.WriteString(" (dry run)")
