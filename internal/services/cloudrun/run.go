@@ -1761,10 +1761,13 @@ func (s *Service) updateTable(items []RunService) {
 func (s *Service) updateRevTable(revisions []Revision) {
 	rows := make([]table.Row, len(revisions))
 	for i, rev := range revisions {
-		traffic := fmt.Sprintf("%d%%", rev.Percent)
+		var sb strings.Builder
+		sb.WriteString(strconv.FormatInt(rev.Percent, 10))
+		sb.WriteByte('%')
 		if rev.Latest {
-			traffic += " (latest)"
+			sb.WriteString(" (latest)")
 		}
+		traffic := sb.String()
 		created := ""
 		if !rev.Created.IsZero() {
 			created = rev.Created.Format("2006-01-02")
