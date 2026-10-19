@@ -50,7 +50,6 @@ type DockerImage struct {
 	Tags           []string
 	ImageSizeBytes int64
 	UploadTime     time.Time
-	BuildTime      time.Time
 	MediaType      string
 }
 
