@@ -1020,7 +1020,7 @@ func (s *Service) Reset() {
 	s.pendingAction = ""
 	s.pendingCloneDest = ""
 	s.pendingClonePITR = ""
-	s.err = nil
+	s.err = nil // Fix: Clear previous errors on reset
 	s.table.SetCursor(0)
 	s.filter.ExitFilterMode()
 }
