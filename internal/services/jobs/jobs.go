@@ -33,9 +33,9 @@ type Service struct {
 	filter        components.FilterModel
 	filterSession components.FilterSession[core.Job]
 
-	jobs      []core.Job
+	jobs     []core.Job
 	viewState ViewState
-	selected  *core.Job
+	selected *core.Job
 }
 
 func NewService(cache *core.Cache) *Service {
