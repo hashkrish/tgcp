@@ -54,6 +54,10 @@ func (c *Client) ListBackendServices(projectID string) ([]BackendService, error)
 	err := req.Pages(context.Background(), func(page *compute.BackendServiceAggregatedList) error {
 		for scope, scoped := range page.Items {
 			for _, bs := range scoped.BackendServices {
+				var firstGroup string
+				if len(bs.Backends) > 0 {
+					firstGroup = bs.Backends[0].Group
+				}
 				result = append(result, BackendService{
 					Name:                bs.Name,
 					Region:              scopeToRegion(scope),
@@ -61,6 +65,7 @@ func (c *Client) ListBackendServices(projectID string) ([]BackendService, error)
 					LoadBalancingScheme: bs.LoadBalancingScheme,
 					HealthCheckName:     firstHealthCheckName(bs.HealthChecks),
 					BackendCount:        len(bs.Backends),
+					FirstGroup:          firstGroup,
 					Description:         bs.Description,
 					Port:                bs.Port,
 					PortName:            bs.PortName,
@@ -333,7 +338,7 @@ func (c *Client) UpdateBackendServiceTimeout(projectID, region, name string, tim
 // get-health`. A backend service can have multiple backend groups; this
 // checks only the first one, which covers the common single-group case
 // without requiring the caller to pick a group.
-func (c *Client) GetBackendServiceHealth(projectID, region, name string) (string, error) {
+func (c *Client) GetBackendServiceHealth(projectID, region, name, firstGroup string) (string, error) {
 	if demo.Enabled {
 		return "HEALTHY", nil
 	}
@@ -341,24 +346,10 @@ func (c *Client) GetBackendServiceHealth(projectID, region, name string) (string
 		return "", fmt.Errorf("compute client not initialized")
 	}
 
-	var backends []*compute.Backend
-	if region == "global" || region == "" {
-		bs, err := c.service.BackendServices.Get(projectID, name).Do()
-		if err != nil {
-			return "", err
-		}
-		backends = bs.Backends
-	} else {
-		bs, err := c.service.RegionBackendServices.Get(projectID, region, name).Do()
-		if err != nil {
-			return "", err
-		}
-		backends = bs.Backends
-	}
-	if len(backends) == 0 {
+	if firstGroup == "" {
 		return "", fmt.Errorf("backend service %s has no backend groups", name)
 	}
-	ref := &compute.ResourceGroupReference{Group: backends[0].Group}
+	ref := &compute.ResourceGroupReference{Group: firstGroup}
 
 	var statuses []*compute.HealthStatus
 	if region == "global" || region == "" {

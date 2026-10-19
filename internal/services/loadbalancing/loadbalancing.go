@@ -917,7 +917,7 @@ func (s *Service) getBackendHealthCmd(bs BackendService) tea.Cmd {
 		if s.client == nil {
 			return actionResultMsg{err: fmt.Errorf("client not initialized")}
 		}
-		status, err := s.client.GetBackendServiceHealth(s.projectID, bs.Region, bs.Name)
+		status, err := s.client.GetBackendServiceHealth(s.projectID, bs.Region, bs.Name, bs.FirstGroup)
 		if err != nil {
 			return actionResultMsg{err: err}
 		}

@@ -9,6 +9,7 @@ type BackendService struct {
 	LoadBalancingScheme string
 	HealthCheckName     string // short name of the first attached health check, if any
 	BackendCount        int
+	FirstGroup          string // the resource group of the first backend group, if any
 	Description         string
 	Port                int64
 	PortName            string
