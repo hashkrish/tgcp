@@ -3,7 +3,6 @@ package cloudsql
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/yogirk/tgcp/internal/core"
@@ -380,15 +379,103 @@ func (c *Client) ListBackups(projectID, instance string) ([]Backup, error) {
 	return backups, nil
 }
 
-// writeKeywordRe matches SQL keywords that mutate data or schema. It is
-// checked against the whole statement body (not just its prefix) so that a
-// disallowed write hidden inside a CTE -- e.g.
-// `WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x` -- is still caught.
-var writeKeywordRe = regexp.MustCompile(`(?i)\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|merge|call|lock|unlock|set|begin|commit|rollback|copy|vacuum|analyze|reindex|comment|into\s+outfile)\b`)
+// stripCommentsAndStrings removes SQL string literals and comments (both block
+// and line) so they don't trip up keyword searches. This isn't a full parser,
+// but it is enough to make a naive keyword scan safe from bypasses.
+func stripCommentsAndStrings(s string) (string, error) {
+	var out strings.Builder
+	inString := false
+	var stringChar rune
+	inBlockComment := false
+	inLineComment := false
+
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+
+		if inString {
+			if c == '\\' && i+1 < len(runes) {
+				i++ // skip the escaped character
+				continue
+			}
+			if c == stringChar {
+				// Handle SQL standard escaped quotes (e.g. '' or "")
+				if i+1 < len(runes) && runes[i+1] == stringChar {
+					i++
+				} else {
+					inString = false
+					out.WriteRune(' ') // Emit space to prevent token merging
+				}
+			}
+			continue
+		}
+
+		if inBlockComment {
+			if c == '*' && i+1 < len(runes) && runes[i+1] == '/' {
+				inBlockComment = false
+				i++
+				out.WriteRune(' ') // Emit space to prevent token merging
+			}
+			continue
+		}
+
+		if inLineComment {
+			if c == '\n' || c == '\r' {
+				inLineComment = false
+				out.WriteRune(c)
+			}
+			continue
+		}
+
+		if c == '"' || c == '\'' || c == '`' {
+			inString = true
+			stringChar = c
+			continue
+		}
+
+		if c == '-' && i+1 < len(runes) && runes[i+1] == '-' {
+			inLineComment = true
+			i++
+			continue
+		}
+
+		if c == '/' && i+1 < len(runes) && runes[i+1] == '*' {
+			inBlockComment = true
+			i++
+			continue
+		}
+
+		// MySQL # comments
+		if c == '#' {
+			inLineComment = true
+			continue
+		}
+
+		out.WriteRune(c)
+	}
+
+	if inString {
+		return "", fmt.Errorf("unclosed string literal")
+	}
+	if inBlockComment {
+		return "", fmt.Errorf("unclosed block comment")
+	}
+
+	return out.String(), nil
+}
 
 // readOnlyPrefixes lists the statement forms this feature allows. Anything
 // else is rejected before it ever reaches the API.
 var readOnlyPrefixes = []string{"select", "with", "show", "explain", "describe", "desc "}
+
+// writeKeywords are data/schema mutation keywords that must not appear anywhere
+// in the parsed statement.
+var writeKeywords = []string{
+	"insert", "update", "delete", "drop", "alter", "create", "truncate",
+	"grant", "revoke", "replace", "merge", "call", "lock", "unlock",
+	"set", "begin", "commit", "rollback", "copy", "vacuum", "analyze",
+	"reindex", "comment", "into",
+}
 
 // ValidateReadOnlySQL enforces that a statement is a single, read-only query
 // before it is sent to the Cloud SQL Admin API's ExecuteSql RPC. This is a
@@ -400,11 +487,18 @@ func ValidateReadOnlySQL(stmt string) error {
 	if trimmed == "" {
 		return fmt.Errorf("SQL statement is required")
 	}
-	body := strings.TrimRight(trimmed, "; \t\n")
+
+    stripped, err := stripCommentsAndStrings(trimmed)
+	if err != nil {
+		return err
+	}
+
+	body := strings.TrimRight(stripped, "; \t\n")
 	if strings.Contains(body, ";") {
 		return fmt.Errorf("only a single statement is allowed (no ';'-separated statements)")
 	}
-	lower := strings.ToLower(body)
+
+	lower := strings.ToLower(strings.TrimSpace(body))
 	ok := false
 	for _, p := range readOnlyPrefixes {
 		if strings.HasPrefix(lower, p) {
@@ -415,14 +509,33 @@ func ValidateReadOnlySQL(stmt string) error {
 	if !ok {
 		return fmt.Errorf("only SELECT/WITH/SHOW/EXPLAIN/DESCRIBE statements are allowed")
 	}
-	if writeKeywordRe.MatchString(lower) {
-		return fmt.Errorf("statement contains a disallowed write keyword")
+
+    words := strings.FieldsFunc(lower, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '(' || r == ')' || r == ','
+	})
+
+
+	// A special exemption: "show create" is a valid read-only command that contains "create".
+	// We handle this by replacing "show create" with "show" before keyword scanning.
+	// We already normalized whitespace in "lower" using strings.ToLower. Let's just do it on words.
+	for i := 0; i < len(words); i++ {
+		w := words[i]
+		if w == "show" && i+1 < len(words) && words[i+1] == "create" {
+			i++ // skip "create"
+			continue
+		}
+		for _, kw := range writeKeywords {
+			if w == kw {
+				return fmt.Errorf("statement contains a disallowed write keyword")
+			}
+		}
 	}
+
 	return nil
 }
 
 // ExecuteQuery runs a single read-only SQL statement against a Cloud SQL
-// instance via the Admin API's `instances.executeSql` RPC and returns a
+// instance via the Admin API's instances.executeSql RPC and returns a
 // simplified result set. Authentication to the database uses the caller's
 // IAM identity (AutoIamAuthn) -- the same credentials tgcp already uses to
 // call the Admin API -- so no database password is ever collected or
