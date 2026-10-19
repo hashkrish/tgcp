@@ -180,7 +180,7 @@ func (c *Client) GetTopicIAMPolicy(projectID, topicID string) ([]IAMBinding, err
 	if err != nil {
 		return nil, fmt.Errorf("get topic IAM policy: %w", err)
 	}
-	var out []IAMBinding
+	out := make([]IAMBinding, 0, len(policy.Bindings))
 	for _, b := range policy.Bindings {
 		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
 	}
@@ -403,7 +403,7 @@ func (c *Client) GetSubscriptionIAMPolicy(projectID, subID string) ([]IAMBinding
 	if err != nil {
 		return nil, fmt.Errorf("get subscription IAM policy: %w", err)
 	}
-	var out []IAMBinding
+	out := make([]IAMBinding, 0, len(policy.Bindings))
 	for _, b := range policy.Bindings {
 		out = append(out, IAMBinding{Role: b.Role, Members: b.Members})
 	}

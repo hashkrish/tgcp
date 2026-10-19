@@ -393,11 +393,405 @@ func (s *Service) Blur() {
 // Update
 // -----------------------------------------------------------------------------
 
-func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
+func (s *Service) handleActionResult(msg actionResultMsg) (tea.Model, tea.Cmd) {
+	if s.pendingAction == "grant" {
+		s.pendingAction = ""
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if s.iamResourceName != "" {
+			return s, tea.Batch(
+				func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
+				s.fetchIAMCmd(s.iamResourceType, s.iamResourceName),
+			)
+		}
+		return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+	}
+	if s.pendingAction == "ack" {
+		s.pendingAction = ""
+		s.viewState = ViewDetailSub
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		s.pulledMessages = nil
+		return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+	}
+	if s.pendingAction == "modify-ack-deadline" {
+		s.pendingAction = ""
+		s.viewState = ViewPulledMessages
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+	}
+	if s.pendingAction == "seek" {
+		s.pendingAction = ""
+		s.viewState = ViewDetailSub
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
+	}
+	if s.pendingAction == "delete" || s.pendingAction == "detach" {
+		action := s.pendingAction
+		s.pendingAction = ""
+		if msg.err != nil {
+			return s, func() tea.Msg {
+				return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
+			}
+		}
+		if action == "delete" {
+			if s.viewState == ViewDetailTopic {
+				s.viewState = ViewListTopics
+				s.selectedTopic = nil
+			} else {
+				s.viewState = ViewListSubs
+				s.selectedSub = nil
+			}
+		}
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+	}
+	if msg.err != nil {
+		if s.viewState == ViewUpdate {
+			s.updateForm.SubmitErr = msg.err.Error()
+		} else {
+			s.createForm.SubmitErr = msg.err.Error()
+		}
+		return s, nil
+	}
+	if s.viewState == ViewUpdate {
+		s.viewState = ViewDetailSub
+	} else {
+		s.viewState = s.createReturnView
+	}
+	if msg.msg != "" {
+		return s, tea.Batch(
+			func() tea.Msg {
+				return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
+			},
+			s.Refresh(),
+		)
+	}
+	return s, s.Refresh()
+}
 
+func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if s.viewState == ViewCreate {
+		result, formCmd := s.createForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = s.createReturnView
+			return s, nil
+		}
+		if result.Submitted {
+			return s, s.submitCreateCmd()
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewUpdate {
+		result, formCmd := s.updateForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewDetailSub
+			return s, nil
+		}
+		if result.Submitted && s.selectedSub != nil {
+			return s, s.updateSubCmd(*s.selectedSub)
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewIAMForm {
+		result, formCmd := s.iamForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewIAM
+			return s, nil
+		}
+		if result.Submitted && s.iamResourceName != "" {
+			s.pendingIAMRole = s.iamForm.Value("Role")
+			s.pendingIAMMember = s.iamForm.Value("Member")
+			s.pendingAction = "grant"
+			s.actionSource = ViewIAM
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewModifyAckDeadlineForm {
+		result, formCmd := s.modifyAckDeadlineForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewPulledMessages
+			return s, nil
+		}
+		if result.Submitted && s.selectedSub != nil {
+			n, _ := strconv.Atoi(s.modifyAckDeadlineForm.Value("Ack Deadline Seconds"))
+			s.pendingAckDeadline = int64(n)
+			s.pendingAction = "modify-ack-deadline"
+			s.actionSource = ViewPulledMessages
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewSeekForm {
+		result, formCmd := s.seekForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewDetailSub
+			return s, nil
+		}
+		if result.Submitted && s.selectedSub != nil {
+			s.pendingSeekT = s.seekForm.Value("Time (RFC3339, or 'now')")
+			s.pendingAction = "seek"
+			s.actionSource = ViewDetailSub
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewPublishForm {
+		result, formCmd := s.publishForm.Update(msg)
+		if result.Cancelled {
+			s.viewState = ViewDetailTopic
+			return s, nil
+		}
+		if result.Submitted && s.selectedTopic != nil {
+			s.pendingPublishText = s.publishForm.Value("Message")
+			s.pendingAction = "publish"
+			s.actionSource = ViewDetailTopic
+			s.viewState = ViewConfirmation
+			return s, nil
+		}
+		return s, formCmd
+	}
+
+	if s.viewState == ViewPulledMessages {
+		switch msg.String() {
+		case "esc", "q":
+			s.viewState = ViewDetailSub
+		case "a": // Ack all pulled messages
+			if s.selectedSub != nil && len(s.pulledMessages) > 0 {
+				s.pendingAction = "ack"
+				s.actionSource = ViewPulledMessages
+				s.viewState = ViewConfirmation
+			}
+		case "m": // Modify ack deadline of all pulled messages
+			if s.selectedSub != nil && len(s.pulledMessages) > 0 {
+				s.modifyAckDeadlineForm = newModifyAckDeadlineForm(*s.selectedSub)
+				s.viewState = ViewModifyAckDeadlineForm
+			}
+		}
+		return s, nil
+	}
+
+	// Handle filter mode (only in list views)
+	if s.viewState == ViewListTopics || s.viewState == ViewListSubs {
+		var result components.FilterUpdateResult
+		if s.viewState == ViewListTopics {
+			result = s.topicFilterSession.HandleKey(msg)
+		} else {
+			result = s.subFilterSession.HandleKey(msg)
+		}
+
+		if result.Handled {
+			if result.Cmd != nil {
+				return s, result.Cmd
+			}
+			if !result.ShouldContinue {
+				return s, nil
+			}
+			// Continue processing other keys
+		}
+	}
+
+	// Root Views (Topics or Subs)
+	if s.viewState == ViewListTopics || s.viewState == ViewListSubs {
+		switch msg.String() {
+		case "r":
+			return s, s.Refresh()
+		case "n": // New topic/subscription (create form)
+			s.createReturnView = s.viewState
+			if s.viewState == ViewListTopics {
+				s.createForm = components.NewForm("New Topic", []components.FormField{
+					{Label: "Topic ID", Placeholder: "my-topic", Required: true},
+				})
+			} else {
+				s.createForm = components.NewForm("New Subscription", []components.FormField{
+					{Label: "Subscription ID", Placeholder: "my-subscription", Required: true},
+					{Label: "Topic", Placeholder: "existing-topic-name", Required: true},
+					{Label: "Ack Deadline Seconds", Default: "10"},
+				})
+			}
+			s.viewState = ViewCreate
+			return s, nil
+		case "s", "]": // Switch to Subs
+			if cmd, ok := s.toSubs(); ok {
+				return s, cmd
+			}
+		case "t", "[": // Switch to Topics
+			if cmd, ok := s.toTopics(); ok {
+				return s, cmd
+			}
+		case "enter":
+			if s.viewState == ViewListTopics {
+				topics := s.getFilteredTopics(s.topics, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(topics) {
+					s.selectedTopic = &topics[idx]
+					s.viewState = ViewDetailTopic
+				}
+			} else {
+				subs := s.getFilteredSubs(s.subs, s.filter.Value())
+				if idx := s.table.Cursor(); idx >= 0 && idx < len(subs) {
+					s.selectedSub = &subs[idx]
+					s.viewState = ViewDetailSub
+				}
+			}
+		}
+		var updatedTable *components.StandardTable
+		updatedTable, cmd := s.table.Update(msg)
+		s.table = updatedTable
+		return s, cmd
+	}
+
+	// Detail Views
+	if s.viewState == ViewDetailTopic || s.viewState == ViewDetailSub {
+		switch msg.String() {
+		case "esc", "q":
+			if s.viewState == ViewDetailTopic {
+				s.viewState = ViewListTopics
+				s.selectedTopic = nil
+			} else {
+				s.viewState = ViewListSubs
+				s.selectedSub = nil
+			}
+			return s, nil
+		case "u":
+			if s.viewState == ViewDetailSub && s.selectedSub != nil {
+				s.updateForm = newSubUpdateForm(*s.selectedSub)
+				s.viewState = ViewUpdate
+			}
+			return s, nil
+		case "x": // Detach (Confirm) — subscriptions only
+			if s.viewState == ViewDetailSub && s.selectedSub != nil {
+				s.pendingAction = "detach"
+				s.actionSource = s.viewState
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "d": // Delete (Confirm)
+			if (s.viewState == ViewDetailTopic && s.selectedTopic != nil) ||
+				(s.viewState == ViewDetailSub && s.selectedSub != nil) {
+				s.pendingAction = "delete"
+				s.actionSource = s.viewState
+				s.viewState = ViewConfirmation
+			}
+			return s, nil
+		case "i": // View IAM bindings — topics and subscriptions
+			if s.viewState == ViewDetailTopic && s.selectedTopic != nil {
+				s.iamResourceType = "topic"
+				s.iamResourceName = s.selectedTopic.Name
+				return s, tea.Batch(s.fetchIAMCmd(s.iamResourceType, s.iamResourceName), s.spinner.Start(""))
+			}
+			if s.viewState == ViewDetailSub && s.selectedSub != nil {
+				s.iamResourceType = "subscription"
+				s.iamResourceName = s.selectedSub.Name
+				return s, tea.Batch(s.fetchIAMCmd(s.iamResourceType, s.iamResourceName), s.spinner.Start(""))
+			}
+			return s, nil
+		case "p": // Publish message — topics only
+			if s.viewState == ViewDetailTopic && s.selectedTopic != nil {
+				s.publishForm = newPublishForm(*s.selectedTopic)
+				s.viewState = ViewPublishForm
+			}
+			return s, nil
+		case "P": // Pull without ack — subscriptions only
+			if s.viewState == ViewDetailSub && s.selectedSub != nil {
+				return s, tea.Batch(s.pullCmd(*s.selectedSub), s.spinner.Start(""))
+			}
+			return s, nil
+		case "S": // Seek — subscriptions only
+			if s.viewState == ViewDetailSub && s.selectedSub != nil {
+				s.seekForm = newSeekForm(*s.selectedSub)
+				s.viewState = ViewSeekForm
+			}
+			return s, nil
+		}
+	}
+
+	if s.viewState == ViewIAM {
+		switch msg.String() {
+		case "q", "esc":
+			if s.iamResourceType == "subscription" {
+				s.viewState = ViewDetailSub
+			} else {
+				s.viewState = ViewDetailTopic
+			}
+			return s, nil
+		case "a":
+			if s.iamResourceName != "" {
+				s.iamForm = components.NewIAMAddBindingForm(s.iamResourceName)
+				s.viewState = ViewIAMForm
+			}
+			return s, nil
+		}
+	}
+
+	if s.viewState == ViewConfirmation {
+		switch msg.String() {
+		case "y", "enter":
+			var actionCmd tea.Cmd
+			if s.pendingAction == "delete" {
+				if s.actionSource == ViewDetailTopic && s.selectedTopic != nil {
+					actionCmd = s.deleteTopicCmd(*s.selectedTopic)
+				} else if s.actionSource == ViewDetailSub && s.selectedSub != nil {
+					actionCmd = s.deleteSubCmd(*s.selectedSub)
+				}
+			} else if s.pendingAction == "detach" && s.selectedSub != nil {
+				actionCmd = s.detachSubCmd(*s.selectedSub)
+			} else if s.pendingAction == "grant" && s.iamResourceName != "" {
+				actionCmd = s.addIAMBindingCmd(s.iamResourceType, s.iamResourceName, s.pendingIAMRole, s.pendingIAMMember)
+			} else if s.pendingAction == "publish" && s.selectedTopic != nil {
+				actionCmd = s.publishCmd(*s.selectedTopic, s.pendingPublishText)
+			} else if s.pendingAction == "ack" && s.selectedSub != nil {
+				actionCmd = s.ackCmd(*s.selectedSub, s.pulledAckIDs())
+			} else if s.pendingAction == "modify-ack-deadline" && s.selectedSub != nil {
+				actionCmd = s.modifyAckDeadlineCmd(*s.selectedSub, s.pulledAckIDs(), s.pendingAckDeadline)
+			} else if s.pendingAction == "seek" && s.selectedSub != nil {
+				actionCmd = s.seekCmd(*s.selectedSub, s.pendingSeekT)
+			}
+			// Stay on the originating detail view (and keep
+			// pendingAction "delete") until actionResultMsg arrives —
+			// it decides whether to pop back to the list or surface
+			// an error without losing the current selection.
+			s.viewState = s.actionSource
+			return s, actionCmd
+		case "n", "esc", "q":
+			s.viewState = s.actionSource
+			s.pendingAction = ""
+			return s, nil
+		}
+	}
+	return s, nil
+}
+
+func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case components.SpinnerTickMsg:
+		var cmd tea.Cmd
 		s.spinner, cmd = s.spinner.Update(msg)
 		return s, cmd
 
@@ -478,100 +872,8 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		s.viewState = ViewPulledMessages
 		return s, nil
-
 	case actionResultMsg:
-		if s.pendingAction == "grant" {
-			s.pendingAction = ""
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			if s.iamResourceName != "" {
-				return s, tea.Batch(
-					func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} },
-					s.fetchIAMCmd(s.iamResourceType, s.iamResourceName),
-				)
-			}
-			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		if s.pendingAction == "ack" {
-			s.pendingAction = ""
-			s.viewState = ViewDetailSub
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			s.pulledMessages = nil
-			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		if s.pendingAction == "modify-ack-deadline" {
-			s.pendingAction = ""
-			s.viewState = ViewPulledMessages
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		if s.pendingAction == "seek" {
-			s.pendingAction = ""
-			s.viewState = ViewDetailSub
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			return s, func() tea.Msg { return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess} }
-		}
-		if s.pendingAction == "delete" || s.pendingAction == "detach" {
-			action := s.pendingAction
-			s.pendingAction = ""
-			if msg.err != nil {
-				return s, func() tea.Msg {
-					return core.ToastMsg{Message: msg.err.Error(), Type: core.ToastError}
-				}
-			}
-			if action == "delete" {
-				if s.viewState == ViewDetailTopic {
-					s.viewState = ViewListTopics
-					s.selectedTopic = nil
-				} else {
-					s.viewState = ViewListSubs
-					s.selectedSub = nil
-				}
-			}
-			return s, tea.Batch(
-				func() tea.Msg {
-					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
-				},
-				s.Refresh(),
-			)
-		}
-		if msg.err != nil {
-			if s.viewState == ViewUpdate {
-				s.updateForm.SubmitErr = msg.err.Error()
-			} else {
-				s.createForm.SubmitErr = msg.err.Error()
-			}
-			return s, nil
-		}
-		if s.viewState == ViewUpdate {
-			s.viewState = ViewDetailSub
-		} else {
-			s.viewState = s.createReturnView
-		}
-		if msg.msg != "" {
-			return s, tea.Batch(
-				func() tea.Msg {
-					return core.ToastMsg{Message: msg.msg, Type: core.ToastSuccess}
-				},
-				s.Refresh(),
-			)
-		}
-		return s, s.Refresh()
+		return s.handleActionResult(msg)
 
 	case tea.WindowSizeMsg:
 		s.table.HandleWindowSizeDefault(msg)
@@ -580,308 +882,14 @@ func (s *Service) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Forward mouse events to table for click selection
 		if s.viewState == ViewListTopics || s.viewState == ViewListSubs {
 			var updatedTable *components.StandardTable
+			var cmd tea.Cmd
 			updatedTable, cmd = s.table.Update(msg)
 			s.table = updatedTable
 			return s, cmd
 		}
-
 	case tea.KeyMsg:
-		if s.viewState == ViewCreate {
-			result, formCmd := s.createForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = s.createReturnView
-				return s, nil
-			}
-			if result.Submitted {
-				return s, s.submitCreateCmd()
-			}
-			return s, formCmd
-		}
+		return s.handleKeyMsg(msg)
 
-		if s.viewState == ViewUpdate {
-			result, formCmd := s.updateForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewDetailSub
-				return s, nil
-			}
-			if result.Submitted && s.selectedSub != nil {
-				return s, s.updateSubCmd(*s.selectedSub)
-			}
-			return s, formCmd
-		}
-
-		if s.viewState == ViewIAMForm {
-			result, formCmd := s.iamForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewIAM
-				return s, nil
-			}
-			if result.Submitted && s.iamResourceName != "" {
-				s.pendingIAMRole = s.iamForm.Value("Role")
-				s.pendingIAMMember = s.iamForm.Value("Member")
-				s.pendingAction = "grant"
-				s.actionSource = ViewIAM
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-			return s, formCmd
-		}
-
-		if s.viewState == ViewModifyAckDeadlineForm {
-			result, formCmd := s.modifyAckDeadlineForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewPulledMessages
-				return s, nil
-			}
-			if result.Submitted && s.selectedSub != nil {
-				n, _ := strconv.Atoi(s.modifyAckDeadlineForm.Value("Ack Deadline Seconds"))
-				s.pendingAckDeadline = int64(n)
-				s.pendingAction = "modify-ack-deadline"
-				s.actionSource = ViewPulledMessages
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-			return s, formCmd
-		}
-
-		if s.viewState == ViewSeekForm {
-			result, formCmd := s.seekForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewDetailSub
-				return s, nil
-			}
-			if result.Submitted && s.selectedSub != nil {
-				s.pendingSeekT = s.seekForm.Value("Time (RFC3339, or 'now')")
-				s.pendingAction = "seek"
-				s.actionSource = ViewDetailSub
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-			return s, formCmd
-		}
-
-		if s.viewState == ViewPublishForm {
-			result, formCmd := s.publishForm.Update(msg)
-			if result.Cancelled {
-				s.viewState = ViewDetailTopic
-				return s, nil
-			}
-			if result.Submitted && s.selectedTopic != nil {
-				s.pendingPublishText = s.publishForm.Value("Message")
-				s.pendingAction = "publish"
-				s.actionSource = ViewDetailTopic
-				s.viewState = ViewConfirmation
-				return s, nil
-			}
-			return s, formCmd
-		}
-
-		if s.viewState == ViewPulledMessages {
-			switch msg.String() {
-			case "esc", "q":
-				s.viewState = ViewDetailSub
-			case "a": // Ack all pulled messages
-				if s.selectedSub != nil && len(s.pulledMessages) > 0 {
-					s.pendingAction = "ack"
-					s.actionSource = ViewPulledMessages
-					s.viewState = ViewConfirmation
-				}
-			case "m": // Modify ack deadline of all pulled messages
-				if s.selectedSub != nil && len(s.pulledMessages) > 0 {
-					s.modifyAckDeadlineForm = newModifyAckDeadlineForm(*s.selectedSub)
-					s.viewState = ViewModifyAckDeadlineForm
-				}
-			}
-			return s, nil
-		}
-
-		// Handle filter mode (only in list views)
-		if s.viewState == ViewListTopics || s.viewState == ViewListSubs {
-			var result components.FilterUpdateResult
-			if s.viewState == ViewListTopics {
-				result = s.topicFilterSession.HandleKey(msg)
-			} else {
-				result = s.subFilterSession.HandleKey(msg)
-			}
-
-			if result.Handled {
-				if result.Cmd != nil {
-					return s, result.Cmd
-				}
-				if !result.ShouldContinue {
-					return s, nil
-				}
-				// Continue processing other keys
-			}
-		}
-
-		// Root Views (Topics or Subs)
-		if s.viewState == ViewListTopics || s.viewState == ViewListSubs {
-			switch msg.String() {
-			case "r":
-				return s, s.Refresh()
-			case "n": // New topic/subscription (create form)
-				s.createReturnView = s.viewState
-				if s.viewState == ViewListTopics {
-					s.createForm = components.NewForm("New Topic", []components.FormField{
-						{Label: "Topic ID", Placeholder: "my-topic", Required: true},
-					})
-				} else {
-					s.createForm = components.NewForm("New Subscription", []components.FormField{
-						{Label: "Subscription ID", Placeholder: "my-subscription", Required: true},
-						{Label: "Topic", Placeholder: "existing-topic-name", Required: true},
-						{Label: "Ack Deadline Seconds", Default: "10"},
-					})
-				}
-				s.viewState = ViewCreate
-				return s, nil
-			case "s", "]": // Switch to Subs
-				if cmd, ok := s.toSubs(); ok {
-					return s, cmd
-				}
-			case "t", "[": // Switch to Topics
-				if cmd, ok := s.toTopics(); ok {
-					return s, cmd
-				}
-			case "enter":
-				if s.viewState == ViewListTopics {
-					topics := s.getFilteredTopics(s.topics, s.filter.Value())
-					if idx := s.table.Cursor(); idx >= 0 && idx < len(topics) {
-						s.selectedTopic = &topics[idx]
-						s.viewState = ViewDetailTopic
-					}
-				} else {
-					subs := s.getFilteredSubs(s.subs, s.filter.Value())
-					if idx := s.table.Cursor(); idx >= 0 && idx < len(subs) {
-						s.selectedSub = &subs[idx]
-						s.viewState = ViewDetailSub
-					}
-				}
-			}
-			var updatedTable *components.StandardTable
-			updatedTable, cmd = s.table.Update(msg)
-			s.table = updatedTable
-			return s, cmd
-		}
-
-		// Detail Views
-		if s.viewState == ViewDetailTopic || s.viewState == ViewDetailSub {
-			switch msg.String() {
-			case "esc", "q":
-				if s.viewState == ViewDetailTopic {
-					s.viewState = ViewListTopics
-					s.selectedTopic = nil
-				} else {
-					s.viewState = ViewListSubs
-					s.selectedSub = nil
-				}
-				return s, nil
-			case "u":
-				if s.viewState == ViewDetailSub && s.selectedSub != nil {
-					s.updateForm = newSubUpdateForm(*s.selectedSub)
-					s.viewState = ViewUpdate
-				}
-				return s, nil
-			case "x": // Detach (Confirm) — subscriptions only
-				if s.viewState == ViewDetailSub && s.selectedSub != nil {
-					s.pendingAction = "detach"
-					s.actionSource = s.viewState
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			case "d": // Delete (Confirm)
-				if (s.viewState == ViewDetailTopic && s.selectedTopic != nil) ||
-					(s.viewState == ViewDetailSub && s.selectedSub != nil) {
-					s.pendingAction = "delete"
-					s.actionSource = s.viewState
-					s.viewState = ViewConfirmation
-				}
-				return s, nil
-			case "i": // View IAM bindings — topics and subscriptions
-				if s.viewState == ViewDetailTopic && s.selectedTopic != nil {
-					s.iamResourceType = "topic"
-					s.iamResourceName = s.selectedTopic.Name
-					return s, tea.Batch(s.fetchIAMCmd(s.iamResourceType, s.iamResourceName), s.spinner.Start(""))
-				}
-				if s.viewState == ViewDetailSub && s.selectedSub != nil {
-					s.iamResourceType = "subscription"
-					s.iamResourceName = s.selectedSub.Name
-					return s, tea.Batch(s.fetchIAMCmd(s.iamResourceType, s.iamResourceName), s.spinner.Start(""))
-				}
-				return s, nil
-			case "p": // Publish message — topics only
-				if s.viewState == ViewDetailTopic && s.selectedTopic != nil {
-					s.publishForm = newPublishForm(*s.selectedTopic)
-					s.viewState = ViewPublishForm
-				}
-				return s, nil
-			case "P": // Pull without ack — subscriptions only
-				if s.viewState == ViewDetailSub && s.selectedSub != nil {
-					return s, tea.Batch(s.pullCmd(*s.selectedSub), s.spinner.Start(""))
-				}
-				return s, nil
-			case "S": // Seek — subscriptions only
-				if s.viewState == ViewDetailSub && s.selectedSub != nil {
-					s.seekForm = newSeekForm(*s.selectedSub)
-					s.viewState = ViewSeekForm
-				}
-				return s, nil
-			}
-		}
-
-		if s.viewState == ViewIAM {
-			switch msg.String() {
-			case "q", "esc":
-				if s.iamResourceType == "subscription" {
-					s.viewState = ViewDetailSub
-				} else {
-					s.viewState = ViewDetailTopic
-				}
-				return s, nil
-			case "a":
-				if s.iamResourceName != "" {
-					s.iamForm = components.NewIAMAddBindingForm(s.iamResourceName)
-					s.viewState = ViewIAMForm
-				}
-				return s, nil
-			}
-		}
-
-		if s.viewState == ViewConfirmation {
-			switch msg.String() {
-			case "y", "enter":
-				var actionCmd tea.Cmd
-				if s.pendingAction == "delete" {
-					if s.actionSource == ViewDetailTopic && s.selectedTopic != nil {
-						actionCmd = s.deleteTopicCmd(*s.selectedTopic)
-					} else if s.actionSource == ViewDetailSub && s.selectedSub != nil {
-						actionCmd = s.deleteSubCmd(*s.selectedSub)
-					}
-				} else if s.pendingAction == "detach" && s.selectedSub != nil {
-					actionCmd = s.detachSubCmd(*s.selectedSub)
-				} else if s.pendingAction == "grant" && s.iamResourceName != "" {
-					actionCmd = s.addIAMBindingCmd(s.iamResourceType, s.iamResourceName, s.pendingIAMRole, s.pendingIAMMember)
-				} else if s.pendingAction == "publish" && s.selectedTopic != nil {
-					actionCmd = s.publishCmd(*s.selectedTopic, s.pendingPublishText)
-				} else if s.pendingAction == "ack" && s.selectedSub != nil {
-					actionCmd = s.ackCmd(*s.selectedSub, s.pulledAckIDs())
-				} else if s.pendingAction == "modify-ack-deadline" && s.selectedSub != nil {
-					actionCmd = s.modifyAckDeadlineCmd(*s.selectedSub, s.pulledAckIDs(), s.pendingAckDeadline)
-				} else if s.pendingAction == "seek" && s.selectedSub != nil {
-					actionCmd = s.seekCmd(*s.selectedSub, s.pendingSeekT)
-				}
-				// Stay on the originating detail view (and keep
-				// pendingAction "delete") until actionResultMsg arrives —
-				// it decides whether to pop back to the list or surface
-				// an error without losing the current selection.
-				s.viewState = s.actionSource
-				return s, actionCmd
-			case "n", "esc", "q":
-				s.viewState = s.actionSource
-				s.pendingAction = ""
-				return s, nil
-			}
-		}
 	}
 
 	return s, nil

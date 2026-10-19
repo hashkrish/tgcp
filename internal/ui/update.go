@@ -7,8 +7,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yogirk/tgcp/internal/core"
 	"github.com/yogirk/tgcp/internal/services"
-	"github.com/yogirk/tgcp/internal/ui/components"
 	"github.com/yogirk/tgcp/internal/services/overview"
+	"github.com/yogirk/tgcp/internal/ui/components"
 )
 
 // Update handles messages and updates the model
