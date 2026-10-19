@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,6 +35,7 @@ func (c *Client) ListTopics(projectID string) ([]Topic, error) {
 	parent := fmt.Sprintf("projects/%s", projectID)
 
 	err := c.service.Projects.Topics.List(parent).Pages(context.Background(), func(page *pubsub.ListTopicsResponse) error {
+		topics = slices.Grow(topics, len(page.Topics))
 		for _, t := range page.Topics {
 			topics = append(topics, Topic{
 				Name:       shortName(t.Name),
@@ -55,6 +57,7 @@ func (c *Client) ListSubscriptions(projectID string) ([]Subscription, error) {
 	parent := fmt.Sprintf("projects/%s", projectID)
 
 	err := c.service.Projects.Subscriptions.List(parent).Pages(context.Background(), func(page *pubsub.ListSubscriptionsResponse) error {
+		subs = slices.Grow(subs, len(page.Subscriptions))
 		for _, s := range page.Subscriptions {
 			dlTopic := ""
 			if s.DeadLetterPolicy != nil {
