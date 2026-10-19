@@ -3,10 +3,19 @@ package gce
 import (
 	"fmt"
 	"os/exec"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/yogirk/tgcp/internal/utils"
 )
+
+// shellQuote safely escapes a string for use in a shell command
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
 
 // Action messages
 type actionResultMsg struct {
@@ -103,8 +112,15 @@ func (s *Service) SSHCmd(instance Instance) tea.Cmd {
 	// Check for Tmux
 	if utils.IsTmux() {
 		return func() tea.Msg {
-			// Use -- to prevent shell interpretation of arguments
-			tmuxArgs := append([]string{"split-window", "-h", "--", "gcloud"}, args...)
+			// Shell-escape arguments to prevent command injection
+			// in the shell spawned by tmux split-window
+			var quotedArgs []string
+			for _, arg := range args {
+				quotedArgs = append(quotedArgs, shellQuote(arg))
+			}
+
+			// Use -- to prevent tmux from interpreting arguments as flags
+			tmuxArgs := append([]string{"split-window", "-h", "--", "gcloud"}, quotedArgs...)
 			cmd := exec.Command("tmux", tmuxArgs...)
 
 			if err := cmd.Run(); err != nil {
