@@ -319,7 +319,7 @@ func parseRegionalName(name string) (region, id string) {
 }
 
 func splitPath(s string) []string {
-	var parts []string
+	parts := make([]string, 0, strings.Count(s, "/")+1)
 	start := 0
 	for i := 0; i < len(s); i++ {
 		if s[i] == '/' {
