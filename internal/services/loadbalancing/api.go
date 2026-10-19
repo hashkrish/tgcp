@@ -196,6 +196,15 @@ func (c *Client) ListForwardingRules(projectID string) ([]ForwardingRule, error)
 	var result []ForwardingRule
 	req := c.service.ForwardingRules.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.ForwardingRuleAggregatedList) error {
+		count := 0
+		for _, scoped := range page.Items {
+			count += len(scoped.ForwardingRules)
+		}
+
+		if result == nil {
+			result = make([]ForwardingRule, 0, count)
+		}
+
 		for scope, scoped := range page.Items {
 			for _, fr := range scoped.ForwardingRules {
 				result = append(result, ForwardingRule{
