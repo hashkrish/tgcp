@@ -238,9 +238,11 @@ func (s *Service) View() string {
 	} else if len(s.data.Budgets) == 0 {
 		budgetContent = components.EmptyState("budgets")
 	} else {
+		var builder strings.Builder
 		for _, b := range s.data.Budgets {
-			budgetContent += fmt.Sprintf("• %s: %s %s\n", b.Name, b.BudgetAmount, b.CurrencyCode)
+			fmt.Fprintf(&builder, "• %s: %s %s\n", b.Name, b.BudgetAmount, b.CurrencyCode)
 		}
+		budgetContent = builder.String()
 	}
 	budgetSection := cardStyle.Width(s.cardWidth()).Render(
 		lipgloss.JoinVertical(lipgloss.Left,
