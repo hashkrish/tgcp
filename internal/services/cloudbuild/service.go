@@ -750,10 +750,9 @@ func (s *Service) renderDetailView() string {
 		s.selectedItem.ID,
 	)
 
-	rows := []components.KeyValue{
-		{Key: "ID", Value: s.selectedItem.ID},
-		{Key: "Status", Value: components.RenderStatus(s.selectedItem.Status)},
-	}
+	rows := make([]components.KeyValue, 0, 16)
+	rows = append(rows, components.KeyValue{Key: "ID", Value: s.selectedItem.ID})
+	rows = append(rows, components.KeyValue{Key: "Status", Value: components.RenderStatus(s.selectedItem.Status)})
 	if s.selectedItem.StatusDetail != "" {
 		rows = append(rows, components.KeyValue{Key: "Status Detail", Value: s.selectedItem.StatusDetail})
 	}

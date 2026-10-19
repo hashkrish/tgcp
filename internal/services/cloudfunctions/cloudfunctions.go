@@ -14,17 +14,15 @@ import (
 
 const CacheTTL = 60 * time.Second
 
-// TODO(create): Cloud Functions deploy is intentionally NOT implemented in
-// this package's Create pass. Unlike gce/disks/gke/cloudsql/cloudrun, a real
+// Cloud Functions deploy is intentionally NOT implemented.
+// Unlike gce/disks/gke/cloudsql/cloudrun, a real
 // `functions deploy` (v2 Functions.Create / Patch) requires a source code
 // bundle — a GCS object (zip) or a repo/git reference — that the build step
 // actually compiles and runs; there is no "empty" or placeholder source that
 // produces a working function. Wiring a Create form here without a real
 // source upload flow would submit a request that is guaranteed to fail the
 // build, i.e. a broken API call, which this pass explicitly avoids. Full
-// source upload (zip + GCS staging bucket resolution) is out of scope for
-// this minimal Create pass; revisit as a follow-up once that upload flow
-// exists.
+// source upload (zip + GCS staging bucket resolution) is out of scope.
 
 // -----------------------------------------------------------------------------
 // Models & Msgs
