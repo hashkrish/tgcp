@@ -12,10 +12,9 @@
 // (trigger type/detail, runtime, memory/CPU, entry point, source location,
 // env var count) that the Cloud Run "Functions" tab does not.
 //
-// Create/Update remain out of scope (see the app's TODO reference table for
-// why); Delete and the `call` Lifecycle action (added via the v1 API purely
-// to invoke an existing Gen1 function — see CallFunction's doc comment for
-// why v1 rather than v2) are both implemented.
+// Create/Update remain out of scope; Delete and the `call` Lifecycle action
+// (added via the v1 API purely to invoke an existing Gen1 function — see
+// CallFunction's doc comment for why v1 rather than v2) are both implemented.
 package cloudfunctions
 
 import (

@@ -3,6 +3,7 @@ package spanner
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	spannerdata "cloud.google.com/go/spanner"
@@ -14,6 +15,12 @@ import (
 // queryRowLimit caps how many rows ExecuteQuery renders, mirroring the
 // row-limiting behavior of Cloud SQL's "Execute SQL" data-plane feature.
 const queryRowLimit = 200
+
+// writeKeywordRe matches SQL keywords that mutate data or schema. It is
+// checked against the whole statement body (not just its prefix) so that a
+// disallowed write hidden inside a CTE -- e.g.
+// `WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x` -- is still caught.
+var writeKeywordRe = regexp.MustCompile(`(?i)\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|replace|merge|call|lock|unlock|set|begin|commit|rollback|copy|vacuum|analyze|reindex|comment|into\s+outfile)\b`)
 
 // validateReadOnlySQL rejects anything but a single SELECT/WITH query,
 // matching the read-only guard cloudsql.ValidateReadOnlySQL provides for
@@ -31,6 +38,9 @@ func validateReadOnlySQL(stmt string) error {
 	lower := strings.ToLower(body)
 	if !strings.HasPrefix(lower, "select") && !strings.HasPrefix(lower, "with") {
 		return fmt.Errorf("only SELECT/WITH statements are allowed")
+	}
+	if writeKeywordRe.MatchString(lower) {
+		return fmt.Errorf("statement contains a disallowed write keyword")
 	}
 	return nil
 }

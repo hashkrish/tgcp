@@ -1034,7 +1034,6 @@ func (s *Service) handleKeyMsg(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (s *Service) handleViewListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	_ = cmd
 	switch msg.String() {
 	case "r":
 		return s, s.fetchInstancesCmd(true)
@@ -1201,7 +1200,6 @@ func (s *Service) handleViewDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (s *Service) handleViewDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	_ = cmd
 	switch msg.String() {
 	case "q", "esc":
 		s.viewState = ViewDetail
@@ -1232,8 +1230,6 @@ func (s *Service) handleViewDatabasesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (s *Service) handleViewDatabaseCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	_ = cmd
 	result, fcmd := s.dbCreateForm.Update(msg)
 	if result.Cancelled {
 		s.viewState = ViewDatabases
@@ -1249,7 +1245,6 @@ func (s *Service) handleViewDatabaseCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cm
 
 func (s *Service) handleViewUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	_ = cmd
 	switch msg.String() {
 	case "q", "esc":
 		s.viewState = ViewDetail
@@ -1280,8 +1275,6 @@ func (s *Service) handleViewUsersKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (s *Service) handleViewUserCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	_ = cmd
 	result, fcmd := s.userCreateForm.Update(msg)
 	if result.Cancelled {
 		s.viewState = ViewUsers
@@ -1297,7 +1290,6 @@ func (s *Service) handleViewUserCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (s *Service) handleViewBackupsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	_ = cmd
 	switch msg.String() {
 	case "q", "esc":
 		s.viewState = ViewDetail
@@ -1314,8 +1306,6 @@ func (s *Service) handleViewBackupsKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (s *Service) handleViewCloneKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	_ = cmd
 	result, fcmd := s.cloneForm.Update(msg)
 	if result.Cancelled {
 		s.viewState = ViewDetail
@@ -1414,8 +1404,6 @@ func (s *Service) handleViewConfirmationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)
 }
 
 func (s *Service) handleViewCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	_ = cmd
 	result, fcmd := s.createForm.Update(msg)
 	if result.Cancelled {
 		s.viewState = ViewList
@@ -1430,8 +1418,6 @@ func (s *Service) handleViewCreateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (s *Service) handleViewUpdateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	_ = cmd
 	result, fcmd := s.updateForm.Update(msg)
 	if result.Cancelled {
 		s.viewState = ViewList
@@ -1447,8 +1433,6 @@ func (s *Service) handleViewUpdateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (s *Service) handleViewQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-	_ = cmd
 	result, fcmd := s.queryForm.Update(msg)
 	if result.Cancelled {
 		s.viewState = ViewDetail
@@ -1468,7 +1452,6 @@ func (s *Service) handleViewQueryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (s *Service) handleViewQueryResultKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
-	_ = cmd
 	switch msg.String() {
 	case "esc", "q":
 		s.viewState = ViewDetail
