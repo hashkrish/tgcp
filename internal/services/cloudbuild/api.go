@@ -195,7 +195,7 @@ func (c *Client) FetchBuildLogTail(ctx context.Context, logsBucket, buildID stri
 	if err != nil {
 		return "", offset, fmt.Errorf("read build log: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	data, err := io.ReadAll(r)
 	if err != nil {
