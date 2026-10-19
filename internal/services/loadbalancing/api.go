@@ -16,6 +16,7 @@ package loadbalancing
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -93,6 +94,7 @@ func (c *Client) ListHealthChecks(projectID string) ([]HealthCheck, error) {
 	req := c.service.HealthChecks.AggregatedList(projectID)
 	err := req.Pages(context.Background(), func(page *compute.HealthChecksAggregatedList) error {
 		for scope, scoped := range page.Items {
+			result = slices.Grow(result, len(scoped.HealthChecks))
 			for _, hc := range scoped.HealthChecks {
 				port, checkType := healthCheckPortAndType(hc)
 				result = append(result, HealthCheck{
